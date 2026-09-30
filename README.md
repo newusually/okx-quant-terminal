@@ -19,6 +19,14 @@
 ## 二、快速开始
 
 ```bat
+:: 0) 准备配置文件（模板里密钥是空的，从没提交过真实密钥）
+copy configs\okx_strategy.example.json configs\okx_strategy.json
+
+:: 填密钥：推荐用环境变量，密钥不落盘
+set OKX_API_KEY=你的key
+set OKX_SECRET_KEY=你的secret
+set OKX_PASSPHRASE=你的passphrase
+
 :: 一次性：注册 Windows 服务（需管理员）—— OKXMySQL / OKXApache / OKXWeb 全注册
 scripts\install_services.bat
 
@@ -51,7 +59,12 @@ http://localhost/
 ```
 
 三层严格单向依赖，`handler` 不写 SQL、`repo` 不做业务判断。
-详细说明见 [`docs/架构说明.md`](docs/架构说明.md)，策略口径见 [`docs/策略说明.md`](docs/策略说明.md)。
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/项目详情.md`](docs/项目详情.md) | **文件清单 / 表结构 / 接口 / 配置全量索引**（找「这个文件干嘛的」看这里） |
+| [`docs/架构说明.md`](docs/架构说明.md) | 分层设计、依赖方向、准入规则、加仓口径、K 线分页、验收记录 |
+| [`docs/策略说明.md`](docs/策略说明.md) | 交易链路与资金口径 |
 
 ## 四、目录速览
 
@@ -63,11 +76,11 @@ internal/
   repo/         数据层：MySQL 仓储 + OKX SDK
   model/        共享实体
   conf/ logx/   配置热加载 / 日志
-configs/        策略配置 okx_strategy.json（改完自动热加载）
+configs/        策略配置（模板 okx_strategy.example.json；真正生效的 okx_strategy.json 不入库）
 conf/           MySQL 配置 my.ini
 web/assets/     前端（币安风格 K 线 + AJAX）
 scripts/        一键脚本
-docs/           文档
+docs/           文档（项目详情 / 架构说明 / 策略说明）
 ```
 
 ## 五、合约准入规则
@@ -123,8 +136,11 @@ go run ./cmd/anncheck              # 公告接口连通性
 
 ## 九、注意事项
 
-* `api.json` 内含真实 API Key，**已在 .gitignore 中排除**，请勿提交。
-* `mysql/` `apache/` `runtime/` `bin/` `logs/` 均为本地产物，不入库。
+* **密钥永不入库**：`configs/okx_strategy.json`（含 OKX `api_key/secret_key/passphrase`）
+  与 `api.json` **都已在 .gitignore 中排除**，请勿提交。
+  仓库里只有脱敏模板 `configs/okx_strategy.example.json`。
+  密钥优先从环境变量读：`OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` / `OKX_FLAG`。
+* `mysql/` `apache/` `runtime/` `bin/` `logs/` `tmp/` 均为本地产物，不入库。
 * OKX 密钥只勾选 **读取 + 交易**，永远不要勾提现。
 * 首次跑请保持 `configs/okx_strategy.json` 的 `dry_run: true`，只算信号不下单。
 
