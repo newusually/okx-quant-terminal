@@ -469,22 +469,20 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		//    颜色用金色（主题强调色）而不是红/绿：红绿在 K 线上已经被
 		//    「涨/跌」占用了，再拿来表示买卖只会看串。
 		if sigs, serr := s.db.SignalsInRange(inst, bar, fromTs, toTs); serr == nil {
-			// 信号「去密」：实盘闸门里有 cooldown_bars —— 同一合约两次开仓之间
-			// 至少要隔 N 根 K 线。所以相邻一串 bar 里，真正会成交的只有第一条，
-			// 剩下的都会被「冷却中」挡掉。图上如果不过同一道闸门，就会出现
-			// 「一排火箭」的假象（看着要连买十几次，其实一次都不会）。
-			cool := 0
-			if s.strategy != nil {
-				cool = s.strategy.Entry.CooldownBars
-			}
-			lastSigTs := int64(0)
+			// 去密：**同一根 K 线**上的重复信号只留一条 —— 避免「一根 K 线
+			// 底下叠一排火箭」那种看起来像 bug 的画面。
+			//
+			// 不同 K 线的信号全保留。之前按 cooldown_bars（6 根）跨度过滤，
+			// 把「实盘不会成交的那些」也一并抹掉了，结果图上只剩零星几个点，
+			// 用户以为是数据丢了。冷却本来就只是下单闸门的事，和「这根 K 线
+			// 出没出过信号」无关，图上应该如实显示。
+			lastSigTs := int64(-1)
 			for _, sg := range sigs {
 				if sg.Score <= 0 {
 					continue
 				}
-				if cool > 0 && barMs > 0 && lastSigTs > 0 &&
-					sg.Ts-lastSigTs < int64(cool)*barMs {
-					continue
+				if sg.Ts == lastSigTs {
+					continue // 同一根重复
 				}
 				lastSigTs = sg.Ts
 				m := map[string]any{
