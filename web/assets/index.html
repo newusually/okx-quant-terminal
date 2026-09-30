@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OKX 全合约量化终端</title>
+<link rel="stylesheet" href="/assets/style.css" />
+<script src="/assets/lib/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+<!-- ============ 顶栏 ============ -->
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">OKX</span>
+    <span class="brand-name">全合约量化终端</span>
+    <span class="tag">纯 Go · MySQL</span>
+  </div>
+
+  <div class="stats" id="topStats">
+    <div class="stat"><label>账户权益</label><b id="stEquity">--</b></div>
+    <div class="stat"><label>持仓</label><b id="stPos">0</b></div>
+    <div class="stat"><label>今日盈亏</label><b id="stTodayPnl">0.00</b></div>
+    <div class="stat"><label>总盈亏</label><b id="stPnl">0.00</b></div>
+    <div class="stat"><label>胜率</label><b id="stWin">--</b></div>
+    <div class="stat"><label>K线行数</label><b id="stKline">0</b></div>
+    <div class="stat"><label>合约</label><b id="stInst">0</b></div>
+    <div class="stat"><label>计划仓位</label><b id="stMargin" class="accent">--</b></div>
+  </div>
+
+  <div class="conn" id="conn"><i></i><span>连接中</span></div>
+</header>
+
+<!-- ============ 行情滚动条 ============ -->
+<div class="ticker-wrap"><div class="ticker" id="tickerTape"></div></div>
+
+<!-- ============ 主体 ============ -->
+<main class="layout">
+
+  <!-- 左：合约选择（默认只列「可交易」合约，可切到「全部」看被排除的原因） -->
+  <aside class="panel side">
+    <div class="panel-head">
+      <span>合约列表</span>
+      <span class="muted" id="instCount">0</span>
+    </div>
+    <div class="scope-group" id="scopeGroup">
+      <button class="scope active" data-scope="tradeable">可交易</button>
+      <button class="scope" data-scope="excluded">被排除</button>
+      <button class="scope" data-scope="all">全部</button>
+    </div>
+    <div class="search-box">
+      <input id="instSearch" type="text" placeholder="搜索合约，如 BTC / ETH / SOL" autocomplete="off" />
+    </div>
+    <div class="uni-summary muted" id="uniSummary"></div>
+    <div class="inst-list" id="instList"></div>
+  </aside>
+
+  <!-- 中：图表 -->
+  <section class="panel center">
+    <div class="chart-head">
+      <div class="pair">
+        <span class="pair-name" id="pairName">--</span>
+        <span class="pair-inst muted" id="pairInst">请选择合约</span>
+      </div>
+      <div class="pair-price">
+        <b id="pairPrice">--</b>
+        <span id="pairChg" class="chg flat">--</span>
+      </div>
+      <div class="pair-ohlc muted" id="pairOhlc"></div>
+
+      <div class="tf-group" id="tfGroup"></div>
+
+      <button class="btn" id="btnBackfill" title="回补该合约当前周期至少一个月的K线">回补一个月</button>
+      <button class="btn ghost" id="btnRefresh">刷新</button>
+    </div>
+
+    <div class="chart-box">
+      <div id="chart"></div>
+      <div class="chart-hint" id="chartHint">加载中…</div>
+    </div>
+
+    <div class="chart-foot">
+      <span class="dot up"></span> 涨
+      <span class="dot down"></span> 跌
+      <span class="sep"></span>
+      <span id="covInfo" class="muted">--</span>
+      <span class="sep"></span>
+      <span id="bfInfo" class="muted">--</span>
+    </div>
+  </section>
+
+  <!-- 右：合约信息 -->
+  <aside class="panel side right">
+    <div class="panel-head"><span>合约信息</span></div>
+    <div class="kv" id="instInfo"></div>
+
+    <div class="panel-head sub"><span>数据服务</span></div>
+    <div class="kv" id="svcInfo"></div>
+
+    <div class="panel-head sub"><span>数据库</span></div>
+    <div class="tbl-wrap small"><table id="tblTables"><tbody></tbody></table></div>
+  </aside>
+</main>
+
+<!-- ============ 下方表格区 ============ -->
+<section class="panel tables">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="positions">当前持仓 <i id="badgePos">0</i></button>
+    <button class="tab" data-tab="history">历史仓位 <i id="badgeHis">0</i></button>
+    <button class="tab" data-tab="signals">信号 <i id="badgeSig">0</i></button>
+    <button class="tab" data-tab="backfill">回补进度 <i id="badgeBf">0</i></button>
+    <button class="tab" data-tab="pnl">权益曲线</button>
+  </div>
+
+  <div class="tab-body" id="tabPositions">
+    <div class="tbl-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>合约</th><th>方向</th><th>张数</th><th>开仓价</th><th>标记价</th><th>强平价</th>
+          <th>保证金</th><th>杠杆</th><th>名义价值</th><th>未实现盈亏</th><th>收益率</th>
+          <th>止盈价</th><th>持仓时长</th><th>信号</th>
+        </tr></thead>
+        <tbody id="tbPositions"><tr><td colspan="14" class="empty">暂无持仓</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tab-body hidden" id="tabHistory">
+    <div class="tbl-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>合约</th><th>方向</th><th>张数</th><th>开仓价</th><th>平仓价</th>
+          <th>保证金</th><th>杠杆</th><th>盈亏(U)</th><th>盈亏%</th><th>平仓原因</th>
+          <th>开仓时间</th><th>平仓时间</th>
+        </tr></thead>
+        <tbody id="tbHistory"><tr><td colspan="12" class="empty">暂无平仓记录</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tab-body hidden" id="tabSignals">
+    <div class="tbl-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>合约</th><th>周期</th><th>信号时间</th><th>收盘价</th><th>共振</th>
+          <th>命中因子</th><th>RSI</th><th>TD</th><th>状态</th><th>说明</th>
+        </tr></thead>
+        <tbody id="tbSignals"><tr><td colspan="10" class="empty">暂无信号</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tab-body hidden" id="tabBackfill">
+    <div class="tbl-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>合约</th><th>周期</th><th>已入库</th><th>覆盖天数</th><th>起始时间</th>
+          <th>最新时间</th><th>状态</th><th>说明</th>
+        </tr></thead>
+        <tbody id="tbBackfill"><tr><td colspan="8" class="empty">暂无回补任务</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tab-body hidden" id="tabPnl">
+    <div class="pnl-box"><div id="pnlChart"></div><div class="empty" id="pnlEmpty">暂无权益快照（策略引擎运行时每分钟写入）</div></div>
+  </div>
+</section>
+
+<footer class="foot">
+  <span id="footLeft">OKX 全合约量化终端 · 纯 Go 后端 + MySQL</span>
+  <span id="footRight"></span>
+</footer>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>
