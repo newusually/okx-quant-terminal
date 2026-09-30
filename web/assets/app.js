@@ -860,6 +860,38 @@ async function selectInst(instId) {
   await loadKline(true);
 }
 
+// jumpToInst 从下方表格（信号 / 持仓 / 历史）点合约名 → 直接切 K 线过去。
+//
+// 为什么要先放宽 scope：这些表里的合约未必在当前左侧列表（默认只看
+// 「可交易」，而信号可能是被排除的合约，或者今天准入结论变了）。不先
+// 放宽，就会出现「图切过去了、左边列表却找不到它高亮」的割裂感。
+async function jumpToInst(instId, bar) {
+  if (!instId) return;
+  if (bar && BAR_MS[bar]) {
+    state.curBar = bar;
+    renderTimeframes();
+  }
+  if (!state.insts.some((x) => x.instId === instId)) {
+    state.scope = 'all';
+    document.querySelectorAll('.scope').forEach((b) =>
+      b.classList.toggle('active', b.dataset.scope === 'all'));
+    try {
+      await loadInstruments();
+    } catch (e) { /* 列表拉不到也不影响画图，/api/mark 不依赖它 */ }
+  }
+  await selectInst(instId);
+  // 图表在页面上半部分，滚回去用户才看得到
+  const box = document.querySelector('.chart-box');
+  if (box && box.scrollIntoView) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  else window.scrollTo({ top: 0, behavior: 'smooth' });
+  // 闪一下边框，明确告诉用户「切到这张图了」
+  const panel = document.querySelector('main .center');
+  if (panel) {
+    panel.classList.add('jump-flash');
+    setTimeout(() => panel.classList.remove('jump-flash'), 1200);
+  }
+}
+
 // loadKline(reset)
 //   reset=true  → 重新载入最新一页（换合约 / 换周期 / 手动刷新）
 //   reset=false → 定时刷新，只把最新一页并进来（已加载的老数据保留）
@@ -1034,7 +1066,7 @@ async function loadPositions() {
     }
 
     return `<tr>
-      <td title="${esc(p.instId)}">${esc(p.name || p.instId)}</td>
+      <td><a class="inst-link" href="#" data-inst="${esc(p.instId)}" title="点开 ${esc(p.instId)} 的 K 线图">${esc(p.name || p.instId)}</a></td>
       <td><span class="tag-pill pill-${dir}">${dir === 'long' ? '多' : '空'}</span></td>
       <td>${fmtNum(p.sz, 0)}</td>
       <td>${fmtPrice(p.entryPx)}</td>
@@ -1068,7 +1100,7 @@ async function loadHistory() {
   tb.innerHTML = rows.map((t) => {
     const dir = (t.side || 'buy').toLowerCase() === 'sell' ? 'short' : 'long';
     return `<tr>
-      <td title="${esc(t.instId)}">${esc(t.name || t.instId)}</td>
+      <td><a class="inst-link" href="#" data-inst="${esc(t.instId)}" title="点开 ${esc(t.instId)} 的 K 线图">${esc(t.name || t.instId)}</a></td>
       <td><span class="tag-pill pill-${dir}">${dir === 'long' ? '多' : '空'}</span></td>
       <td>${fmtNum(t.sz, 0)}</td>
       <td>${fmtPrice(t.entryPx)}</td>
@@ -1096,7 +1128,7 @@ async function loadSignals() {
   const actedText = (a) => a === 1 ? '<span class="tag-pill pill-ok">已下单</span>'
     : (a === 2 ? '<span class="tag-pill pill-err">被拦</span>' : '<span class="tag-pill">仅记录</span>');
   tb.innerHTML = rows.map((s) => `<tr>
-      <td>${esc(s.name || s.instId)}</td>
+      <td><a class="inst-link" href="#" data-inst="${esc(s.instId)}" data-bar="${esc(s.bar || '')}" title="点开 ${esc(s.instId)} 的 K 线图">${esc(s.name || s.instId)}</a></td>
       <td>${esc(s.bar)}</td>
       <td class="muted">${fmtTime(s.ts)}</td>
       <td>${fmtPrice(s.close)}</td>
@@ -1205,6 +1237,16 @@ function bindEvents() {
       $('bfInfo').textContent = '回补失败：' + e.message;
     }
   };
+
+  // 表格里的合约名可点：直接切到那个合约的 K 线图。
+  // 绑在 document 上做委托，信号 / 持仓 / 历史三张表共用一套逻辑，
+  // 以后再加表格不用重复绑。
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a.inst-link');
+    if (!a) return;
+    e.preventDefault();
+    jumpToInst(a.dataset.inst, a.dataset.bar).catch(() => {});
+  });
 
   $('tabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');

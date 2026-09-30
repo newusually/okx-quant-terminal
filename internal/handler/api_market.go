@@ -441,17 +441,20 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		if barMs <= 0 {
 			barMs = 15 * 60 * 1000
 		}
+		// ⚠ 单位必须是「秒」：图表里 K 线的 time 是 Math.floor(ts/1000)，
+		// 而这里 ts / 成交时间都是毫秒。不除 1000 的话标记会落在几万年后，
+		// 图表直接整批丢弃 → 表现就是「历史信号一个火箭都不显示」。
 		snap := func(ts int64) int64 {
 			if ts <= 0 {
 				return 0
 			}
-			return ts - ts%barMs
+			return (ts - ts%barMs) / 1000
 		}
 
 		// 只保留「确实有这根 K 线」的时间点，否则标记会被图表丢掉或报错
 		hasBar := make(map[int64]bool, len(pg.Rows))
 		for _, k := range pg.Rows {
-			hasBar[k.Ts] = true
+			hasBar[k.Ts/1000] = true
 		}
 		push := func(m map[string]any) {
 			t, _ := m["time"].(int64)
@@ -466,10 +469,24 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		//    颜色用金色（主题强调色）而不是红/绿：红绿在 K 线上已经被
 		//    「涨/跌」占用了，再拿来表示买卖只会看串。
 		if sigs, serr := s.db.SignalsInRange(inst, bar, fromTs, toTs); serr == nil {
+			// 信号「去密」：实盘闸门里有 cooldown_bars —— 同一合约两次开仓之间
+			// 至少要隔 N 根 K 线。所以相邻一串 bar 里，真正会成交的只有第一条，
+			// 剩下的都会被「冷却中」挡掉。图上如果不过同一道闸门，就会出现
+			// 「一排火箭」的假象（看着要连买十几次，其实一次都不会）。
+			cool := 0
+			if s.strategy != nil {
+				cool = s.strategy.Entry.CooldownBars
+			}
+			lastSigTs := int64(0)
 			for _, sg := range sigs {
 				if sg.Score <= 0 {
 					continue
 				}
+				if cool > 0 && barMs > 0 && lastSigTs > 0 &&
+					sg.Ts-lastSigTs < int64(cool)*barMs {
+					continue
+				}
+				lastSigTs = sg.Ts
 				m := map[string]any{
 					"time": snap(sg.Ts), "position": "belowBar", "shape": "arrowUp",
 					"color": "#fcd535", "text": "🚀", "size": 2,

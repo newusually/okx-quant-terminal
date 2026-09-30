@@ -371,3 +371,40 @@ table.data td.empty { text-align: center; color: var(--muted); padding: 26px; fo
   .layout { grid-template-columns: 220px minmax(0, 1fr); }
   .right { display: none; }
 }
+
+/* ------------------------------------------------------------------ */
+/* 表格里的合约名 → 可点跳 K 线                                           */
+/* ------------------------------------------------------------------ */
+
+/* 做成「链接」的样子但不用浏览器默认蓝：# 号 + 下划线太吵，
+   用主题强调色 + 虚线下划线，hover 时实线并轻微发亮。 */
+.data a.inst-link {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.data a.inst-link::after {
+  content: '↗';
+  font-size: 10px;
+  margin-left: 3px;
+  color: var(--muted);
+  opacity: .55;
+  transition: opacity .12s, color .12s;
+}
+.data a.inst-link:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.data a.inst-link:hover::after { opacity: 1; color: var(--accent); }
+
+/* 点击后闪一下图表边框，明确告诉用户「图已经切到这个合约了」 */
+@keyframes jumpFlash {
+  0%   { box-shadow: 0 0 0 0 rgba(252, 213, 53, .55); }
+  100% { box-shadow: 0 0 0 10px rgba(252, 213, 53, 0); }
+}
+main .center.jump-flash {
+  animation: jumpFlash .6s ease-out 2;
+  border-color: var(--accent) !important;
+}
