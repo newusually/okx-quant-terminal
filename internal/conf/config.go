@@ -48,8 +48,9 @@ type ExitCfg struct {
 	MaxHoldBars int `json:"max_hold_bars"`
 
 	// MaxHoldMinutes 超时平仓（按「分钟」算）。>0 时优先于 MaxHoldBars。
-	// 默认 60 —— 也就是「开仓满 1 小时还没到止盈线就自动平掉」，
-	// 免得仓位在里面耗着占额度。
+	// 默认 240 —— 也就是「开仓满 4 小时还没到止盈线就自动平掉」，
+	// 免得仓位在里面耗着占额度。实时巡检每 3 秒判一次，到点立刻市价出。
+	// 这是「不设止损」口径下第二条主动离场通道（第一条是布林上轨）。
 	MaxHoldMinutes int `json:"max_hold_minutes"`
 
 	StopLossPct float64 `json:"stop_loss_pct"`
@@ -346,7 +347,7 @@ func defaultConfig() *Config {
 			MarginPolicy: "min_one", MaxMarginUSDT: 0.5,
 		},
 		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
-			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
+			MaxHoldBars: 0, MaxHoldMinutes: 240, StopLossPct: 0},
 		// 加仓：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3（不超过 max_margin_usdt）
 		Addon: &AddonCfg{
 			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: "15m",
@@ -591,7 +592,7 @@ func fillDefaults(c *Config) {
 	if c.Exit == nil {
 		c.Exit = d.Exit
 	} else if c.Exit.MaxHoldMinutes <= 0 && c.Exit.MaxHoldBars <= 0 {
-		// 两个都没填 → 用默认的「1 小时超时」
+		// 两个都没填 → 用默认的「4 小时超时」
 		c.Exit.MaxHoldMinutes = d.Exit.MaxHoldMinutes
 	}
 

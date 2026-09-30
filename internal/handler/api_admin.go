@@ -51,10 +51,11 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) (any, er
 	if err != nil {
 		return nil, err
 	}
-	covs, err := s.db.CoverageAll()
-	if err != nil {
-		return nil, err
-	}
+	// 覆盖情况走进程内缓存（10 分钟刷一次）。
+	// 老实现是 CoverageAll()，对 476 个合约各发一条 GROUP BY —— kline 分区后
+	// 无法按 inst_id 裁剪分区，一条 SQL 就要扫 20 个分区，整请求 10~20 秒；
+	// 前端每 2 秒轮询就把 mysqld 的一颗核跑满了。详见 repo/coverage.go。
+	covs := s.db.CoverageAllCached()
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {

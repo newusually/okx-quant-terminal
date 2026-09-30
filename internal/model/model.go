@@ -166,6 +166,31 @@ type TradeRow struct {
 	AINote   string  `json:"ai_note"`
 }
 
+// TradeEventRow 交易事件流水（开仓 / 加仓 / 平仓），一次一笔。
+//
+// 为什么必须单独一张表：
+//   trade 表里**一个仓位只占一行**，加仓是「就地合并」进原行的 ——
+//   张数、加权均价、保证金都被覆盖成合并后的值，所以「每次加仓在什么时间、
+//   什么价格、加了多少钱」在 trade 表里根本留不下来。
+//
+// 而 K 线图上要按时间点标出「买入 / 加仓 / 平仓」，历史里要能翻出
+// 「这笔单子的交易记录详情」，都必须有一次一笔的流水。这张表就是它。
+type TradeEventRow struct {
+	InstID   string  `json:"inst_id"`
+	Kind     string  `json:"kind"`   // open / addon / close
+	Ts       int64   `json:"ts"`     // 事件时间（毫秒）
+	Px       float64 `json:"px"`     // 成交价
+	Sz       float64 `json:"sz"`     // 张数
+	Margin   float64 `json:"margin"` // 保证金 USDT —— 「买入多少美金」就是这个数
+	Leverage int     `json:"leverage"`
+	Pnl      float64 `json:"pnl"`    // 平仓盈亏（仅 close）
+	PnlPct   float64 `json:"pnl_pct"`
+	Score    int     `json:"score"`
+	Reason   string  `json:"reason"`
+	OrdID    string  `json:"ord_id"`
+	TradeID  int64   `json:"trade_id"`
+}
+
 // CloseRow 平仓（引擎侧写入）
 type CloseRow struct {
 	ID      int64   `json:"id"`
@@ -207,7 +232,8 @@ type OpenPos struct {
 // 这样出场逻辑（止盈 / 布林上轨）不用改也能拿到正确的均价。
 type AddonRow struct {
 	ID          int64   `json:"id"`
-	Sz          float64 `json:"sz"`           // 合并后的总张数
+	InstID      string  `json:"inst_id"` // 写 trade_event 流水要用（K 线标记按合约查）
+	Sz          float64 `json:"sz"`      // 合并后的总张数
 	EntryPx     float64 `json:"entry_px"`     // 合并后的加权开仓均价
 	Margin      float64 `json:"margin"`       // 合并后的总保证金
 	AddSz       float64 `json:"add_sz"`       // 本次加仓张数
@@ -215,6 +241,7 @@ type AddonRow struct {
 	AddMargin   float64 `json:"add_margin"`   // 本次加仓保证金
 	AddonCount  int     `json:"addon_count"`  // 累计加仓次数
 	AddonMargin float64 `json:"addon_margin"` // 累计加仓保证金
+	Leverage    int     `json:"leverage"`     // 杠杆（写流水用）
 	LastAddonTs int64   `json:"last_addon_ts"`
 	OrdID       string  `json:"ord_id"`
 	Reason      string  `json:"reason"`
@@ -342,6 +369,8 @@ type StorePayload struct {
 	Equity       []EquityRow       `json:"equity,omitempty"`
 	Runlog       []RunLogRow       `json:"runlog,omitempty"`
 	CloseTrade   *CloseRow         `json:"close_trade,omitempty"`
+	// Event 交易事件流水（开仓/加仓/平仓），K 线标记与历史交易详情的数据源
+	Event []TradeEventRow `json:"event,omitempty"`
 }
 
 // RunLogRow 一条运行日志（写进 SQLite 的 runlog 表）

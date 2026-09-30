@@ -23,6 +23,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"finally-main/internal/logx"
 	"finally-main/internal/model"
 )
 
@@ -47,16 +48,32 @@ type MySQLConfig struct {
 	ReadTimeout  time.Duration // 读超时，默认 60s
 	WriteTimeout time.Duration // 写超时，默认 60s
 
+	// LongDDL 只给维护路径用（-partition / -repartition）。
+	// 为 true 时 DSN 里的 readTimeout/writeTimeout 设成 0，
+	// 否则整表重建跑到 60 秒会被驱动掐断连接（见 DSN 的注释）。
+	LongDDL bool
+
 	BatchSize int // 批量写入的分片大小，默认 500
 }
 
 // DefaultMySQLConfig 本机默认配置（与 conf/my.ini、scripts/init_db.sql 一致）
+//
+// ★ 连接池为什么收这么小（2 逻辑核 / 1.97GB 的机器）：
+//
+//	老配置 MaxOpen=64 / MaxIdle=32，实测 processlist 长期挂着 55 条连接
+//	（52 条 Sleep）。MySQL 每条连接 = 一个 OS 线程，线程数量在 2 核机器上
+//	直接换算成上下文切换开销；而这台机器上真正并发的查询本来就只有几个
+//	（引擎巡检、ticker 落库、网页轮询），64 个并发连接纯属浪费。
+//	MaxIdle=4 + 60 秒自动回收，让「闲置线程」自己消失。
+//
+//	注意：连接池不是「越大越抗压」。上一轮全站雪崩（查询 8~20 秒）恰恰是
+//	连接池被慢查询占满导致的 —— 池子越大，堆积的慢查询越多，雪崩越猛。
 func DefaultMySQLConfig() MySQLConfig {
 	return MySQLConfig{
 		Host: "127.0.0.1", Port: 3306,
 		User: "okx", Password: "OkxQuant2026", Database: "okx",
-		MaxOpenConns: 64, MaxIdleConns: 32,
-		ConnMaxLife: 30 * time.Minute, ConnMaxIdle: 5 * time.Minute,
+		MaxOpenConns: 16, MaxIdleConns: 4,
+		ConnMaxLife: 30 * time.Minute, ConnMaxIdle: 60 * time.Second,
 		Timeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second,
 		BatchSize: 500,
 	}
@@ -114,7 +131,17 @@ func (c *MySQLConfig) normalize() {
 // interpolateParams=true 是这个项目性能的关键：
 // 驱动会在本地把参数拼进 SQL 再发，省掉 Prepare→Execute→Close 三个往返。
 // 参数由驱动自己转义，注入安全。
+//
+// LongDDL=true 时把 readTimeout / writeTimeout 设成 0（=不超时）。
+// 为什么需要这个开关：`ALTER TABLE kline PARTITION BY ...` 是整表重建，
+// 421MB 在本机要跑 3~5 分钟，而日常 DSN 里 readTimeout=60s —— 时间一到
+// 驱动直接断开连接，服务端看到的是一次「客户端不见了」，重建白做。
+// 日常查询仍然保留超时（连接卡死能被及时发现），只有维护路径关掉它。
 func (c MySQLConfig) DSN() string {
+	readTO, writeTO := dur(c.ReadTimeout), dur(c.WriteTimeout)
+	if c.LongDDL {
+		readTO, writeTO = "0", "0"
+	}
 	return fmt.Sprintf(
 		"%s:%s@tcp(%s:%d)/%s"+
 			"?charset=utf8mb4&collation=utf8mb4_general_ci"+
@@ -124,7 +151,7 @@ func (c MySQLConfig) DSN() string {
 			"&maxAllowedPacket=67108864"+
 			"&clientFoundRows=false",
 		c.User, c.Password, c.Host, c.Port, c.Database,
-		dur(c.Timeout), dur(c.ReadTimeout), dur(c.WriteTimeout))
+		dur(c.Timeout), readTO, writeTO)
 }
 
 func dur(d time.Duration) string {
@@ -240,6 +267,40 @@ var schemaStmts = []string{
 		msg   TEXT,
 		PRIMARY KEY (id),
 		KEY ix_runlog_ts (ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
+
+	// ---- 交易事件流水（开仓 / 加仓 / 平仓，一次一笔）----
+	//
+	// trade 表一个仓位只有一行，加仓是就地合并进原行的，所以「每次加仓
+	// 在什么时间、什么价格、加了多少钱」在原表里留不下来。K 线图上要按
+	// 时间点标出买入/加仓/平仓、历史里要能翻交易记录详情，都靠这张流水表。
+	//
+	// 唯一键 (inst_id, kind, ts, trade_id) 是幂等保护：引擎重放同一批事件不会写重。
+	//
+	// 为什么必须带 trade_id：OKX 一笔大单会拆成多笔成交，这些成交的 fillTime
+	// 经常落在同一毫秒。只用 (inst_id, kind, ts) 时，同毫秒的后续成交会被
+	// ON DUPLICATE KEY UPDATE 吃掉 —— 实测 100 笔成交只入库 49 条。
+	// 程序自己产生的事件 trade_id=0，等价于原先的粒度，不受影响。
+	`CREATE TABLE IF NOT EXISTS trade_event (
+		id      BIGINT NOT NULL AUTO_INCREMENT,
+		inst_id VARCHAR(32) NOT NULL,
+		kind    VARCHAR(12) NOT NULL,
+		ts      BIGINT NOT NULL,
+		px      DOUBLE DEFAULT 0,
+		sz      DOUBLE DEFAULT 0,
+		margin  DOUBLE DEFAULT 0,
+		leverage INT   DEFAULT 0,
+		pnl     DOUBLE DEFAULT 0,
+		pnl_pct DOUBLE DEFAULT 0,
+		score   INT    DEFAULT 0,
+		reason  VARCHAR(255) DEFAULT '',
+		ord_id  VARCHAR(64)  DEFAULT '',
+		trade_id BIGINT DEFAULT 0,
+		created_at BIGINT DEFAULT 0,
+		PRIMARY KEY (id),
+		UNIQUE KEY uk_event (inst_id, kind, ts, trade_id),
+		KEY ix_event_inst_ts (inst_id, ts),
+		KEY ix_event_ts (ts)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
 
 	// ---- 键值元数据 ----
@@ -389,6 +450,15 @@ func (d *DB) Init() error {
 	if err := d.migrate(); err != nil {
 		return err
 	}
+	// 索引同步放在最后：表/列都齐了再建，避免「列还不存在」的假失败。
+	if n, msgs, err := d.applyIndexPlan(); err != nil {
+		return err
+	} else if len(msgs) > 0 {
+		logx.Logf("INFO", "[INDEX] 索引同步：新建/重建 %d 条", n)
+		for _, m := range msgs {
+			logx.Logf("INFO", "[INDEX]   %s", m)
+		}
+	}
 	return nil
 }
 
@@ -413,7 +483,23 @@ func (d *DB) migrate() error {
 	if err := d.renameTableIfExists("signal", "signals"); err != nil {
 		return err
 	}
+	// 唯一键迁移：trade_event 的 uk_event 从 (inst_id, kind, ts) 扩到带上 trade_id。
+	// 原因见 schemaStmts 里的注释：同毫秒多笔成交会互相覆盖。
+	// MySQL 8 的 DROP/ADD INDEX 是 INPLACE + LOCK=NONE，不会阻塞引擎写入。
+	if err := d.ensureUniqueIndex("trade_event", "uk_event",
+		[]string{"inst_id", "kind", "ts", "trade_id"}); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ensureUniqueIndex 保证 table 上存在名为 index 的唯一索引，且列清单完全等于 cols。
+//
+// 实现统一走 indexes.go 的 syncIndex（同一套「比对 information_schema → 缺则建、
+// 列不对则重建」的逻辑），避免这里和 indexPlan 两处各写一份、日后分叉。
+func (d *DB) ensureUniqueIndex(table, index string, cols []string) error {
+	_, err := d.syncIndex(idxDef{Table: table, Name: index, Unique: true, Cols: cols})
+	return err
 }
 
 func (d *DB) ensureColumn(table, col, def string) error {
@@ -487,47 +573,77 @@ func (d *DB) Path() string {
 func (d *DB) DBName() string { return d.cfg.Database }
 
 // Tables 列出所有表
+// Tables 所有基础表的表名（按名字排序）
+//
+// 走元数据缓存：information_schema 实测 2.4 秒（要打开 data dictionary），
+// 表结构几乎不变，缓存 5 分钟。
 func (d *DB) Tables() ([]string, error) {
-	rows, err := d.sql.Query(
-		`SELECT table_name FROM information_schema.tables
-		 WHERE table_schema = DATABASE() AND table_type='BASE TABLE'
-		 ORDER BY table_name`)
+	metas, err := d.tableMeta()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
+	out := make([]string, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, m.Name)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // TableCounts 每张表的行数
 //
-// 用 information_schema 的估算值会不准，这里对 kline 用精确 COUNT、
-// 其余小表也精确 COUNT（都是百万级以下，可接受）。
+// ★ 2026-10-01 二次修复：**所有表**都只读进程内缓存，请求路径上一条 COUNT 都不发。
+//
+//	原来只给「大表」走缓存，小表（meta / signal_scan_state / equity …）每次请求
+//	都实时 COUNT。看起来毫秒级很便宜，实际上：
+//	  · 慢查询日志里 `SELECT COUNT(*) FROM \`meta\`` 出现了 302 次、
+//	    `... signal_scan_state` 276 次、`... equity` 149 次
+//	  · 这些表在 IO 争抢（回补批量写 kline）时，光是「打开表 + 拿一次快照」
+//	    就能超过 long_query_time
+//	  · 而 /api/state /api/tables 是被前端高频轮询的
+//	结论：只要在请求路径上，COUNT 就不该出现 —— 行数是展示值，缓存 10 分钟无感。
+//
+// 缓存未预热时返回缓存里已有的（可能缺几张表），并顺手触发一次后台刷新。
 func (d *DB) TableCounts() (map[string]int64, error) {
 	tabs, err := d.Tables()
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]int64, len(tabs))
+	miss := 0
 	for _, t := range tabs {
 		if !safeIdent(t) {
 			continue
 		}
+		if n, ok := d.RowCount(t); ok {
+			out[t] = n
+			continue
+		}
+		miss++
+		// 缓存里彻底没有（进程刚起、还没预热完）才实时数一次。
+		// 热态下永远走不到这里。
 		var n int64
 		if err := d.sql.QueryRow("SELECT COUNT(*) FROM `" + t + "`").Scan(&n); err != nil {
 			return nil, err
 		}
 		out[t] = n
 	}
+	if miss > 0 && rowCache.busy.CompareAndSwap(false, true) {
+		go func() {
+			defer rowCache.busy.Store(false)
+			d.refreshRowCountsLocked()
+		}()
+	}
 	return out, nil
+}
+
+// isBigRowTable 判断是否是需要走缓存的大表
+func isBigRowTable(t string) bool {
+	for _, b := range bigRowTables {
+		if b == t {
+			return true
+		}
+	}
+	return false
 }
 
 // safeIdent 表名白名单校验（表名来自 information_schema，仍然防一手）

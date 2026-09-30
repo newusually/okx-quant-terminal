@@ -277,11 +277,13 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 		} else if cfg.Exit.StopLossPct > 0 && pnlPct <= -cfg.Exit.StopLossPct {
 			reason = fmt.Sprintf("止损 %.2f%%", pnlPct)
 		} else if cfg.Exit.MaxHoldMinutes > 0 {
-			// 超时平仓（按分钟，默认 60 分钟）：
-			// 开仓满一小时还没够到止盈线就撤，别让仓位一直占着并发额度。
+			// 超时平仓（按分钟，默认 240 = 4 小时）：
+			// 开仓满 4 小时还没够到止盈线就撤，别让仓位一直占着并发额度。
 			// 用「分钟」而不是「根」是因为 1H 图和 15m 图的 4 根完全不是一个时长。
+			// 实时巡检每 exit_sec（默认 3 秒）跑一次，到点立刻市价出，
+			// 不用等下一根 K 线收盘 —— 这是「不设止损」下第二条主动离场通道。
 			if nowMs-p.OpenTs >= int64(cfg.Exit.MaxHoldMinutes)*60000 {
-				reason = fmt.Sprintf("超时 %d 分钟未止盈", cfg.Exit.MaxHoldMinutes)
+				reason = fmt.Sprintf("超时 %s 未止盈", HoldText(cfg.Exit.MaxHoldMinutes))
 			}
 		} else if cfg.Exit.MaxHoldBars > 0 {
 			dur := BarDurationMs(p.Bar)
@@ -339,7 +341,15 @@ func closeOne(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 		ID: p.ID, ExitPx: px, Pnl: pnl, PnlPct: pnlPct,
 		Reason: reason, CloseTs: time.Now().UnixMilli(), OrdID: ordID,
 	}
-	if err := store.Ingest(repo.StorePayload{CloseTrade: &row}); err != nil {
+	if err := store.Ingest(repo.StorePayload{
+		CloseTrade: &row,
+		// 平仓流水：图上标「平仓」并带出平仓价与盈亏美金。
+		Event: []repo.TradeEventRow{{
+			InstID: p.InstID, Kind: "close", Ts: row.CloseTs, Px: px,
+			Sz: p.Sz, Margin: p.Margin, Leverage: p.Leverage,
+			Pnl: pnl, PnlPct: pnlPct, Reason: reason, OrdID: ordID, TradeID: p.ID,
+		}},
+	}); err != nil {
 		logx.Logf("WARN", "写平仓记录失败：%v", err)
 	}
 	logx.Logf("SIGNAL", "平仓 %s 张数=%s 开仓价=%.6f 平仓价=%.6f 盈亏=%+.4fU(%+.2f%%) 原因=%s",
@@ -510,12 +520,21 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 		}
 
 		reason := fmt.Sprintf("8因子共振 %d/8（%s）", s.Score, s.HitList)
-		if err := store.Ingest(repo.StorePayload{Trade: []repo.TradeRow{{
-			InstID: s.InstID, Side: "buy", Sz: sz, EntryPx: s.Close,
-			Margin: marginUsed, Leverage: cfg.Entry.Leverage,
-			OpenTs: s.Ts, Score: s.Score, Bar: s.Bar, Reason: reason,
-			OrdID: ordID, Status: "open", AINote: aiNote,
-		}}}); err != nil {
+		if err := store.Ingest(repo.StorePayload{
+			Trade: []repo.TradeRow{{
+				InstID: s.InstID, Side: "buy", Sz: sz, EntryPx: s.Close,
+				Margin: marginUsed, Leverage: cfg.Entry.Leverage,
+				OpenTs: s.Ts, Score: s.Score, Bar: s.Bar, Reason: reason,
+				OrdID: ordID, Status: "open", AINote: aiNote,
+			}},
+			// 事件流水：K 线图上的「买入」标记 + 历史交易记录详情都读它。
+			// 带上 margin（买入多少美金）和张数，图上的提示框才有东西可显示。
+			Event: []repo.TradeEventRow{{
+				InstID: s.InstID, Kind: "open", Ts: s.Ts, Px: s.Close,
+				Sz: sz, Margin: marginUsed, Leverage: cfg.Entry.Leverage,
+				Score: s.Score, Reason: reason, OrdID: ordID,
+			}},
+		}); err != nil {
 			logx.Logf("WARN", "写成交失败：%v", err)
 		}
 
@@ -668,6 +687,20 @@ func normalizeBar(s string) string {
 
 func hasKeys(cfg *conf.Config) bool {
 	return cfg.OKX != nil && cfg.OKX.APIKey != "" && cfg.OKX.SecretKey != "" && cfg.OKX.Passphrase != ""
+}
+
+// HoldText 把「超时平仓」的分钟数说成人话：240 → "4 小时"、90 → "90 分钟"。
+//
+// 落库的平仓原因、日志、网页展示都用它，保证三处口径一模一样
+// （以前是一处写「60 分钟」、一处写「1 小时」，对不上）。
+func HoldText(minutes int) string {
+	if minutes <= 0 {
+		return "不超时"
+	}
+	if minutes%60 == 0 && minutes >= 60 {
+		return fmt.Sprintf("%d 小时", minutes/60)
+	}
+	return fmt.Sprintf("%d 分钟", minutes)
 }
 
 func accountOrNew(a *Account) *Account {

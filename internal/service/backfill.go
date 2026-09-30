@@ -13,9 +13,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"finally-main/internal/model"
+	"finally-main/internal/perf"
 	"finally-main/internal/repo"
 )
 
@@ -101,6 +103,10 @@ type BackfillManager struct {
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 
+	// lastTickers 最近一轮行情快照。SyncVolumes 跑在 60 秒的慢节奏上，
+	// 直接复用这里的数据，不用为了更新成交额再拉一次全市场行情。
+	lastTickers atomic.Pointer[[]model.Ticker]
+
 	logf func(string, ...any)
 }
 
@@ -168,6 +174,9 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 		m.logf("⚠ 行情快照同步失败：%v", err)
 	} else {
 		m.logf("✓ 行情快照已入库")
+	}
+	if err := m.SyncVolumes(); err != nil {
+		m.logf("⚠ 回写 24h 成交额失败：%v", err)
 	}
 
 	// 回补协程
@@ -385,26 +394,45 @@ func (m *BackfillManager) SyncInstruments() error {
 }
 
 // SyncTickers 拉全市场行情写入 ticker 表
+//
+// ★ 2026-10-01 拆分：成交额回写（UpdateVolumes）从每轮 5 秒放宽到每 60 秒。
+//   原因见 realtimeLoop：inst 上两个二级索引 + 480 行更新，实测平均 3.1 秒一轮，
+//   而它只服务于「按热度排序」和「成交额 <100 万不买」这两件事，不需要 5 秒新鲜度。
 func (m *BackfillManager) SyncTickers() error {
 	list, err := m.feed.FetchTickers()
 	if err != nil {
 		return err
 	}
-	// 1) 行情快照落库（480 行，一条多行 upsert）
+	// 行情快照落库（480 行，一条多行 upsert）
 	if _, err := m.db.UpsertTickers(list); err != nil {
 		return err
 	}
-	// 2) 顺手把 24h 成交额回写到 inst 表，保证下拉框按热度排序是最新的。
-	//    480 行单事务更新，十几毫秒，直接同步做掉 —— 异步的话
-	//    （比如 -init-only 立即退出）会丢掉这次更新。
+	// 缓存一份给 SyncVolumes 用，省掉 60 秒那一轮重复拉行情
+	m.lastTickers.Store(&list)
+	return nil
+}
+
+// SyncVolumes 把最近一次行情里的 24h 成交额回写到 inst 表
+//
+// 单独成函数是为了让它跑在更慢的节奏上（60 秒），逻辑上属于「合约静态信息刷新」
+// 而不是「实时行情」。取不到上一轮行情就自己拉一次，保证启动路径也能用。
+func (m *BackfillManager) SyncVolumes() error {
+	var list []model.Ticker
+	if p := m.lastTickers.Load(); p != nil {
+		list = *p
+	}
+	if list == nil {
+		var err error
+		list, err = m.feed.FetchTickers()
+		if err != nil {
+			return err
+		}
+	}
 	vols := make([]model.Instrument, 0, len(list))
 	for _, t := range list {
 		vols = append(vols, model.Instrument{InstID: t.InstID, QuoteVol24h: t.QuoteVol24h})
 	}
-	if err := m.db.UpdateVolumes(vols); err != nil {
-		m.logf("WARN", "回写 24h 成交额失败：%v", err)
-	}
-	return nil
+	return m.db.UpdateVolumes(vols)
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +731,14 @@ func (m *BackfillManager) realtimeLoop() {
 	defer tick.Stop()
 
 	seconds := 0
+	// volEvery 把「每 60 秒回写成交额」换算成「每多少轮」，
+	// 用轮数而不是 seconds%60 判断：RealtimeSec 未必整除 60，
+	// 用余数判断会出现「永远不触发」的静默 bug。
+	volEvery := 60 / m.cfg.RealtimeSec
+	if volEvery < 1 {
+		volEvery = 1
+	}
+	volTick := 0
 
 	for {
 		select {
@@ -710,21 +746,44 @@ func (m *BackfillManager) realtimeLoop() {
 			return
 		case <-tick.C:
 			seconds += m.cfg.RealtimeSec
-			if err := m.SyncTickers(); err != nil {
-				m.logf("⚠ 实时行情落库失败：%v", err)
+			volTick++
+			perf.Count1("feed.realtime.tick")
+			{
+				done := perf.Track("feed.syncTickers")
+				if err := m.SyncTickers(); err != nil {
+					m.logf("⚠ 实时行情落库失败：%v", err)
+				}
+				done()
 			}
 
+			// 每 60 秒回写一次 24h 成交额。
+			//
+			// ★ 为什么从 5 秒改成 60 秒：inst 上有 ix_inst_tradeable_vol /
+			//   ix_inst_category_vol 两个二级索引，480 行更新要维护近千条索引项；
+			//   实测它把 SyncTickers 拖到平均 3.1 秒一轮，而这项数据只用于
+			//   「按热度排序」和「成交额 <100 万不买」，一分钟一次完全够。
+			if volTick%volEvery == 0 {
+				done := perf.Track("feed.syncVolumes")
+				if err := m.SyncVolumes(); err != nil {
+					m.logf("⚠ 回写 24h 成交额失败：%v", err)
+				}
+				done()
+			}
 			// 每 30 秒扫一遍「已经该出新一根」的 (合约,周期)，内部按周期节流，
 			// 所以 15m/1H/4H 这些并不会真的每 30 秒发一次请求。
 			if seconds%30 == 0 {
+				done := perf.Track("feed.refreshLatest")
 				m.refreshLatestKlines()
+				done()
 			}
 			// 每 6 小时把库里最老的数据裁一次；保留量按 cfg.Days 天算，
 			// 保证每轮回补完之后每个周期都还覆盖至少一个月。
 			if seconds%(3600*6) == 0 && seconds > 0 {
+				done := perf.Track("db.cleanupKlines")
 				if n, err := m.db.CleanupKlines(m.cfg.Days); err == nil && n > 0 {
 					m.logf("滚动清理：删除 %d 根过老 K 线（保留最近 %d 天）", n, m.cfg.Days)
 				}
+				done()
 			}
 		}
 	}

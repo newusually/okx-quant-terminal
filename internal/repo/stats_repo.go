@@ -2,10 +2,15 @@ package repo
 
 // stats_repo.go —— 前端顶部条用的汇总统计（MySQL 版）
 //
-// 顶部条 10 个数字，每 30 秒拉一次。
-// 单条查询都是 COUNT / SUM 走索引；kline 行数走的是聚簇索引全扫，
-// 3000 万行在 InnoDB 里约 0.5~2 秒 —— 所以下面用 information_schema
-// 的估算值给 kline，避免每次刷新都全表扫一遍。
+// 顶部条 10 个数字，/api/account 每 2 秒拉一次、/api/state 每 10 秒拉一次。
+//
+// ⚠ 性能红线（2026-10-01 事故）：
+//   除 kline 之外的 SUM / COUNT 都走索引，实际耗时都在毫秒级；
+//   唯独 `COUNT(*) FROM kline` 是 400 万行的索引全扫，实测 7.76 秒。
+//   它曾经被写在这条每 2 秒执行一次的热路径上 → 请求堆积 → 全站雪崩。
+//   现在 kline 行数只读 rowcount.go 里的进程内缓存，这里永不出现全表 COUNT。
+//
+//   所以：**在这个函数里新增任何统计前，先确认它能走索引。**
 
 import (
 	"database/sql"
@@ -36,16 +41,15 @@ func (d *DB) Stats() (Stats, error) {
 	if s.InstCount, err = d.count("SELECT COUNT(*) FROM inst"); err != nil {
 		return s, err
 	}
-	// kline 行数用估算值：information_schema 里的 TABLE_ROWS 对这个量级的表
-	// 误差 <5%，但耗时从「秒级」降到「毫秒级」
-	var est sql.NullInt64
-	_ = d.sql.QueryRow(
-		`SELECT table_rows FROM information_schema.tables
-		 WHERE table_schema=DATABASE() AND table_name='kline'`).Scan(&est)
-	s.KlineRows = est.Int64
-	if s.KlineRows == 0 {
-		// 估算拿不到（比如刚建表）就精确数一次
-		s.KlineRows, _ = d.count("SELECT COUNT(*) FROM kline")
+	// kline 行数：只读进程内缓存（见 rowcount.go 顶部的事故复盘）。
+	//
+	// 绝对不要在这里退化成 `SELECT COUNT(*) FROM kline`：
+	//   · information_schema 的 table_rows 在本机恒为 0（统计信息失效），
+	//     老代码正是靠「估算为 0 就精确数一次」把全表扫描引进了热路径；
+	//   · 400 万行全扫 7.76 秒，而这条路径每 2 秒被调一次。
+	// 缓存没预热好就先显示 0，前端那格是「展示用」的，不影响任何决策。
+	if n, ok := d.RowCount("kline"); ok {
+		s.KlineRows = n
 	}
 	if s.SignalsToday, err = d.count("SELECT COUNT(*) FROM signals WHERE ts >= ?", today0); err != nil {
 		return s, err
@@ -72,33 +76,29 @@ func (d *DB) Stats() (Stats, error) {
 }
 
 // TableStats 每张表的行数 + 占用空间（客户端「数据库」面板展示）
+//
+// 走元数据缓存：information_schema 要打开 data dictionary，实测 2.4 秒，
+// 而表结构几乎不变。大表行数用 RowCount 的真实计数覆盖估算值。
 func (d *DB) TableStats() ([]map[string]any, error) {
-	rows, err := d.sql.Query(`
-		SELECT table_name,
-		       COALESCE(table_rows,0),
-		       COALESCE(data_length,0),
-		       COALESCE(index_length,0)
-		FROM information_schema.tables
-		WHERE table_schema = DATABASE() AND table_type='BASE TABLE'
-		ORDER BY (COALESCE(data_length,0)+COALESCE(index_length,0)) DESC`)
+	metas, err := d.tableMeta()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
-		var name string
-		var nRows, dataLen, idxLen int64
-		if err := rows.Scan(&name, &nRows, &dataLen, &idxLen); err != nil {
-			return nil, err
+	out := make([]map[string]any, 0, len(metas))
+	for _, m := range metas {
+		nRows := m.Rows
+		// 估算值不准（本机 kline 恒为 0），能用真实缓存就用
+		if real, ok := d.RowCount(m.Name); ok {
+			nRows = real
 		}
 		out = append(out, map[string]any{
-			"table": name, "rows": nRows,
-			"dataMB":  float64(dataLen) / 1048576.0,
-			"indexMB": float64(idxLen) / 1048576.0,
+			"table":   m.Name,
+			"rows":    nRows,
+			"dataMB":  float64(m.DataLen) / 1048576.0,
+			"indexMB": float64(m.IndexLen) / 1048576.0,
 		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // EquitySnap 最近一条账户权益快照（顶栏「权益 / 可用 / 浮盈」的数据源）

@@ -44,6 +44,8 @@ type (
 	EquityRow = model.EquityRow
 	// CloseRow 平仓
 	CloseRow = model.CloseRow
+	// TradeEventRow 交易事件流水（开仓 / 加仓 / 平仓，一次一笔）
+	TradeEventRow = model.TradeEventRow
 	// StorePayload 一批要写库的数据
 	StorePayload = model.StorePayload
 	// RunLogRow 一条运行日志
@@ -159,7 +161,7 @@ func (s *Store) Ingest(p StorePayload) error {
 	if !s.enabled() {
 		return nil
 	}
-	if len(p.Kline)+len(p.Signal)+len(p.SignalUpdate)+len(p.Trade)+len(p.Equity)+len(p.Runlog) == 0 && p.CloseTrade == nil {
+	if len(p.Kline)+len(p.Signal)+len(p.SignalUpdate)+len(p.Trade)+len(p.Equity)+len(p.Runlog)+len(p.Event) == 0 && p.CloseTrade == nil {
 		return nil
 	}
 	db, err := s.open()
@@ -280,12 +282,35 @@ func (s *Store) Ingest(p StorePayload) error {
 			return err
 		}
 	}
+	// ---- 交易事件流水：开仓 / 加仓 / 平仓，一次一笔 ----
+	//
+	// K 线图上的「买入 / 加仓 / 平仓」标记、历史里的「交易记录详情」都读这张表。
+	// 唯一键 (inst_id, kind, ts) + upsert 保证引擎重放同一批事件不会写重。
+	if len(p.Event) > 0 {
+		args := make([][]any, 0, len(p.Event))
+		for _, r := range p.Event {
+			ts := r.Ts
+			if ts == 0 {
+				ts = now
+			}
+			kind := r.Kind
+			if kind == "" {
+				kind = "open"
+			}
+			args = append(args, []any{r.InstID, kind, ts, r.Px, r.Sz, r.Margin,
+				r.Leverage, r.Pnl, r.PnlPct, r.Score, r.Reason, r.OrdID, r.TradeID, now})
+		}
+		if _, err := db.bulkUpsert("trade_event",
+			[]string{"inst_id", "kind", "ts", "px", "sz", "margin", "leverage",
+				"pnl", "pnl_pct", "score", "reason", "ord_id", "trade_id", "created_at"},
+			args,
+			[]string{"px", "sz", "margin", "leverage", "pnl", "pnl_pct", "score",
+				"reason", "ord_id", "trade_id"}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
-
-// ---------------------------------------------------------------------------
-// 读取
-// ---------------------------------------------------------------------------
 
 // OpenPositions 读在持仓。对应老的 db.py openpositions。
 func (s *Store) OpenPositions() ([]OpenPos, error) {
@@ -340,6 +365,24 @@ func (s *Store) ApplyAddon(a AddonRow) error {
 	if ts <= 0 {
 		ts = time.Now().UnixMilli()
 	}
+
+	// ★ 写一条加仓流水。
+	//
+	// trade 表是「一个仓位一行」的合并视图，加仓会把张数/均价/保证金覆盖掉，
+	// 所以每次加仓的成交价和金额只有这里留得下来 —— K 线图上的「加仓」标记、
+	// 历史里的交易记录详情，全靠这条流水。
+	if a.InstID != "" {
+		if _, e := db.sql.Exec(`INSERT INTO trade_event
+			(inst_id,kind,ts,px,sz,margin,leverage,pnl,pnl_pct,score,reason,ord_id,trade_id,created_at)
+			VALUES (?,?,?,?,?,?,?,0,0,0,?,?,?,?)
+			ON DUPLICATE KEY UPDATE px=VALUES(px), sz=VALUES(sz), margin=VALUES(margin),
+			                        leverage=VALUES(leverage), reason=VALUES(reason), ord_id=VALUES(ord_id)`,
+			a.InstID, "addon", ts, a.AddPx, a.AddSz, a.AddMargin, a.Leverage,
+			a.Reason, a.OrdID, a.ID, time.Now().UnixMilli()); e != nil {
+			return fmt.Errorf("写加仓流水失败：%w", e)
+		}
+	}
+
 	return s.Ingest(StorePayload{Runlog: []RunLogRow{{
 		Ts: ts, Level: "SIGNAL",
 		Msg: fmt.Sprintf("加仓 #%d 张数=%s 价格=%.6f 保证金=%.4fU 累计加仓=%d 次/%.4fU 订单=%s 原因=%s",

@@ -34,7 +34,7 @@ type StrategyExit struct {
 	TakeProfitPct float64 `json:"take_profit_pct"`
 	BollUpperExit bool    `json:"boll_upper_exit"`
 	// MaxHoldMinutes 超时平仓（分钟）。>0 时优先于 MaxHoldBars。
-	// 用户口径：开仓满 60 分钟还没止盈就自动平掉。
+	// 用户口径：开仓满 240 分钟（4 小时）还没止盈就自动市价平掉。
 	MaxHoldMinutes int     `json:"max_hold_minutes"`
 	MaxHoldBars    int     `json:"max_hold_bars"`
 	StopLossPct    float64 `json:"stop_loss_pct"`
@@ -101,7 +101,7 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
 			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 8,
 			CooldownBars: 6, DailyMaxEntries: 30, MarginPolicy: "min_one", MaxMarginUSDT: 0.5},
-		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 60},
+		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 240},
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
 			RiseBar: "15m", MaxTimes: 3, CloseWhenFull: true},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},

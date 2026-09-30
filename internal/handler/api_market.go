@@ -7,11 +7,37 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"finally-main/internal/model"
 	"finally-main/internal/service"
 )
+
+// ---------------------------------------------------------------------------
+// 金额格式化（K 线图上的标记文字用）
+// ---------------------------------------------------------------------------
+
+// fmtUSDT 金额格式化：0.1 → "0.10U"；100 → "100U"。
+// 用户要求标记上直接写「买入多少美金」，所以这里把 USDT 当成展示单位。
+func fmtUSDT(v float64) string {
+	if v <= 0 {
+		return "0U"
+	}
+	if v >= 100 {
+		return strconv.FormatFloat(v, 'f', 0, 64) + "U"
+	}
+	return strconv.FormatFloat(v, 'f', 2, 64) + "U"
+}
+
+// fmtSignedUSDT 带符号的金额：+0.02U / -0.03U（平仓盈亏用）
+func fmtSignedUSDT(v float64) string {
+	s := fmtUSDT(math.Abs(v))
+	if v >= 0 {
+		return "+" + s
+	}
+	return "-" + s
+}
 
 // ---------------------------------------------------------------------------
 // /api/state
@@ -26,7 +52,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 
 	// ---- 账户快照：顶栏「权益 / 可用 / 本金 / 浮盈 / 总盈亏」的数据源 ----
 	// 口径与 /api/account 完全一致（同一个函数），两处不会打架。
-	account := s.AccountSnapshot()
+	// ⚠ 复用上面已经算好的 st：以前这里会再调一次 Stats()，
+	//   等于同一次请求把 trade/signals 的聚合查询做了两遍。
+	account := s.snapshot(st)
 
 	return map[string]any{
 		"ok":           true,
@@ -286,9 +314,10 @@ func (s *Server) klineWindow(inst, bar string, days int, beforeTs int64, limit i
 		pg.EarliestTs = first
 		pg.HasMore = pg.FirstTs > first && pg.FirstTs > 0
 	}
-	if cov, err := s.db.Coverage(inst, bar); err == nil {
-		pg.TotalBars = cov.Count
-	}
+	// 走 20 秒 SWR 缓存：命中零 DB 往返，过期先返回旧值再后台刷。
+	// 前端轮询 /api/kline 时同一对 (inst,bar) 会被反复读，这里能省掉大量重复扫描。
+	cov := s.db.CoverageCached(inst, bar)
+	pg.TotalBars = cov.Count
 	return pg, nil
 }
 
@@ -310,7 +339,7 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 	}
 
 	// 不够一个月就排队去补（异步，不阻塞这次请求）
-	cov, _ := s.db.Coverage(inst, bar)
+	cov := s.db.CoverageCached(inst, bar)
 	needBackfill := false
 	if auto {
 		if cov.Count == 0 || cov.Days < float64(days)-0.5 {
@@ -502,29 +531,44 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 			}
 		}
 
-		// ② 实际成交：开仓 = 小火箭（K 线下方朝上），平仓 = 小绿叶（K 线上方朝下）
-		if trs, terr := s.db.TradesInRange(inst, fromTs, toTs); terr == nil {
-			for _, t := range trs {
-				if t.OpenTs >= fromTs && t.OpenTs <= toTs {
+		// ② 交易事件流水：开仓 / 加仓 / 平仓，一次一笔
+		//
+		//    这里读的是 trade_event 而不是 trade —— trade 表「一个仓位一行」，
+		//    加仓是就地合并进原行的（张数/均价/保证金被覆盖），所以它**根本
+		//    没有「加仓」这个时间点**，图上自然也就标不出加仓。
+		//
+		//    标记文字直接写金额，鼠标扫一眼就知道这笔买了多少钱：
+		//      开仓 = 金色火箭「买入 0.10U」
+		//      加仓 = 蓝色箭头「加仓 0.03U」
+		//      平仓 = 绿叶「平仓 +0.02U」（亏损用灰，因为红在图上代表涨）
+		if evs, eerr := s.db.EventsInRange(inst, fromTs, toTs); eerr == nil {
+			for _, e := range evs {
+				switch e.Kind {
+				case "open":
 					push(map[string]any{
-						"time": snap(t.OpenTs), "position": "belowBar", "shape": "arrowUp",
-						"color": "#fcd535", "text": "🚀", "size": 2,
-						"kind": "open", "price": t.EntryPx, "sz": t.Sz,
-						"margin": t.Margin, "leverage": t.Leverage, "id": t.ID,
-						"ts": t.OpenTs,
+						"time": snap(e.Ts), "position": "belowBar", "shape": "arrowUp",
+						"color": "#fcd535", "text": "买入 " + fmtUSDT(e.Margin), "size": 2,
+						"kind": "open", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
+						"leverage": e.Leverage, "score": e.Score, "id": e.ID, "ts": e.Ts,
 					})
-				}
-				if t.CloseTs > 0 && t.CloseTs >= fromTs && t.CloseTs <= toTs {
-					col := "#0ecb81" // 绿=赚了
-					if t.Pnl < 0 {
-						col = "#848e9c" // 灰=亏了（别用红，红在图上表示涨）
+				case "addon":
+					push(map[string]any{
+						"time": snap(e.Ts), "position": "belowBar", "shape": "arrowUp",
+						"color": "#3b82f6", "text": "加仓 " + fmtUSDT(e.Margin), "size": 1,
+						"kind": "addon", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
+						"leverage": e.Leverage, "id": e.ID, "ts": e.Ts,
+					})
+				case "close":
+					col := "#0ecb81" // 绿 = 赚了
+					if e.Pnl < 0 {
+						col = "#848e9c" // 灰 = 亏了（别用红，红在图上表示涨）
 					}
 					push(map[string]any{
-						"time": snap(t.CloseTs), "position": "aboveBar", "shape": "arrowDown",
-						"color": col, "text": "🍃", "size": 2,
-						"kind": "close", "price": t.ExitPx, "pnl": t.Pnl,
-						"pnlPct": t.PnlPct, "reason": t.Reason, "id": t.ID,
-						"ts": t.CloseTs,
+						"time": snap(e.Ts), "position": "aboveBar", "shape": "arrowDown",
+						"color": col, "text": "平仓 " + fmtSignedUSDT(e.Pnl), "size": 2,
+						"kind": "close", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
+						"pnl": e.Pnl, "pnlPct": e.PnlPct, "reason": e.Reason,
+						"id": e.ID, "ts": e.Ts,
 					})
 				}
 			}
@@ -539,7 +583,7 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 
 	// 覆盖情况（「覆盖 N 天 / N 根」脚标）。前端 mergePage 直接读
 	// j.coverage.days / j.coverage.count，缺了这个就会一直显示 0。
-	cov, _ := s.db.Coverage(inst, bar)
+	cov := s.db.CoverageCached(inst, bar)
 
 	return map[string]any{
 		"ok":       true,

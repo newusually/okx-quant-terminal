@@ -39,7 +39,93 @@ const state = {
 
   // ---- 账户（顶栏实时数字）----
   account: null,
+
+  // ---- 分页 ----
+  // ⚠ 分页现在是**服务端**做的：每次只把当前这一页拉回来，不再整批下载。
+  // 每张表各自记住当前页和每页条数，切 tab 回来还是原来那页。
+  // 各 tab 的 total 由接口返回（列表里只有当前页，不能用 length 当总数）。
+  pgs: {},
+  historyRows: [],      // 历史仓位：当前页
+  eventRows: [],        // 交易明细：当前页
+  signalRows: [],       // 信号：当前页
+  bfRows: [],           // 回补：当前页
+  evKind: '',           // 交易明细的动作过滤：'' | open | addon | close
 };
+
+// 每页条数可选项
+const PG_SIZES = [20, 50, 100];
+
+// pgState 取（或初始化）某张表的分页状态
+function pgState(key) {
+  if (!state.pgs[key]) state.pgs[key] = { page: 1, size: 20 };
+  return state.pgs[key];
+}
+
+// pgSlice 按当前页切一段出来。
+//
+// ⚠ 现在的分页是**服务端**做的（/api/history 等直接返回当前页），
+// 所以 total 必须由调用方从响应里传进来 —— 不能再用 rows.length 当总数，
+// 那只是「当前这一页的条数」，会让分页条永远显示 1/1。
+function pgSlice(key, rows, total) {
+  const st = pgState(key);
+  const t = (typeof total === 'number' && total >= 0) ? total : rows.length;
+  const pages = Math.max(1, Math.ceil(t / st.size));
+  if (st.page > pages) st.page = pages;
+  if (st.page < 1) st.page = 1;
+  const start = (st.page - 1) * st.size;
+  // 服务端已经切好了页，这里原样返回；只有没传 total 的调用方（纯本地数据）
+  // 才在客户端切。
+  const slice = (typeof total === 'number') ? rows : rows.slice(start, start + st.size);
+  return { slice, start, total: t, pages };
+}
+
+// renderPager 渲染分页条。
+// key 用来找 #pager<Key>；onGo 是「翻页后重画表格」的回调。
+function renderPager(key, total, onGo) {
+  const el = $('pager' + key.charAt(0).toUpperCase() + key.slice(1));
+  if (!el) return;
+  const st = pgState(key);
+  const pages = Math.max(1, Math.ceil(total / st.size));
+  if (st.page > pages) st.page = pages;
+  if (total <= 0) { el.innerHTML = '<span class="pg-total">共 0 条</span>'; return; }
+
+  const from = (st.page - 1) * st.size + 1;
+  const to = Math.min(total, st.page * st.size);
+
+  let btns = '';
+  const push = (p, label, dis, on) => {
+    btns += `<button data-pg="${p}"${dis ? ' disabled' : ''}${on ? ' class="on"' : ''}>${label}</button>`;
+  };
+  push(1, '«', st.page === 1);
+  push(st.page - 1, '‹', st.page === 1);
+  const lo = Math.max(1, st.page - 2);
+  const hi = Math.min(pages, lo + 4);
+  for (let p = lo; p <= hi; p++) push(p, String(p), false, p === st.page);
+  push(st.page + 1, '›', st.page === pages);
+  push(pages, '»', st.page === pages);
+
+  el.innerHTML =
+    `<span class="pg-total">共 <b>${total}</b> 条 · 显示 ${from}-${to} · 第 ${st.page}/${pages} 页</span>` +
+    btns +
+    `<span class="pg-size">每页 <select data-pgsize="1">` +
+      PG_SIZES.map((s) => `<option value="${s}"${s === st.size ? ' selected' : ''}>${s}</option>`).join('') +
+    `</select> 条</span>`;
+
+  el.querySelectorAll('button[data-pg]').forEach((b) => {
+    b.onclick = () => {
+      const p = parseInt(b.getAttribute('data-pg'), 10);
+      if (!p || p === st.page) return;
+      st.page = p;
+      onGo();
+    };
+  });
+  const sel = el.querySelector('select[data-pgsize]');
+  if (sel) sel.onchange = () => {
+    st.size = parseInt(sel.value, 10) || 20;
+    st.page = 1;
+    onGo();
+  };
+}
 
 // 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
 const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3, '1H': 3600e3, '4H': 14400e3 };
@@ -300,13 +386,16 @@ function showTip(param, k) {
   const col = k.c >= k.o ? 'up' : 'down';
   const amp = k.l ? (k.h - k.l) / k.l * 100 : 0;
 
-  // 这一根上挂了哪些标记（🚀 买入 / 🍃 平仓），一并显示在提示框底部
+  // 这一根上挂了哪些标记（买入 / 加仓 / 平仓 / 信号），一并显示在提示框底部
   const mk = markersAt(k.ts).map((m) => {
+    if (m.kind === 'addon') {
+      return `<div class="tip-mk mk-addon">➕ 加仓 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
+    }
     if (m.kind === 'close') {
-      return `<div class="tip-mk mk-sell">🍃 平仓 ${fmtPrice(m.price)} · ${fmtNum(m.pnl, 4)}U（${fmtPct(m.pnlPct)}）${m.reason ? ' · ' + esc(m.reason) : ''}</div>`;
+      return `<div class="tip-mk mk-sell">🌿 平仓 ${fmtPrice(m.price)} · ${fmtNum(m.pnl, 4)}U（${fmtPct(m.pnlPct)}）${m.reason ? ' · ' + esc(m.reason) : ''}</div>`;
     }
     if (m.kind === 'open') {
-      return `<div class="tip-mk mk-buy">🚀 开仓 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U · ${m.leverage || ''}x</div>`;
+      return `<div class="tip-mk mk-buy">🚀 买入 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
     }
     return `<div class="tip-mk mk-sig">🚀 买入信号 ${m.score}/8${m.hitList ? ' · ' + esc(m.hitList) : ''}</div>`;
   }).join('');
@@ -565,8 +654,12 @@ function renderServiceInfo(st) {
   const addonTxt = sa.enabled === false
     ? '关闭'
     : `最多 ${sa.max_times || '--'} 次${sa.close_when_full ? '（满则平仓）' : ''}`;
+  // 超时平仓：240 → "4 小时"。整数小时就说小时，否则说分钟，和后台的
+  // HoldText() 口径一致（以前后台写「60 分钟」、网页写「1 小时」，两边对不上）。
   const holdTxt = sx.max_hold_minutes > 0
-    ? sx.max_hold_minutes + ' 分钟'
+    ? (sx.max_hold_minutes % 60 === 0 && sx.max_hold_minutes >= 60
+      ? (sx.max_hold_minutes / 60) + ' 小时'
+      : sx.max_hold_minutes + ' 分钟')
     : (sx.max_hold_bars > 0 ? sx.max_hold_bars + ' 根' : '关闭');
   const info = [
     ['每笔保证金', state.marginText || '--'],
@@ -725,13 +818,56 @@ async function loadTickers() {
   renderTickerTape();
   if (tickerN % 5 === 1) { renderInstList(); renderInstInfo(); }
 
-  const t = map[state.curInst];
-  if (t) {
-    $('pairPrice').textContent = fmtPrice(t.last);
-    $('pairPrice').className = t.chgPct > 0 ? 'up' : (t.chgPct < 0 ? 'down' : '');
-    const cg = $('pairChg');
-    cg.textContent = fmtPct(t.chgPct);
-    cg.className = 'chg ' + cls(t.chgPct);
+  // 左上角标题（名称 / 最新价 / 涨跌幅）跟着行情走。
+  // 一定要用统一的 renderChartHead，不要在这儿单独写几个字段 ——
+  // 以前就是这里和 loadKline 各写一半，导致「点了别的合约名，标题不动」。
+  renderChartHead();
+}
+
+/* ------------------------------------------------------------------ */
+/* K 线图左上角：合约名 / 代码 / 最新价 / 涨跌幅                          */
+/* ------------------------------------------------------------------ */
+
+// renderChartHead 把「当前合约」的名称与价格同步写进图表左上角。
+//
+// 为什么必须是独立的同步函数：
+//   1) 点击下方表格（持仓 / 交易明细 / 历史 / 信号）里的合约名时，用户期待
+//      标题**立刻**变。以前标题只在 loadKline 成功返回后才写，于是要先等一次
+//      /api/mark 往返；中途任何一步出错（比如 renderInstList 抛异常）标题就
+//      永远停在旧合约上 —— 这就是「左上角合约名和价格不更新」的根因。
+//   2) 价格以前只在 loadTickers 里「ticker 存在才写」，拿不到行情时既不更新
+//      也不清空，留着上一个合约的价格，看起来像是没切换。
+//
+// 所以这里：先无条件把名称/代码刷新（纯本地数据，零延迟），
+// 价格有就写、没有就显示 "--"，绝不留上一个合约的残留值。
+function renderChartHead() {
+  const inst = state.curInst || '';
+  const bar = state.curBar || '';
+  const tk = (state.tickers && state.tickers[inst]) || {};
+  const it = (state.insts || []).find((x) => x.instId === inst) || {};
+
+  // 名称：优先行情里的 name → 合约列表里的 name → 自己从 instId 推 "BASE/USDT"
+  let name = tk.name || it.name || '';
+  if (!name && inst) name = inst.split('-')[0] + '/USDT';
+  $('pairName').textContent = name || '--';
+  $('pairInst').textContent = inst ? (inst + ' · ' + bar) : '请选择合约';
+
+  const p = $('pairPrice');
+  if (tk.last > 0) {
+    p.textContent = fmtPrice(tk.last);
+    p.className = tk.chgPct > 0 ? 'up' : (tk.chgPct < 0 ? 'down' : '');
+  } else {
+    // 拿不到该合约的行情：显示占位，别把上一个合约的价格留在屏幕上
+    p.textContent = '--';
+    p.className = '';
+  }
+  const cg = $('pairChg');
+  if (tk.chgPct == null || !(tk.last > 0)) {
+    cg.textContent = '--';
+    cg.className = 'chg flat';
+  } else {
+    cg.textContent = fmtPct(tk.chgPct);
+    cg.className = 'chg ' + cls(tk.chgPct);
   }
 }
 
@@ -915,9 +1051,14 @@ function onScroll() {
 let klineTimer = null;
 
 async function selectInst(instId) {
+  if (!instId) return;
   state.curInst = instId;
-  renderInstList();
-  renderInstInfo();
+  // 标题立刻刷 —— 不等网络。用户点了哪张表里的合约名，左边标题马上就得变。
+  renderChartHead();
+  // 左边合约列表 / 右侧合约信息只是「顺带刷新」，它们失败绝不能挡住画图。
+  // （以前 renderInstList 一抛异常，loadKline 就永远不被调用，标题也就不动了。）
+  try { renderInstList(); } catch (e) { console.warn('renderInstList 失败', e); }
+  try { renderInstInfo(); } catch (e) { console.warn('renderInstInfo 失败', e); }
   await loadKline(true);
 }
 
@@ -930,9 +1071,9 @@ async function jumpToInst(instId, bar) {
   if (!instId) return;
   if (bar && BAR_MS[bar]) {
     state.curBar = bar;
-    renderTimeframes();
+    try { renderTimeframes(); } catch (e) { console.warn('renderTimeframes 失败', e); }
   }
-  if (!state.insts.some((x) => x.instId === instId)) {
+  if (!(state.insts || []).some((x) => x.instId === instId)) {
     state.scope = 'all';
     document.querySelectorAll('.scope').forEach((b) =>
       b.classList.toggle('active', b.dataset.scope === 'all'));
@@ -940,7 +1081,13 @@ async function jumpToInst(instId, bar) {
       await loadInstruments();
     } catch (e) { /* 列表拉不到也不影响画图，/api/mark 不依赖它 */ }
   }
-  await selectInst(instId);
+  // selectInst 内部已经做了「先同步刷标题、再拉数据」，且各步都有保护；
+  // 万一还是抛了（比如图表库异常），也要保证切换动作整体不中断。
+  try {
+    await selectInst(instId);
+  } finally {
+    renderChartHead();
+  }
   // 图表在页面上半部分，滚回去用户才看得到
   const box = document.querySelector('.chart-box');
   if (box && box.scrollIntoView) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -968,6 +1115,10 @@ async function loadKline(reset) {
     resetMarkers();
   }
 
+  // 先把标题刷成当前合约（本地数据，零延迟）：即使下面 /api/mark 挂了，
+  // 用户也能看到「图已经切到这个合约了」，而不是标题停在旧合约上。
+  renderChartHead();
+
   $('chartHint').textContent = '加载中…';
   let j;
   try {
@@ -975,9 +1126,11 @@ async function loadKline(reset) {
       `&days=${state.days}&limit=${KLINE_PAGE}&_=${Date.now()}`);
   } catch (e) {
     $('chartHint').textContent = '加载失败：' + e.message;
+    renderChartHead();          // 失败也别让标题留着上一个合约
     return;
   }
-  if (inst !== state.curInst || bar !== state.curBar) return;     // 期间切了，丢弃
+  // 期间用户又切了别的合约：这次结果作废。但标题要保持和当前状态一致。
+  if (inst !== state.curInst || bar !== state.curBar) { renderChartHead(); return; }
 
   mergePage(j, reset);
 
@@ -987,8 +1140,8 @@ async function loadKline(reset) {
   state.hasMore = state.klines.length > 0 &&
     page.earliestTs > 0 && state.klines[0].ts > page.earliestTs;
 
-  $('pairName').textContent = (state.tickers[inst] && state.tickers[inst].name) || inst;
-  $('pairInst').textContent = inst + ' · ' + bar;
+  // 名称 / 最新价 / 涨跌幅 统一由 renderChartHead 负责，这里不再各写一半
+  renderChartHead();
 
   const tickSize = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
 
@@ -1151,20 +1304,35 @@ async function loadPositions() {
 }
 
 async function loadHistory() {
-  const j = await api('/api/history?limit=300');
-  const rows = j.list || [];
-  // 列表里同时有「持仓中」和「已平仓」：持仓中的排在最前面，
-  // 盈亏取实时行情（positions 每 2 秒刷一次），所以数字是跳动的。
-  const openN = rows.filter((t) => (t.status || 'closed') === 'open').length;
-  $('badgeHis').textContent = openN > 0 ? `${rows.length} · ${openN} 持仓中` : rows.length;
+  // 最近 3 天（用户口径：「历史持仓要最近 3 天的，只显示当下不行」）。
+  // 持仓中的仓位不受天数限制 —— 开了 5 天还没平，它仍然是当前持仓。
+  //
+  // 分页在服务端：只把当前这一页拉下来（默认 20 条），不再整批传。
+  const st = pgState('history');
+  const j = await api(`/api/history?days=3&size=${st.size}&page=${st.page}`);
+  state.historyRows = j.list || [];
+  renderHistory(j);
+}
+
+function renderHistory(meta) {
+  const rows = state.historyRows || [];
+  const total = (meta && typeof meta.total === 'number') ? meta.total : rows.length;
+  const openTotal = (meta && typeof meta.openCount === 'number') ? meta.openCount : 0;
+  $('badgeHis').textContent = openTotal > 0 ? `${total} · ${openTotal} 持仓中` : total;
+
   const tb = $('tbHistory');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="12" class="empty">暂无开仓记录 —— 引擎出信号开仓后会立刻出现在这里</td></tr>';
+    tb.innerHTML = '<tr><td colspan="12" class="empty">最近 3 天暂无交易记录 —— 引擎出信号开仓后会立刻出现在这里</td></tr>';
+    renderPager('history', total, loadHistory);
     return;
   }
+
+  // 持仓中的行用实时行情补盈亏，所以数字是跳动的
   const posMap = {};
   (state.positions || []).forEach((p) => { posMap[p.instId] = p; });
-  tb.innerHTML = rows.map((t) => {
+
+  const { slice } = pgSlice('history', rows, total);
+  tb.innerHTML = slice.map((t) => {
     const dir = (t.side || 'buy').toLowerCase() === 'sell' ? 'short' : 'long';
     const isOpen = (t.status || 'closed') === 'open';
     const live = isOpen ? posMap[t.instId] : null;
@@ -1187,20 +1355,100 @@ async function loadHistory() {
       <td class="muted">${isOpen ? '待平仓' : fmtTime(t.closeTs)}</td>
     </tr>`;
   }).join('');
+
+  renderPager('history', total, loadHistory);
+}
+
+// ---------------------------------------------------------------------------
+// 交易明细（逐笔开仓 / 加仓 / 平仓流水）
+// ---------------------------------------------------------------------------
+//
+// 和历史仓位的区别：历史是「一个仓位一行」的汇总，加仓会被合并进均价里
+// 看不见；这里是一次一笔，能直接看到「几点几分加了多少仓、什么价、多少钱」。
+
+async function loadEvents() {
+  // 服务端分页：一次只取当前页，表头统计（笔数/已实现盈亏）由后端对
+  // 整个 3 天窗口聚合，不受当前页影响。
+  const st = pgState('events');
+  const kind = state.evKind || '';
+  const j = await api(`/api/events?days=3&size=${st.size}&page=${st.page}` +
+    (kind ? `&kind=${encodeURIComponent(kind)}` : ''));
+  state.eventRows = j.list || [];
+  renderEvents(j);
+}
+
+function renderEvents(meta) {
+  const rows = state.eventRows || [];
+  const m0 = meta || {};
+  const total = typeof m0.total === 'number' ? m0.total : rows.length;
+  const openN = Number(m0.openCount || 0);
+  const addonN = Number(m0.addonCount || 0);
+  const closeN = Number(m0.closeCount || 0);
+  const pnlSum = Number(m0.pnlSum || 0);
+  $('badgeEv').textContent = openN + addonN + closeN;
+
+  const m = $('eventsMeta');
+  if (m) {
+    m.innerHTML = `最近 3 天 · 共 <b>${openN + addonN + closeN}</b> 笔：` +
+      `买入 <b>${openN}</b> · 加仓 <b style="color:#3b82f6">${addonN}</b> · 平仓 <b>${closeN}</b>` +
+      ` · 已实现盈亏 <b class="${pnlSum >= 0 ? 'up' : 'down'}">${fmtNum(pnlSum, 4)} U</b>`;
+  }
+
+  const tb = $('tbEvents');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="10" class="empty">最近 3 天暂无交易明细</td></tr>';
+    renderPager('events', total, loadEvents);
+    return;
+  }
+
+  const KIND = {
+    open: { txt: '买入', pill: 'pill-open' },
+    addon: { txt: '加仓', pill: 'pill-addon' },
+    close: { txt: '平仓', pill: 'pill-close' },
+  };
+
+  const { slice } = pgSlice('events', rows, total);
+  tb.innerHTML = slice.map((e) => {
+    const k = KIND[e.kind] || { txt: e.kind, pill: '' };
+    const isClose = e.kind === 'close';
+    return `<tr>
+      <td class="muted">${fmtTime(e.ts)}</td>
+      <td><a class="inst-link" href="#" data-inst="${esc(e.instId)}" title="点开 ${esc(e.instId)} 的 K 线图">${esc(e.name || e.instId)}</a></td>
+      <td><span class="tag-pill ${k.pill}">${k.txt}</span></td>
+      <td>${fmtPrice(e.px)}</td>
+      <td>${fmtNum(e.sz, 0)}</td>
+      <td>${e.margin > 0 ? fmtNum(e.margin, 3) : '<span class="muted">--</span>'}</td>
+      <td>${e.leverage ? e.leverage + 'x' : '<span class="muted">--</span>'}</td>
+      <td class="${cls(e.pnl)}"><b>${isClose ? fmtNum(e.pnl, 4) : '--'}</b></td>
+      <td class="${cls(e.pnlPct)}">${isClose ? fmtPct(e.pnlPct) : '--'}</td>
+      <td class="muted" title="${esc(e.reason)}">${esc((e.reason || '').slice(0, 24))}</td>
+    </tr>`;
+  }).join('');
+
+  renderPager('events', total, loadEvents);
 }
 
 async function loadSignals() {
-  const j = await api('/api/signals?limit=100');
-  const rows = j.list || [];
-  $('badgeSig').textContent = rows.length;
+  const st = pgState('signals');
+  const j = await api(`/api/signals?size=${st.size}&page=${st.page}`);
+  state.signalRows = j.list || [];
+  renderSignals(j);
+}
+
+function renderSignals(meta) {
+  const rows = state.signalRows || [];
+  const total = (meta && typeof meta.total === 'number') ? meta.total : rows.length;
+  $('badgeSig').textContent = total;
   const tb = $('tbSignals');
   if (!rows.length) {
     tb.innerHTML = '<tr><td colspan="10" class="empty">暂无信号</td></tr>';
+    renderPager('signals', total, loadSignals);
     return;
   }
   const actedText = (a) => a === 1 ? '<span class="tag-pill pill-ok">已下单</span>'
     : (a === 2 ? '<span class="tag-pill pill-err">被拦</span>' : '<span class="tag-pill">仅记录</span>');
-  tb.innerHTML = rows.map((s) => `<tr>
+  const { slice } = pgSlice('signals', rows, total);
+  tb.innerHTML = slice.map((s) => `<tr>
       <td><a class="inst-link" href="#" data-inst="${esc(s.instId)}" data-bar="${esc(s.bar || '')}" title="点开 ${esc(s.instId)} 的 K 线图">${esc(s.name || s.instId)}</a></td>
       <td>${esc(s.bar)}</td>
       <td class="muted">${fmtTime(s.ts)}</td>
@@ -1212,6 +1460,7 @@ async function loadSignals() {
       <td>${actedText(s.acted)}</td>
       <td class="muted" title="${esc(s.reason)}">${esc((s.reason || '').slice(0, 22))}</td>
     </tr>`).join('');
+  renderPager('signals', total, loadSignals);
 }
 
 async function loadBackfill() {
@@ -1220,19 +1469,28 @@ async function loadBackfill() {
   $('badgeBf').textContent = covs.length;
   $('bfInfo').textContent = `回补队列 ${j.queueLen} · 已回补 ${covs.length} 组（目标 ${j.days} 天）`;
 
-  const tb = $('tbBackfill');
   const covMap = {};
   covs.forEach((c) => { covMap[c.instId + '|' + c.bar] = c; });
-  if (!jobs.length && !covs.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="empty">暂无回补任务</td></tr>';
-    return;
-  }
-  const src = jobs.length ? jobs : covs.map((c) => ({
+  state.bfRows = jobs.length ? jobs : covs.map((c) => ({
     instId: c.instId, bar: c.bar, rows: c.count, fromTs: c.minTs, toTs: c.maxTs,
     status: c.days >= j.days - 0.5 ? 'done' : 'pending',
     msg: `覆盖 ${c.days.toFixed(1)} 天`, name: c.name,
   }));
-  tb.innerHTML = src.map((r) => {
+  state.bfCovMap = covMap;
+  renderBackfill();
+}
+
+function renderBackfill() {
+  const src = state.bfRows || [];
+  const covMap = state.bfCovMap || {};
+  const tb = $('tbBackfill');
+  if (!src.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty">暂无回补任务</td></tr>';
+    renderPager('backfill', 0, renderBackfill);
+    return;
+  }
+  const { slice } = pgSlice('backfill', src);
+  tb.innerHTML = slice.map((r) => {
     const cov = covMap[r.instId + '|' + r.bar] || {};
     const st = r.status || 'pending';
     const stCls = st === 'done' ? 'pill-ok' : (st === 'error' ? 'pill-err' : 'pill-run');
@@ -1247,6 +1505,7 @@ async function loadBackfill() {
       <td class="muted" title="${esc(r.msg)}">${esc((r.msg || '').slice(0, 30))}</td>
     </tr>`;
   }).join('');
+  renderPager('backfill', src.length, renderBackfill);
 }
 
 async function loadPnl() {
@@ -1334,13 +1593,42 @@ function bindEvents() {
   };
 
   // 表格里的合约名可点：直接切到那个合约的 K 线图。
-  // 绑在 document 上做委托，信号 / 持仓 / 历史三张表共用一套逻辑，
+  // 绑在 document 上做委托，持仓 / 历史 / 交易明细 / 信号四张表共用一套逻辑，
   // 以后再加表格不用重复绑。
+  //
+  // 为什么带 stopPropagation：下方表格是每 10 秒整表 innerHTML 重建的，
+  // 让事件继续冒泡有几率撞上下一次重建，导致切换被吞掉。
   document.addEventListener('click', (e) => {
     const a = e.target.closest('a.inst-link');
     if (!a) return;
     e.preventDefault();
-    jumpToInst(a.dataset.inst, a.dataset.bar).catch(() => {});
+    e.stopPropagation();
+    const inst = a.dataset.inst;
+    if (!inst) {
+      // data-inst 为空说明这行没拿到 instId，明确报出来而不是静默无反应
+      $('chartHint').textContent = '该行缺少合约代码，无法切换';
+      return;
+    }
+    // 先同步把标题切过去，网络部分失败也不影响「已经切了」这件事被看见
+    state.curInst = inst;
+    try { renderChartHead(); } catch (err) { /* 标题渲染失败不阻断 */ }
+    jumpToInst(inst, a.dataset.bar).catch((err) => {
+      console.error('切换合约失败', err);
+      $('chartHint').textContent = '切换合约失败：' + ((err && err.message) || err);
+    });
+  });
+
+  // 交易明细的动作过滤（全部 / 买入 / 加仓 / 平仓）。
+  // 过滤在服务端做（/api/events?kind=...）—— 在前端筛只会筛「当前这一页」，
+  // 用户会以为「加仓一共就这几笔」。
+  const evF = $('evFilter');
+  if (evF) evF.addEventListener('click', (e) => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    state.evKind = b.dataset.kind || '';
+    evF.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === b));
+    pgState('events').page = 1;
+    loadEvents().catch(() => {});
   });
 
   $('tabs').addEventListener('click', (e) => {
@@ -1349,12 +1637,14 @@ function bindEvents() {
     document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
     btn.classList.add('active');
     const name = btn.dataset.tab;
-    ['positions', 'history', 'signals', 'backfill', 'pnl'].forEach((n) => {
+    ['positions', 'history', 'events', 'signals', 'backfill', 'pnl'].forEach((n) => {
       const el = $('tab' + n[0].toUpperCase() + n.slice(1));
       if (el) el.classList.toggle('hidden', n !== name);
     });
     if (name === 'pnl') { loadPnl(); state.pnlChart && state.pnlChart.applyOptions({ width: $('pnlChart').clientWidth, height: $('pnlChart').clientHeight }); }
     if (name === 'backfill') loadBackfill();
+    // 交易明细：切过来时立刻拉一次，不用等下一个轮询周期
+    if (name === 'events') loadEvents().catch(() => {});
   });
 
   window.addEventListener('resize', () => {
@@ -1407,7 +1697,12 @@ function pollBackfillUntilDone() {
   setInterval(() => { loadTickers().catch(() => setConn(false, '行情中断')); }, 2000);
   setInterval(() => { loadAccount().catch(() => {}); }, 2000);
   setInterval(() => { loadPositions().catch(() => {}); }, 3000);
-  setInterval(() => { loadHistory().catch(() => {}); loadSignals().catch(() => {}); }, 10000);
+  // 历史/信号/交易明细 10 秒一刷（重绘时保持当前页码，不会把用户翻到的页弹回去）
+  setInterval(() => {
+    loadHistory().catch(() => {});
+    loadSignals().catch(() => {});
+    loadEvents().catch(() => {});
+  }, 10000);
   setInterval(() => {
     loadBackfill().catch(() => {});
     loadState().catch(() => {});

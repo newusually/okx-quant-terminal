@@ -48,6 +48,175 @@ type TradePoint struct {
 	Bar      string  `json:"bar"`
 }
 
+// TradeEventPoint 图上 / 列表里的一个交易事件（开仓 · 加仓 · 平仓）
+//
+// 这是「一次一笔」的流水，和 TradePoint（trade 表的合并视图）互补：
+// trade 表只知道「这个仓位最终均价多少」，它才知道「每次加仓加了多少钱、什么价」。
+type TradeEventPoint struct {
+	ID       int64   `json:"id"`
+	InstID   string  `json:"instId"`
+	Kind     string  `json:"kind"` // open / addon / close
+	Ts       int64   `json:"ts"`
+	Px       float64 `json:"px"`
+	Sz       float64 `json:"sz"`
+	Margin   float64 `json:"margin"`
+	Leverage int     `json:"leverage"`
+	Pnl      float64 `json:"pnl"`
+	PnlPct   float64 `json:"pnlPct"`
+	Score    int     `json:"score"`
+	Reason   string  `json:"reason"`
+}
+
+// EventsInRange 取某合约在时间区间内的交易事件流水（K 线标记用）
+func (d *DB) EventsInRange(instID string, fromTs, toTs int64) ([]TradeEventPoint, error) {
+	rows, err := d.sql.Query(
+		`SELECT id,inst_id,COALESCE(kind,''),COALESCE(ts,0),COALESCE(px,0),COALESCE(sz,0),
+		        COALESCE(margin,0),COALESCE(leverage,0),COALESCE(pnl,0),COALESCE(pnl_pct,0),
+		        COALESCE(score,0),COALESCE(reason,'')
+		 FROM trade_event
+		 WHERE inst_id=? AND ts>=? AND ts<=?
+		 ORDER BY ts ASC LIMIT 4000`, instID, fromTs, toTs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TradeEventPoint, 0, 64)
+	for rows.Next() {
+		var e TradeEventPoint
+		if err := rows.Scan(&e.ID, &e.InstID, &e.Kind, &e.Ts, &e.Px, &e.Sz,
+			&e.Margin, &e.Leverage, &e.Pnl, &e.PnlPct, &e.Score, &e.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// RecentEvents 最近一段时间的全部交易事件（历史里的「交易记录详情」用）。
+//
+// 走 ix_event_ts 索引，按时间倒序取，天然就是「最近 N 天」的语义。
+func (d *DB) RecentEvents(sinceTs int64, limit int) ([]TradeEventPoint, error) {
+	return d.RecentEventsPage(sinceTs, "", limit, 0)
+}
+
+// RecentEventsPage 交易事件分页查询。
+//
+// kind 为空表示不过滤；否则只取 open / addon / close 之一。
+// 走 ix_event_ts（无 kind）或 ix_event_kind_ts（有 kind），都不需要 filesort。
+func (d *DB) RecentEventsPage(sinceTs int64, kind string, limit, offset int) ([]TradeEventPoint, error) {
+	limit, offset = pageArgs(limit, offset, 50, 5000)
+	q := `SELECT id,inst_id,COALESCE(kind,''),COALESCE(ts,0),COALESCE(px,0),COALESCE(sz,0),
+		        COALESCE(margin,0),COALESCE(leverage,0),COALESCE(pnl,0),COALESCE(pnl_pct,0),
+		        COALESCE(score,0),COALESCE(reason,'')
+		 FROM trade_event WHERE ts >= ?`
+	args := []any{sinceTs}
+	if kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, kind)
+	}
+	q += ` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := d.sql.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TradeEventPoint, 0, limit)
+	for rows.Next() {
+		var e TradeEventPoint
+		if err := rows.Scan(&e.ID, &e.InstID, &e.Kind, &e.Ts, &e.Px, &e.Sz,
+			&e.Margin, &e.Leverage, &e.Pnl, &e.PnlPct, &e.Score, &e.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// RecentEventsCount 交易事件总数（分页要算总页数）
+func (d *DB) RecentEventsCount(sinceTs int64, kind string) (int64, error) {
+	if kind != "" {
+		return d.countOf("trade_event", `ts >= ? AND kind = ?`, sinceTs, kind)
+	}
+	return d.countOf("trade_event", `ts >= ?`, sinceTs)
+}
+
+// RecentEventsAgg 按动作汇总（买入 / 加仓 / 平仓 各多少笔、已实现盈亏合计）。
+//
+// 这是分页列表的「表头统计」——它必须覆盖**全部**数据而不是当前页，
+// 所以单独用一条聚合 SQL 算，不能在前端对当前页 reduce。
+func (d *DB) RecentEventsAgg(sinceTs int64) (map[string]any, error) {
+	rows, err := d.sql.Query(
+		`SELECT kind, COUNT(*), COALESCE(SUM(pnl),0)
+		 FROM trade_event WHERE ts >= ? GROUP BY kind`, sinceTs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]any{"open": 0, "addon": 0, "close": 0, "pnlSum": 0.0, "total": 0}
+	var total int64
+	for rows.Next() {
+		var kind string
+		var n int64
+		var pnl float64
+		if err := rows.Scan(&kind, &n, &pnl); err != nil {
+			return nil, err
+		}
+		total += n
+		switch kind {
+		case "open", "addon", "close":
+			out[kind] = n
+			if kind == "close" {
+				out["pnlSum"] = pnl
+			}
+		}
+	}
+	out["total"] = total
+	return out, rows.Err()
+}
+
+// BackfillTradeEvents 把 trade 表里已经存在的开仓 / 平仓补进 trade_event 流水。
+//
+// trade_event 是后加的表，之前成交过的仓在它里面没有记录 —— 不回填的话
+// 「老仓位在 K 线图上看不到买入标记」。
+//
+// 纯 SQL 批量搬，幂等（唯一键 inst_id+kind+ts + ON DUPLICATE KEY UPDATE），
+// 启动时跑多少次结果都一样。
+func (d *DB) BackfillTradeEvents() (int64, error) {
+	now := time.Now().UnixMilli()
+
+	// 开仓
+	if _, err := d.sql.Exec(`
+		INSERT INTO trade_event
+			(inst_id,kind,ts,px,sz,margin,leverage,pnl,pnl_pct,score,reason,ord_id,trade_id,created_at)
+		SELECT inst_id,'open',open_ts,entry_px,COALESCE(sz,0),COALESCE(margin,0),
+		       COALESCE(leverage,0),0,0,COALESCE(score,0),COALESCE(reason,''),
+		       COALESCE(ord_id,''),id,?
+		FROM trade WHERE open_ts > 0
+		ON DUPLICATE KEY UPDATE px=VALUES(px), sz=VALUES(sz), margin=VALUES(margin),
+		                        leverage=VALUES(leverage), trade_id=VALUES(trade_id)`, now); err != nil {
+		return 0, err
+	}
+
+	// 平仓
+	if _, err := d.sql.Exec(`
+		INSERT INTO trade_event
+			(inst_id,kind,ts,px,sz,margin,leverage,pnl,pnl_pct,score,reason,ord_id,trade_id,created_at)
+		SELECT inst_id,'close',close_ts,COALESCE(exit_px,0),COALESCE(sz,0),COALESCE(margin,0),
+		       COALESCE(leverage,0),COALESCE(pnl,0),COALESCE(pnl_pct,0),0,
+		       COALESCE(reason,''),COALESCE(ord_id,''),id,?
+		FROM trade WHERE status='closed' AND close_ts > 0
+		ON DUPLICATE KEY UPDATE px=VALUES(px), pnl=VALUES(pnl), pnl_pct=VALUES(pnl_pct),
+		                        trade_id=VALUES(trade_id)`, now); err != nil {
+		return 0, err
+	}
+
+	var n int64
+	_ = d.sql.QueryRow(`SELECT COUNT(*) FROM trade_event`).Scan(&n)
+	return n, nil
+}
+
 // SignalsInRange 取某合约某周期、指定时间区间内的信号
 func (d *DB) SignalsInRange(instID, bar string, fromTs, toTs int64) ([]SignalPoint, error) {
 	q := `SELECT ts,COALESCE(close,0),COALESCE(score,0),COALESCE(mask,0),

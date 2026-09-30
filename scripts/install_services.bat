@@ -6,12 +6,13 @@ setlocal EnableExtensions
 rem ===========================================================================
 rem  OKX 全合约量化终端 —— 一次性的服务注册 / 环境安装
 rem  ---------------------------------------------------------------------------
-rem  做五件事（重复跑也安全，幂等）：
+rem  做六件事（重复跑也安全，幂等）：
 rem    1. 检查 VC++ 运行库
 rem    2. 初始化 MySQL 数据目录（仅在缺失时）
 rem    3. 把 MySQL 注册成 Windows 服务 OKXMySQL（自动启动）
 rem    4. 建库 okx + 账号 okx
 rem    5. 把 Apache 注册成 Windows 服务 OKXApache（自动启动）
+rem    6. 把 OKXWeb 注册成 Windows 服务（网页 + 引擎，Session 0 无黑窗口）
 rem  需要管理员权限运行。
 rem
 rem  注意：findstr / timeout / where 一律走 System32 绝对路径，
@@ -139,10 +140,23 @@ if not exist "%ROOT%\apache\bin\httpd.exe" (
     )
 )
 
+rem ---- 6. 注册 OKXWeb（Go 网页 + 引擎，无 cmd 黑窗口）-----------------------
+echo [6/6] 注册 OKXWeb 服务（网页 + 自动交易引擎）...
+if not exist "%ROOT%\bin\okxweb.exe" (
+    echo       [警告] 找不到 bin\okxweb.exe，先跑 scripts\build.bat 再回来。
+    echo              （现在跳过，不影响 MySQL / Apache）
+) else (
+    rem okxweb.exe -install 是幂等的：已存在就更新配置，不存在才创建。
+    rem 注册后它跑在 Session 0，没有控制台窗口，崩溃由 SCM 自动重启。
+    "%ROOT%\bin\okxweb.exe" -install
+)
+echo.
+
 echo.
 echo ==============================================================
 echo  安装结束。
-echo  接着跑 scripts\start_all.bat 把服务一起拉起来。
+echo  接着跑 scripts\start_all.bat 把三个服务一起拉起来。
+echo  查看服务：net start ^| findstr /I OKX
 echo ==============================================================
 echo.
 pause

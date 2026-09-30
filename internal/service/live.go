@@ -26,6 +26,7 @@ import (
 
 	"finally-main/internal/conf"
 	"finally-main/internal/logx"
+	"finally-main/internal/perf"
 	"finally-main/internal/repo"
 )
 
@@ -211,6 +212,7 @@ func liveScanLoop(ctx context.Context, opt LiveOptions) {
 func liveTickOnce(opt LiveOptions) {
 	start := time.Now()
 	liveCnt.ticks.Add(1)
+	defer perf.Track("live.exitPass")()
 
 	n, acct, err := exitPass()
 	ms := time.Since(start).Milliseconds()

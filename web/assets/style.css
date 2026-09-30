@@ -439,3 +439,96 @@ main .center.jump-flash {
   color: var(--muted);
   font-size: 11px;
 }
+
+/* ---------------------------------------------------------------------------
+   分页控件（当前持仓 / 历史仓位 / 交易明细 / 信号 / 回补进度）
+   --------------------------------------------------------------------------- */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.pager button {
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  font-size: 11.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.pager button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.pager button:disabled { opacity: .35; cursor: default; }
+.pager button.on {
+  background: rgba(252, 213, 53, .14);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.pager .pg-gap { padding: 0 2px; }
+.pager .pg-total { margin-right: auto; }
+.pager .pg-size { margin-left: 8px; }
+.pager select {
+  height: 24px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  font-size: 11.5px;
+  padding: 0 4px;
+  font-family: inherit;
+}
+
+/* 交易明细页签的汇总行 */
+.events-meta {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.events-meta b { color: var(--text); }
+.events-meta .up { color: var(--up); }
+.events-meta .down { color: var(--down); }
+
+/* 动作标签：买入 / 加仓 / 平仓 */
+.pill-open  { color: var(--accent); border-color: rgba(252,213,53,.4); }
+.pill-addon { color: #3b82f6;       border-color: rgba(59,130,246,.45); }
+.pill-close { color: var(--up);     border-color: rgba(14,203,129,.4); }
+
+/* 交易明细页签：动作过滤（全部 / 买入 / 加仓 / 平仓） */
+.ev-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ev-filter .chip {
+  height: 22px;
+  padding: 0 10px;
+  background: var(--bg-3);
+  color: var(--muted);
+  border: 1px solid var(--line-2);
+  border-radius: 11px;
+  font-size: 11.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ev-filter .chip:hover { border-color: var(--accent); color: var(--accent); }
+.ev-filter .chip.on {
+  background: rgba(252, 213, 53, .14);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* K 线提示框里的加仓行 */
+.tip-mk.mk-addon { color: #3b82f6; }

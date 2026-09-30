@@ -149,6 +149,7 @@
   <div class="tabs" id="tabs">
     <button class="tab active" data-tab="positions">当前持仓 <i id="badgePos">0</i></button>
     <button class="tab" data-tab="history">历史仓位 <i id="badgeHis">0</i></button>
+    <button class="tab" data-tab="events">交易明细 <i id="badgeEv">0</i></button>
     <button class="tab" data-tab="signals">信号 <i id="badgeSig">0</i></button>
     <button class="tab" data-tab="backfill">回补进度 <i id="badgeBf">0</i></button>
     <button class="tab" data-tab="pnl">权益曲线</button>
@@ -175,9 +176,31 @@
           <th>保证金</th><th>杠杆</th><th>盈亏(U)</th><th>盈亏%</th><th>平仓原因</th>
           <th>开仓时间</th><th>平仓时间</th>
         </tr></thead>
-        <tbody id="tbHistory"><tr><td colspan="12" class="empty">暂无平仓记录</td></tr></tbody>
+        <tbody id="tbHistory"><tr><td colspan="12" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
+    <div class="pager" id="pagerHistory"></div>
+  </div>
+
+  <div class="tab-body hidden" id="tabEvents">
+    <div class="events-meta" id="eventsMeta"></div>
+    <!-- 动作过滤：服务端按 kind 过滤，不是在前端筛当前页 -->
+    <div class="ev-filter" id="evFilter">
+      <button class="chip on" data-kind="">全部</button>
+      <button class="chip" data-kind="open">买入</button>
+      <button class="chip" data-kind="addon">加仓</button>
+      <button class="chip" data-kind="close">平仓</button>
+    </div>
+    <div class="tbl-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>时间</th><th>合约</th><th>动作</th><th>价格</th><th>张数</th>
+          <th>金额(U)</th><th>杠杆</th><th>盈亏(U)</th><th>收益率</th><th>说明</th>
+        </tr></thead>
+        <tbody id="tbEvents"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="pager" id="pagerEvents"></div>
   </div>
 
   <div class="tab-body hidden" id="tabSignals">
@@ -187,9 +210,10 @@
           <th>合约</th><th>周期</th><th>信号时间</th><th>收盘价</th><th>共振</th>
           <th>命中因子</th><th>RSI</th><th>TD</th><th>状态</th><th>说明</th>
         </tr></thead>
-        <tbody id="tbSignals"><tr><td colspan="10" class="empty">暂无信号</td></tr></tbody>
+        <tbody id="tbSignals"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
+    <div class="pager" id="pagerSignals"></div>
   </div>
 
   <div class="tab-body hidden" id="tabBackfill">
@@ -199,9 +223,10 @@
           <th>合约</th><th>周期</th><th>已入库</th><th>覆盖天数</th><th>起始时间</th>
           <th>最新时间</th><th>状态</th><th>说明</th>
         </tr></thead>
-        <tbody id="tbBackfill"><tr><td colspan="8" class="empty">暂无回补任务</td></tr></tbody>
+        <tbody id="tbBackfill"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
+    <div class="pager" id="pagerBackfill"></div>
   </div>
 
   <div class="tab-body hidden" id="tabPnl">

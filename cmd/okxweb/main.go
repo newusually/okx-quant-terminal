@@ -41,6 +41,7 @@ import (
 	"finally-main/internal/handler"
 	"finally-main/internal/logx"
 	"finally-main/internal/model"
+	"finally-main/internal/perf"
 	"finally-main/internal/repo"
 	"finally-main/internal/service"
 )
@@ -89,6 +90,10 @@ var (
 	// 「图上有信号、后台也在扫，但一条买入记录都没有」。
 	probeInst = flag.String("probe", "", "交易链路自检：探测持仓模式并试设杠杆（传合约名，如 ETH-USDT-SWAP）")
 	acctDiag  = flag.Bool("acct", false, "账户只读诊断：保证金模式 acctLv / 持仓模式 posMode / 顶层 upl / 持仓汇总 upl")
+	partition = flag.Bool("partition", false, "一次性把 kline 改造成分区表（重建整表，务必先停引擎）")
+	// 分区方案从「纯按月」升级成「冷区按月 + 热区按周」时要强制重建。
+	// 已经建过月度分区的库，-partition 会因为「已是分区表」直接跳过。
+	repartition = flag.Bool("repartition", false, "强制重建分区方案为「冷区按月 + 热区按周」（重建整表，务必先停引擎）")
 
 	// 注册服务时 CreateService 会带上 -service；这里必须显式认领，
 	// 否则 flag.Parse() 会当成未知参数直接打 usage 退出。
@@ -140,6 +145,72 @@ func main() {
 		return
 	}
 
+	// ---- 一次性：把大表改造成按月分区 ----
+	//
+	// 这不是启动路径上的动作：把 788MB 的 kline 从「无分区」变成「有分区」，
+	// MySQL 只能 ALGORITHM=COPY，全程 LOCK=SHARED 禁写。所以必须停机做：
+	//     net stop OKXWeb
+	//     bin\okxweb.exe -partition
+	//     net start OKXWeb
+	// 之后每个月的「补新分区」是 INPLACE/LOCK=NONE，由启动流程自动完成。
+	if *partition || *repartition {
+		mcfg := repo.DefaultMySQLConfig()
+		mcfg.Host, mcfg.Port = *mHost, *mPort
+		mcfg.User, mcfg.Password, mcfg.Database = *mUser, *mPass, *mDB
+		// 整表重建要跑几分钟，必须关掉 DSN 的读超时（否则 60 秒被掐断）
+		mcfg.LongDDL = true
+		db, err := repo.OpenMySQL(mcfg)
+		if err != nil {
+			fmt.Printf("✘ 连接 MySQL 失败：%v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		mode := "按需分区（已是分区表则跳过）"
+		if *repartition {
+			mode = "强制重建分区方案（冷区按月 + 热区按周）"
+		}
+		fmt.Printf("== 分区改造：%s ==\n", mode)
+		ok := true
+		for _, t := range repo.PartitionedTables {
+			if err := db.MigrateToPartition(t, *repartition); err != nil {
+				fmt.Printf("✘ %s：%v\n", t, err)
+				ok = false
+			}
+		}
+		fmt.Println("-- 结果 --")
+		for _, s := range db.PartitionSummary() {
+			if s["error"] != nil {
+				fmt.Printf("  · %-14s ✘ %v\n", s["table"], s["error"])
+				continue
+			}
+			names, _ := s["names"].([]string)
+			fmt.Printf("  · %-14s 分区 %d 个（月 %v / 周 %v）：%s\n",
+				s["table"], len(names), s["monthly"], s["weekly"], strings.Join(names, " "))
+		}
+		fmt.Println("-- 各分区占用 --")
+		for _, t := range repo.PartitionedTables {
+			detail, err := db.PartitionDetail(t)
+			if err != nil {
+				fmt.Printf("  · %s：%v\n", t, err)
+				continue
+			}
+			var total float64
+			for _, d := range detail {
+				total += d["dataMB"].(float64)
+			}
+			fmt.Printf("  · %s 共 %.1f MB\n", t, total)
+			for _, d := range detail {
+				fmt.Printf("      %-12s %8.1f MB  bound=%v\n", d["name"], d["dataMB"], d["bound"])
+			}
+		}
+		if !ok {
+			os.Exit(1)
+		}
+		fmt.Println("✔ 分区改造完成")
+		return
+	}
+
 	// ---- 被 SCM 拉起：走服务协议（没有黑窗口，开机自启，崩了自动重启）----
 	if runningAsService() {
 		if err := runAsService(runApp); err != nil {
@@ -187,6 +258,35 @@ func runApp(ctx context.Context) error {
 	}
 	defer db.Close()
 	fmt.Printf("[DB] MySQL %s 已连接，数据库 %s\n", db.ServerVersion(), db.DBName())
+
+	// ★ 大表行数缓存（关键性能设施）。
+	//   `COUNT(*) FROM kline` 在 400 万行时要 7.76 秒，而前端每 2 秒就轮询
+	//   /api/account（会走到行数统计）。必须在监听端口前把缓存挂上，
+	//   让所有接口只读内存值 —— 详见 internal/repo/rowcount.go 的复盘。
+	db.StartRowCountRefresher()
+
+	// ★ K 线覆盖情况缓存（第二个 CPU 大户）。
+	//   「回补进度」页每 2 秒轮询 /api/backfill，而它原来会为每个合约各发一条
+	//   GROUP BY（476 条 × 20 个分区），单请求 10~20 秒 → 3 条并发就把
+	//   mysqld 的一颗核跑满。现在改成一条聚合 SQL + 10 分钟缓存，
+	//   请求路径只读内存。详见 internal/repo/coverage.go。
+	db.StartCoverageRefresher()
+
+	// ★ 分区自维护：补齐未来月份的分区。
+	//   ADD PARTITION 在 MySQL 8 是 INPLACE/LOCK=NONE，不阻塞读写，可以放心自动跑；
+	//   若表还没分区，这里只打提示（首次改造要重建整表，必须走 -partition 开关停机做）。
+	go func() {
+		time.Sleep(15 * time.Second)
+		db.EnsurePartitions()
+
+		// 交易事件流水就绪性检查：trade_event 是后加的表，
+		// 老成交要先从 trade 表搬过来，不然图上看不到历史买入标记。
+		if n, err := db.BackfillTradeEvents(); err != nil {
+			logx.Logf("WARN", "[EVENT] 交易事件回填失败：%v", err)
+		} else {
+			logx.Logf("INFO", "[EVENT] 交易事件流水就绪：共 %d 条（开仓/加仓/平仓）", n)
+		}
+	}()
 
 	// ---- 1.5 自愈：清掉不符合不变量的脏 K 线 ----
 	// 时间戳非整秒 / 价格非正的，一定是外部工具或异常写入塞进来的。
@@ -363,6 +463,24 @@ func runApp(ctx context.Context) error {
 		fmt.Printf("[TRADE] 自动交易已挂载：dry_run=%v 周期=%s 止盈 %.2f%% 布林上轨出场=%v\n",
 			strategy.DryRun, liveBarVal, strategy.Exit.TakeProfitPct, strategy.Exit.BollUpperExit)
 	}
+
+	// ---- 4.7 OKX 成交明细同步 ----
+	//
+	// 本地 trade 表只记「程序自己下的单」，用户手工在 OKX 上做的交易本地一无所知。
+	// 这里每 5 分钟拉一次 /api/v5/trade/fills-history（OKX 保留最近 3 天），
+	// 合成进 trade_event 流水 —— 历史面板/交易明细就能看到最近 3 天的全部成交。
+	// 无条件启动：跟自动交易开不开没关系，网页展示需要它。
+	service.StartOKXFillsSync(ctx)
+
+	// ---- 4.8 性能自检 ----
+	//
+	// 每秒采一次本进程 CPU，每 30 秒往日志打一行汇总（CPU / goroutine /
+	// 各热点调用次数与耗时）。「CPU 占用太高」这种问题必须先能量化 ——
+	// 这台机器上 wmic / PowerShell 全被黑名单拦了，只能进程自测。
+	// 同时暴露 /api/perf，网页和 curl 都能随时取。
+	perf.Start(ctx, 30*time.Second, func(format string, args ...any) {
+		logx.Logf("INFO", format, args...)
+	})
 
 	// ---- 5. 常驻：等退出（服务被 Stop / 控制台 Ctrl-C / 网页端口起不来）----
 	var runErr error

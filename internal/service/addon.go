@@ -142,7 +142,8 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 		}
 
 		row := model.AddonRow{
-			ID: p.ID, Sz: dec.NewSz, EntryPx: dec.NewAvgPx, Margin: dec.NewMargin,
+			ID: p.ID, InstID: p.InstID, Leverage: p.Leverage,
+			Sz: dec.NewSz, EntryPx: dec.NewAvgPx, Margin: dec.NewMargin,
 			AddSz: dec.Sz, AddPx: dec.AddPx, AddMargin: dec.Margin,
 			AddonCount: dec.Count, AddonMargin: dec.AllMargin, LastAddonTs: dec.Ts,
 			OrdID: ordID, Reason: dec.Reason,

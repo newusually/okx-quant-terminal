@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"finally-main/internal/perf"
+
 	"finally-main/internal/conf"
 	"finally-main/internal/model"
 	"finally-main/internal/repo"
@@ -284,7 +286,12 @@ func StartSignalBackfillLoop(ctx context.Context, db *repo.DB,
 						return
 					default:
 					}
+					// 打点：这一轮「信号回算」是全项目的 CPU 大户（478 合约 × N 周期），
+					// 没有打点就只能靠猜。perf 日志里看 signal.recalc 的耗时占比即可。
+					perf.Count1("signal.recalc.round")
+					done := perf.Track("signal.recalc")
 					RunSignalBackfillOnce(cfg, db, bar, logf)
+					done()
 				}
 			}
 			// 一轮跑完马上开下一轮（增量轮基本秒回），

@@ -367,8 +367,14 @@ FodyWeavers.xsd
 
 # ---- 密钥：绝对不能进仓库 -------------------------------------------------
 api.json
+configs/okx_strategy.json
 configs/okx_secret.json
 *.secret.json
+credential*.json
+
+# 说明：configs/okx_strategy.example.json 是脱敏模板，**要**入库。
+#       真正生效的 configs/okx_strategy.json 里含 OKX api_key/secret/passphrase，
+#       一律不入库；请用环境变量或 api.json 提供密钥。
 
 # ---- 第三方运行时（体积大、可重新下载，不入库）----------------------------
 mysql/
@@ -389,3 +395,24 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+
+# ---- 本地临时文件 / 调试产物 ----------------------------------------------
+# tmp/ 放的是排查用的 SQL、进程快照、日志切片、截图，
+# 都是一次性的，跟源码无关（曾误留 16MB 截图进暂存区）。
+tmp/
+*.pid
+*.prof
+*.csv
+
+# ---- APM / 编译中间产物 ---------------------------------------------------
+*.test
+*.out
+coverage.txt
+
+# ---- Go 工作区 -------------------------------------------------------------
+vendor/
+.idea/
+.vscode/
+*.swp
+*~
+

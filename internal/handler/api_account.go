@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"finally-main/internal/model"
+	"finally-main/internal/repo"
 	"finally-main/internal/service"
 )
 
@@ -24,9 +25,16 @@ import (
 // 反推 本金 = 权益 − 浮盈 − 已实现盈亏。有出入金时会漂，
 // 那时在 configs/okx_strategy.json 里填 principal_usdt 就以内填值为准。
 func (s *Server) AccountSnapshot() map[string]any {
-	eq, hasEq, _ := s.db.LatestEquity()
-
 	st, _ := s.db.Stats()
+	return s.snapshot(st)
+}
+
+// snapshot 用已经取好的 stats 组装快照。
+//
+// 单独抽出来的原因：/api/state 自己也会调一次 Stats()，以前两边各调一次，
+// 同一次请求里把 trade/signals 的聚合查询做了两遍。传进来复用即可。
+func (s *Server) snapshot(st repo.Stats) map[string]any {
+	eq, hasEq, _ := s.db.LatestEquity()
 
 	principal := eq.TotalEq - eq.Upl - st.PnlTotal
 	if s.strategy != nil && s.strategy.PrincipalUSDT > 0 {
@@ -198,55 +206,173 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 // /api/history
 // ---------------------------------------------------------------------------
 
+// handleHistory 历史仓位。支持服务端分页（page/size），统计口径覆盖全部数据。
+//
+// 分页为什么放在服务端：前端一次只看 20~100 行，没必要把 500 行全传下来；
+// 页码翻到后面时更不该把前面所有页的数据都传一遍。
+// 这里只取「当前页」，但 sumPnl / winRate 是用聚合 SQL 对整个窗口算的
+// —— 否则胜率会随着翻页变化，那是明显的错。
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, error) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 300)
-	if limit > 2000 {
-		limit = 2000
+	days := atoiDefault(r.URL.Query().Get("days"), 3)
+	var since int64
+	if days > 0 {
+		since = time.Now().AddDate(0, 0, -days).UnixMilli()
 	}
-	rows, err := s.db.ClosedTrades(limit)
+	size := atoiDefault(r.URL.Query().Get("size"), atoiDefault(r.URL.Query().Get("limit"), 50))
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * size
+
+	insts, _ := s.db.ListInstruments()
+	nameOf := make(map[string]string, len(insts))
+	for _, it := range insts {
+		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+	}
+
+	// 持仓中的仓位永远排在最前面，且**不受 days 过滤** ——
+	// 一个仓位开了 5 天还没平，它仍然是「当前持仓」，按天数筛掉才是真的错。
+	openRows, err := s.db.OpenTradesPage(500, 0)
 	if err != nil {
 		return nil, err
 	}
-	// 当前还持仓的仓位排在最前面：用户开完仓就能在列表里看到这一笔，
-	// 而不是等平仓后才「突然出现」。它的实时盈亏由前端用行情补。
-	openRows, err := s.db.OpenTrades(limit)
+	closedTotal, sumPnl, wins, err := s.db.ClosedTradesAgg(since)
 	if err != nil {
 		return nil, err
 	}
+	openTotal := int64(len(openRows))
+	total := openTotal + closedTotal
+
+	type item struct {
+		model.ClosedTrade
+		Name string `json:"name"`
+	}
+	out := make([]item, 0, size)
+
+	// 把「持仓 + 已平仓」拼成一条逻辑列表，再从 offset 处切 size 条。
+	if int64(offset) < openTotal {
+		end := int64(offset) + int64(size)
+		if end > openTotal {
+			end = openTotal
+		}
+		for _, t := range openRows[offset:end] {
+			if t.Status == "" {
+				t.Status = "open"
+			}
+			out = append(out, item{ClosedTrade: t, Name: nameOf[t.InstID]})
+		}
+	}
+	if need := size - len(out); need > 0 {
+		coff := offset - int(openTotal)
+		if coff < 0 {
+			coff = 0
+		}
+		crows, err := s.db.ClosedTradesPage(since, need, coff)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range crows {
+			out = append(out, item{ClosedTrade: t, Name: nameOf[t.InstID]})
+		}
+	}
+
+	winRate := 0.0
+	if closedTotal > 0 {
+		winRate = float64(wins) / float64(closedTotal) * 100
+	}
+
+	return map[string]any{
+		"ok": true, "count": len(out), "total": total,
+		"page": page, "size": size, "pages": pagesOf(total, size),
+		"openCount": openTotal, "closedCount": closedTotal,
+		"sumPnl": sumPnl, "days": days,
+		"wins": wins, "winRate": winRate, "list": out,
+	}, nil
+}
+
+// pagesOf 总页数（向上取整，至少 1 页）
+func pagesOf(total int64, size int) int {
+	if size <= 0 {
+		return 1
+	}
+	p := int((total + int64(size) - 1) / int64(size))
+	if p < 1 {
+		p = 1
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// /api/events —— 交易记录详情（开仓 / 加仓 / 平仓流水）
+// ---------------------------------------------------------------------------
+
+// handleEvents 返回最近 N 天的逐笔交易事件（服务端分页）。
+//
+// 和 /api/history 的区别：history 是「一个仓位一行」的汇总视图，
+// events 是「一次一笔」的流水 —— 所以它能显示「这笔单子加过几次仓、
+// 每次什么价、加了多少钱」，这是汇总视图给不了的。
+//
+// kind 参数可以只看某一类动作（open / addon / close），表头统计始终覆盖全部。
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) (any, error) {
+	days := atoiDefault(r.URL.Query().Get("days"), 3)
+	since := int64(0)
+	if days > 0 {
+		since = time.Now().AddDate(0, 0, -days).UnixMilli()
+	}
+	size := atoiDefault(r.URL.Query().Get("size"), atoiDefault(r.URL.Query().Get("limit"), 50))
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * size
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	switch kind {
+	case "open", "addon", "close":
+	default:
+		kind = ""
+	}
+
+	rows, err := s.db.RecentEventsPage(since, kind, size, offset)
+	if err != nil {
+		return nil, err
+	}
+	// 表头统计（买入/加仓/平仓笔数、已实现盈亏）覆盖全部数据，不受分页影响
+	agg, err := s.db.RecentEventsAgg(since)
+	if err != nil {
+		return nil, err
+	}
+	var total int64
+	switch kind {
+	case "open":
+		total, _ = agg["open"].(int64)
+	case "addon":
+		total, _ = agg["addon"].(int64)
+	case "close":
+		total, _ = agg["close"].(int64)
+	default:
+		total, _ = agg["total"].(int64)
+	}
+
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
 		nameOf[it.InstID] = it.BaseCcy + "/USDT"
 	}
 	type item struct {
-		model.ClosedTrade
+		repo.TradeEventPoint
 		Name string `json:"name"`
 	}
-	out := make([]item, 0, len(rows)+len(openRows))
-	for _, t := range openRows {
-		if t.Status == "" {
-			t.Status = "open"
-		}
-		out = append(out, item{ClosedTrade: t, Name: nameOf[t.InstID]})
-	}
-	// 已实现的统计口径只算已平仓，不受持仓影响
-	var sum float64
-	wins := 0
-	for _, t := range rows {
-		sum += t.Pnl
-		if t.Pnl > 0 {
-			wins++
-		}
-		out = append(out, item{ClosedTrade: t, Name: nameOf[t.InstID]})
-	}
-	winRate := 0.0
-	if len(rows) > 0 {
-		winRate = float64(wins) / float64(len(rows)) * 100
+	out := make([]item, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, item{TradeEventPoint: e, Name: nameOf[e.InstID]})
 	}
 	return map[string]any{
-		"ok": true, "count": len(out), "openCount": len(openRows),
-		"closedCount": len(rows), "sumPnl": sum,
-		"wins": wins, "winRate": winRate, "list": out,
+		"ok": true, "count": len(out), "total": total,
+		"page": page, "size": size, "pages": pagesOf(total, size),
+		"days": days, "kind": kind,
+		"openCount": agg["open"], "addonCount": agg["addon"], "closeCount": agg["close"],
+		"pnlSum": agg["pnlSum"], "list": out,
 	}, nil
 }
 
@@ -255,11 +381,31 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, err
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) (any, error) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 100)
-	rows, err := s.db.Signals(limit)
+	size := atoiDefault(r.URL.Query().Get("size"), atoiDefault(r.URL.Query().Get("limit"), 50))
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * size
+
+	instID := strings.TrimSpace(r.URL.Query().Get("inst"))
+	var (
+		rows  []model.SignalRow
+		total int64
+		err   error
+	)
+	if instID != "" {
+		rows, err = s.db.SignalsByInstPage(instID, size, offset)
+	} else {
+		rows, err = s.db.SignalsPage(size, offset)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if total, err = s.db.SignalsCount(); err != nil {
+		return nil, err
+	}
+
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
@@ -273,7 +419,11 @@ func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) (any, err
 	for _, s2 := range rows {
 		out = append(out, item{SignalRow: s2, Name: nameOf[s2.InstID]})
 	}
-	return map[string]any{"ok": true, "count": len(out), "list": out}, nil
+	return map[string]any{
+		"ok": true, "count": len(out), "total": total,
+		"page": page, "size": size, "pages": pagesOf(total, size),
+		"inst": instID, "list": out,
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
