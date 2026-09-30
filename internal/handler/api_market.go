@@ -477,8 +477,9 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 					"hitList": sg.HitList, "reason": sg.Reason, "ts": sg.Ts,
 				}
 				if sg.Acted == 0 {
+					// 只报信号没下单：同样是 🚀，但用暗金色 + 小一号，
+					// 和「真买了」的实心金 🚀 一眼能分，又都满足「信号用火箭标」。
 					m["color"] = "#8a7a2a"
-					m["text"] = "↑"
 					m["size"] = 1
 					m["kind"] = "signal_only"
 				}
