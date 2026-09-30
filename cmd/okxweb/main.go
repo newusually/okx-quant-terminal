@@ -294,7 +294,7 @@ func runApp(ctx context.Context) error {
 		if liveBarVal == "" {
 			liveBarVal = strategy.Bar
 		}
-		service.StartSignalBackfillLoop(ctx, db, liveBarVal, func(format string, args ...any) {
+		service.StartSignalBackfillLoop(ctx, db, func(format string, args ...any) {
 			fmt.Printf("%s [SIG-BF] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		})
 	} else {
@@ -306,7 +306,7 @@ func runApp(ctx context.Context) error {
 		// 回补只入库 K 线，历史 K 线图上没有 🚀。这里后台逐根跑 8 因子，
 		// 与实时扫描同一套 ComputeSignal（口径一致），写进 signals 表；
 		// 图上的历史买入信号、信号 tab 的历史记录就都有了。
-		service.StartSignalBackfillLoop(ctx, db, liveBarVal, func(format string, args ...any) {
+		service.StartSignalBackfillLoop(ctx, db, func(format string, args ...any) {
 			fmt.Printf("%s [SIG-BF] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		})
 		service.StartLive(ctx, service.LiveOptions{

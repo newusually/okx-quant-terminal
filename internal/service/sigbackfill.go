@@ -20,6 +20,7 @@ package service
 import (
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,14 @@ import (
 
 // 8 因子里最长的是 sma200，暖机 200 根之后 Ready 才可能为真。
 const sigWarmup = 200
+
+// sigWindow 每次喂给 ComputeSignal 的窗口长度。
+//
+// ComputeSignal 是「整段重算指标」的实现（O(n)），逐根调就是 O(n²)：
+// 1m 周期 30 天有 4.3 万根，全段算一遍再逐根调 = 上亿次乘加，一台小机器
+// 跑不完。但 8 因子最长的窗口只有 sma200 —— 截到最后 700 根，指标结果
+// 与全段等价（还留了 500 根余量给 atr96 / macd / TD 链），快两个数量级。
+const sigWindow = 700
 
 var (
 	sigBfMu     sync.Mutex
@@ -94,7 +103,14 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 		if asc[i].Ts <= last {
 			continue // 水位线之前算过了
 		}
-		sig := ComputeSignal(instID, bar, asc, i)
+		// 窗口截断：只喂最近 sigWindow 根（见 sigWindow 注释）。
+		// i < sigWindow 时窗口就是 [0, i]，与全段等价。
+		lo := i + 1 - sigWindow
+		if lo < 0 {
+			lo = 0
+		}
+		win := asc[lo : i+1]
+		sig := ComputeSignal(instID, bar, win, len(win)-1)
 		if sig == nil || !sig.Ready || sig.Score < th {
 			continue
 		}
@@ -187,8 +203,10 @@ func RunSignalBackfillOnce(cfg *conf.Config, db *repo.DB, bar string,
 //
 //	启动后先等 backfillWarmup（让第一波 K 线回补落库），跑第一轮全量；
 //	之后每 sigBfEvery 增量跑一轮（新回补进来的 K 线也有信号）。
+//	每个周期按 cfg.SignalBars 依次跑（默认 1m/3m/5m/15m/1H/4H 全部）——
+//	交易只认 bars_enabled，但图上的 🚀 用户想看哪个周期就看哪个周期。
 //	ctx 结束自然退出。
-func StartSignalBackfillLoop(ctx context.Context, db *repo.DB, bar string,
+func StartSignalBackfillLoop(ctx context.Context, db *repo.DB,
 	logf func(string, ...any)) {
 
 	go func() {
@@ -208,8 +226,19 @@ func StartSignalBackfillLoop(ctx context.Context, db *repo.DB, bar string,
 
 		for {
 			cfg := conf.LoadConfig()
-			if cfg != nil && cfg.Enabled && cfg.BarEnabled(bar) {
-				RunSignalBackfillOnce(cfg, db, bar, logf)
+			if cfg != nil && cfg.Enabled {
+				bars := cfg.SignalBars
+				if len(bars) == 0 {
+					bars = []string{cfg.Bar}
+				}
+				for _, bar := range bars {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					RunSignalBackfillOnce(cfg, db, bar, logf)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -218,4 +247,14 @@ func StartSignalBackfillLoop(ctx context.Context, db *repo.DB, bar string,
 			}
 		}
 	}()
+}
+
+// signalBarEnabled 信号回算周期白名单判定（大小写不敏感）
+func signalBarEnabled(bars []string, bar string) bool {
+	for _, b := range bars {
+		if strings.EqualFold(strings.TrimSpace(b), bar) {
+			return true
+		}
+	}
+	return false
 }

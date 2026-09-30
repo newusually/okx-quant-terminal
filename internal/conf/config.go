@@ -175,6 +175,10 @@ type Config struct {
 	OrderVia          string         `json:"order_via"`
 	Bar               string         `json:"bar"`
 	BarsEnabled       []string       `json:"bars_enabled"`
+	// SignalBars 信号回算/图上展示的周期。
+	// 与 BarsEnabled（真正执行「扫描 + 开仓」的周期）分开：
+	// 回算便宜、多多益善，交易昂贵、只认主周期。空 = 全部 6 个周期。
+	SignalBars        []string       `json:"signal_bars"`
 	MinCandles        int            `json:"min_candles"`
 	TopNByVolume      int            `json:"top_n_by_volume"`
 	MinQuoteVolume24h float64        `json:"min_quote_volume_24h"`
@@ -316,6 +320,7 @@ func defaultConfig() *Config {
 		OrderVia:          "go",
 		Bar:               "15m",
 		BarsEnabled:       []string{"15m"},
+		SignalBars:        []string{"1m", "3m", "5m", "15m", "1H", "4H"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -505,6 +510,9 @@ func fillDefaults(c *Config) {
 	}
 	if len(c.BarsEnabled) == 0 {
 		c.BarsEnabled = d.BarsEnabled
+	}
+	if len(c.SignalBars) == 0 {
+		c.SignalBars = d.SignalBars
 	}
 	if c.MinCandles <= 0 {
 		c.MinCandles = d.MinCandles
