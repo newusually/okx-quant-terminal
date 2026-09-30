@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"finally-main/internal/handler"
+	"finally-main/internal/logx"
 	"finally-main/internal/model"
 	"finally-main/internal/repo"
 	"finally-main/internal/service"
@@ -82,6 +83,12 @@ var (
 	installSvc   = flag.Bool("install", false, "注册为 Windows 服务 OKXWeb（需管理员，幂等）")
 	uninstallSvc = flag.Bool("uninstall", false, "停止并卸载 Windows 服务 OKXWeb（需管理员）")
 
+	// ---- 交易链路自检 ----
+	// 传合约名就探测持仓模式 + 试设杠杆（不下单），用来确认下单参数会不会被 OKX 拒。
+	// 起因：账户切到双向持仓后 posSide=net 被 OKX 拒（51000），表现是
+	// 「图上有信号、后台也在扫，但一条买入记录都没有」。
+	probeInst = flag.String("probe", "", "交易链路自检：探测持仓模式并试设杠杆（传合约名，如 ETH-USDT-SWAP）")
+
 	// 注册服务时 CreateService 会带上 -service；这里必须显式认领，
 	// 否则 flag.Parse() 会当成未知参数直接打 usage 退出。
 	_ = flag.Bool("service", false, "内部使用：由服务控制器拉起时自动带上，勿手动指定")
@@ -103,6 +110,18 @@ func main() {
 			fmt.Printf("✘ 卸载服务失败：%v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// ---- 交易链路自检：探测持仓模式 + 试设杠杆，干完就退出 ----
+	if *probeInst != "" {
+		mode, err := service.ProbeTrading(*probeInst, 0)
+		fmt.Printf("账户持仓模式：%s\n", mode)
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✔ %s 设杠杆成功 —— 下单参数会被 OKX 接受，有信号就会真实成交\n", *probeInst)
 		return
 	}
 
@@ -295,7 +314,7 @@ func runApp(ctx context.Context) error {
 			liveBarVal = strategy.Bar
 		}
 		service.StartSignalBackfillLoop(ctx, db, func(format string, args ...any) {
-			fmt.Printf("%s [SIG-BF] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+			logx.Logf("INFO", "[SIG-BF] "+format, args...)
 		})
 	} else {
 		liveBarVal := *liveBar
@@ -307,7 +326,9 @@ func runApp(ctx context.Context) error {
 		// 与实时扫描同一套 ComputeSignal（口径一致），写进 signals 表；
 		// 图上的历史买入信号、信号 tab 的历史记录就都有了。
 		service.StartSignalBackfillLoop(ctx, db, func(format string, args ...any) {
-			fmt.Printf("%s [SIG-BF] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+			// 走 logx 写文件：作为 Windows 服务运行时 stdout 被 SCM 收走，
+			// 用 fmt.Printf 的话回算日志在 logs/ 里一条都看不到，没法排查。
+			logx.Logf("INFO", "[SIG-BF] "+format, args...)
 		})
 		service.StartLive(ctx, service.LiveOptions{
 			ExitEvery:  time.Duration(*exitSec) * time.Second,

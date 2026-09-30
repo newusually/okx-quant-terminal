@@ -1,5 +1,10 @@
 package repo
 
+import (
+	"strings"
+	"time"
+)
+
 // marker_repo.go —— K 线图上的标注点（买入小火箭 / 卖出小绿叶）
 //
 // 图表要标两类东西：
@@ -146,4 +151,69 @@ func (d *DB) SignalWatermarks() (map[string]int64, error) {
 		out[inst+"|"+bar] = ts
 	}
 	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// 历史信号回算：双向扫描水位线
+// ---------------------------------------------------------------------------
+
+// SignalScanSpan 单个 (inst, bar) 已经扫过的 K 线时间区间（闭区间）。
+//
+// MinTs/MaxTs 都为 0 表示「一次都没扫过」。
+// K 线回补是向左扩张的，所以只记 MaxTs 会漏掉后补进来的老 K 线；
+// 两端都记，每轮只需补 [新最老, MinTs) ∪ (MaxTs, 新最新] 两段。
+type SignalScanSpan struct {
+	MinTs   int64
+	MaxTs   int64
+	Scanned int64
+}
+
+// LoadSignalScanSpans 读全部扫描水位线，key 为 "inst|bar"。
+func (d *DB) LoadSignalScanSpans() (map[string]SignalScanSpan, error) {
+	rows, err := d.sql.Query(`SELECT inst_id, bar, min_ts, max_ts, scanned FROM signal_scan_state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]SignalScanSpan{}
+	for rows.Next() {
+		var inst, bar string
+		var sp SignalScanSpan
+		if err := rows.Scan(&inst, &bar, &sp.MinTs, &sp.MaxTs, &sp.Scanned); err != nil {
+			return nil, err
+		}
+		out[inst+"|"+bar] = sp
+	}
+	return out, rows.Err()
+}
+
+// SaveSignalScanSpans 批量落盘（幂等 upsert）。只在有变化时调用。
+func (d *DB) SaveSignalScanSpans(spans map[string]SignalScanSpan) error {
+	if len(spans) == 0 {
+		return nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO signal_scan_state
+		(inst_id, bar, min_ts, max_ts, scanned, updated_at) VALUES (?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE min_ts=VALUES(min_ts), max_ts=VALUES(max_ts),
+			scanned=VALUES(scanned), updated_at=VALUES(updated_at)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	nowMs := time.Now().UnixMilli()
+	for k, sp := range spans {
+		i := strings.IndexByte(k, '|')
+		if i <= 0 || i == len(k)-1 {
+			continue
+		}
+		if _, err := stmt.Exec(k[:i], k[i+1:], sp.MinTs, sp.MaxTs, sp.Scanned, nowMs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

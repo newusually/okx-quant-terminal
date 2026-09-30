@@ -320,6 +320,24 @@ var schemaStmts = []string{
 		pos_count INT    DEFAULT 0,
 		PRIMARY KEY (ts)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
+
+	// ---- 历史信号回算的扫描水位线（双向）----
+	//
+	// K 线回补是「从最近往老补」的：先有 [T-1天, 现在]，再往前扩到 [T-30天, 现在]。
+	// 所以只记 MAX(ts) 会漏 —— 后补进来的更老 K 线全都比水位线小，被当成
+	// 「算过了」跳过，信号永远追不上 K 线（1m/3m/5m 卡在只有几个合约有信号）。
+	//
+	// 这里同时记 min_ts / max_ts：已扫区间是闭区间 [min_ts, max_ts]，
+	// 每轮只补两头新增的部分（左边新回补的老 K 线 + 右边新生成的新 K 线）。
+	`CREATE TABLE IF NOT EXISTS signal_scan_state (
+		inst_id    VARCHAR(32) NOT NULL,
+		bar        VARCHAR(4)  NOT NULL,
+		min_ts     BIGINT NOT NULL DEFAULT 0,
+		max_ts     BIGINT NOT NULL DEFAULT 0,
+		scanned    BIGINT NOT NULL DEFAULT 0,
+		updated_at BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (inst_id, bar)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
 }
 
 // ---------------------------------------------------------------------------

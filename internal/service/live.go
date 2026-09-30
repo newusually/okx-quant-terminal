@@ -322,6 +322,11 @@ func exitPass() (int, *Account, error) {
 	}
 	eng.apiErrStreak = 0
 
+	// 探一次账户持仓模式（只探一次，之后走缓存）。
+	// 首次启动就在这里打出「持仓模式=xxx → posSide 采用 xxx」，
+	// 不用等到有信号才发现 posSide 参数不对。
+	cli.PosMode()
+
 	store := repo.NewStore(cfg)
 	if !eng.storeInit {
 		if err := store.Init(); err != nil {

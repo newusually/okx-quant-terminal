@@ -408,3 +408,30 @@ main .center.jump-flash {
   animation: jumpFlash .6s ease-out 2;
   border-color: var(--accent) !important;
 }
+
+/* ------------------------------------------------------------------ */
+/* 权益曲线：悬停提示（跟随光标显示那一刻的权益/盈亏）                    */
+/* ------------------------------------------------------------------ */
+
+.pnl-tip {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  min-width: 172px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: rgba(22, 26, 30, .95);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  font-size: 11px;
+  color: var(--text);
+  backdrop-filter: blur(4px);
+}
+.pnl-tip.hidden { display: none; }
+
+/* 权益曲线上方那行说明（采样区间 / 点数 / 是否抽稀） */
+.pnl-meta {
+  padding: 2px 4px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}

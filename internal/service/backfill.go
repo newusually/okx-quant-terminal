@@ -66,9 +66,14 @@ func DefaultBackfillConfig() BackfillConfig {
 }
 
 // BackfillTask 一个 (合约,周期) 回补任务
+//
+// Light=true 表示「只把最新一段拉回来」（一次请求）。回补队列第一遍全用 Light，
+// 几分钟内就能让每个合约的每个周期都有近期 K 线 —— 历史信号要 200 根暖机，
+// 没有这一段 1m/3m/5m 的图就是空的、信号一条都出不来。
 type BackfillTask struct {
 	InstID string
 	Bar    string
+	Light  bool
 }
 
 // jobKey 任务唯一键
@@ -81,7 +86,7 @@ type BackfillManager struct {
 	cfg  BackfillConfig
 
 	mu      sync.Mutex
-	queue   chan [2]string // [instID, bar]
+	queue   chan BackfillTask // 回补任务队列（Light 与 Full 混排）
 	queued  map[string]bool
 	running bool
 
@@ -127,7 +132,7 @@ func NewBackfillManager(db *repo.DB, feed *DataFeed, cfg BackfillConfig, logf fu
 	}
 	return &BackfillManager{
 		db: db, feed: feed, cfg: cfg,
-		queue:    make(chan [2]string, 4096),
+		queue:    make(chan BackfillTask, 8192),
 		queued:   map[string]bool{},
 		progress: map[string]model.BackfillJob{},
 		knownTs:  map[string]int64{},
@@ -179,7 +184,7 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 	m.logf("回补计划（Scope=%s）：%d 个任务，并发 %d，磁盘守卫 %dMB",
 		m.cfg.Scope, len(plan), m.cfg.Workers, m.cfg.MinFreeMB)
 	for _, t := range plan {
-		m.Enqueue(t.InstID, t.Bar)
+		m.enqueueTask(t)
 	}
 	if free := FreeDiskMB(m.cfg.RootDir); free > 0 {
 		m.logf("当前剩余磁盘 %d MB", free)
@@ -198,13 +203,18 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 
 // buildPlan 生成启动时的回补队列。
 //
-// 排序原则：**便宜的先跑**。周期越长、翻页越少，先用极小的代价让「每个合约的
-// 主图都有一个月数据」，再回头补贵的 1m。
+// 排序原则：**用户最缺的先跑**。
 //
-//	plan（默认）：全部 live 合约 × 15m/1H/4H  →  可交易合约 × 5m/3m/1m
-//	             约 13.1M 行 ≈ 1.4 GB，15m 图几分钟内即可用
+//	1m/3m/5m 的历史信号要 200 根以上 K 线才算得出来，之前队列把这三个周期
+//	排在最后（15m/1H/4H 铺完全部合约才轮到），结果图一切到 1m/3m/5m 就是
+//	空的、信号也没有。现在把小周期提到最前。
+//
+//	liveIDs() 已经按 tradeable DESC, quote_vol24h DESC 排过序 —— 能下单的
+//	热门合约天然排在前面，所以「先补的」就是用户最常看的。
+//
+//	plan（默认）：全部 live 合约 × 5m/3m/1m  →  全部 live 合约 × 15m/1H/4H
 //	tradeable  ：可交易合约 × 全部 6 个周期
-//	live       ：全部 live 合约 × 全部 6 个周期（≈3.6 GB，磁盘不够会自动暂停）
+//	live       ：全部 live 合约 × 全部 6 个周期
 //	focus      ：只回补 FocusN 个焦点合约（旧行为）
 func (m *BackfillManager) buildPlan() []BackfillTask {
 	all := m.liveIDs()
@@ -237,14 +247,28 @@ func (m *BackfillManager) buildPlan() []BackfillTask {
 		return appendAll([]BackfillTask{}, all, m.cfg.Bars...)
 	}
 
-	// 默认 plan：便宜的周期铺满全部合约，贵的周期只铺可交易合约
-	if len(tradable) == 0 {
-		tradable = all
+	// 默认 plan：两遍走。
+	//
+	//	第一遍 Light：每个 (合约,周期) 只拉最新 300 根 —— 全部任务合起来
+	//	  不到三千个请求，几分钟就能让每个合约的每个周期都有近期 K 线。
+	//	  历史信号要 200 根暖机，之前 1m/3m/5m 一条信号都没有，就是连
+	//	  这段近期的 K 线都还没铺。
+	//	第二遍 Full：再逐个往前翻满 Days 天（已铺够的走轻量路径秒过）。
+	//
+	// 周期顺序：5m/15m/1H 排最前 —— 用户要的就是这几个周期的信号。
+	// 3m/1m 排最后：这两条已经不要信号了，而且 1m 一个月 4.3 万根/合约、
+	// 全部合约要二十多万次请求（五六个小时），排在前面会把要用的周期一直堵着。
+	pick := func(dst []BackfillTask) []BackfillTask {
+		dst = appendAll(dst, all, "5m", "15m", "1H", "4H", "3m", "1m")
+		return dst
 	}
-	out := []BackfillTask{}
-	out = appendAll(out, all, "15m", "1H", "4H")
-	out = appendAll(out, tradable, "5m", "3m", "1m")
-	return out
+
+	full := pick([]BackfillTask{})
+	out := make([]BackfillTask, 0, len(full)*2)
+	for _, t := range full {
+		out = append(out, BackfillTask{InstID: t.InstID, Bar: t.Bar, Light: true})
+	}
+	return append(out, full...)
 }
 
 // liveIDs 全部 live 状态的合约
@@ -389,10 +413,18 @@ func (m *BackfillManager) SyncTickers() error {
 
 // Enqueue 排队一个 (合约,周期) 的回补任务。已经在队列里就跳过。
 func (m *BackfillManager) Enqueue(instID, bar string) bool {
-	if instID == "" || bar == "" || !IsSupportedBar(bar) {
+	return m.enqueueTask(BackfillTask{InstID: instID, Bar: bar})
+}
+
+// enqueueTask 排队一个任务（带 Light 标记）。同 key 在队列里就跳过。
+func (m *BackfillManager) enqueueTask(t BackfillTask) bool {
+	if t.InstID == "" || t.Bar == "" || !IsSupportedBar(t.Bar) {
 		return false
 	}
-	k := jobKey(instID, bar)
+	k := jobKey(t.InstID, t.Bar)
+	if t.Light {
+		k += "|light"
+	}
 	m.mu.Lock()
 	if m.queued[k] {
 		m.mu.Unlock()
@@ -402,8 +434,8 @@ func (m *BackfillManager) Enqueue(instID, bar string) bool {
 	m.mu.Unlock()
 
 	select {
-	case m.queue <- [2]string{instID, bar}:
-		m.setProgress(instID, bar, "queued", "已排队")
+	case m.queue <- t:
+		m.setProgress(t.InstID, t.Bar, "queued", "已排队")
 		return true
 	default:
 		m.mu.Lock()
@@ -420,12 +452,21 @@ func (m *BackfillManager) worker() {
 		case <-m.stopCh:
 			return
 		case job := <-m.queue:
-			instID, bar := job[0], job[1]
-			if err := m.backfillOne(instID, bar); err != nil {
-				m.logf("✗ 回补失败 %s %s：%v", instID, bar, err)
+			var err error
+			if job.Light {
+				err = m.backfillLight(job.InstID, job.Bar)
+			} else {
+				err = m.backfillOne(job.InstID, job.Bar)
+			}
+			if err != nil {
+				m.logf("✗ 回补失败 %s %s：%v", job.InstID, job.Bar, err)
+			}
+			k := jobKey(job.InstID, job.Bar)
+			if job.Light {
+				k += "|light"
 			}
 			m.mu.Lock()
-			delete(m.queued, jobKey(instID, bar))
+			delete(m.queued, k)
 			m.mu.Unlock()
 		}
 	}
@@ -436,10 +477,48 @@ func (m *BackfillManager) BackfillOne(instID, bar string) error {
 	return m.backfillOne(instID, bar)
 }
 
+// backfillLight 只把最新一段拉回来（一次请求、300 根），不翻历史页。
+//
+// 队列第一遍用它：几分钟内让全部合约 × 全部周期都有近期 K 线，
+// 历史信号（要 200 根暖机）立刻算得出来，不用等整轮翻页跑完。
+func (m *BackfillManager) backfillLight(instID, bar string) error {
+	latest, err := m.feed.FetchCandles(instID, bar, 300)
+	if err != nil {
+		m.setProgress(instID, bar, "error", "拉最新 K 线失败："+err.Error())
+		return err
+	}
+	if len(latest) == 0 {
+		return nil
+	}
+	if _, err := m.db.UpsertKlines(latest); err != nil {
+		m.setProgress(instID, bar, "error", "写库失败："+err.Error())
+		return err
+	}
+	m.markKnown(instID, bar, latest[len(latest)-1].Ts)
+	m.setProgress(instID, bar, "queued", fmt.Sprintf("已铺最新 %d 根", len(latest)))
+	return nil
+}
+
 // backfillOne 单个任务：先补最新 300 根，再一路往前翻到覆盖满 Days 天
+//
+// 已经覆盖够天数的一律走「轻量收尾」：只把最新一段拉回来（保证图不滞后），
+// 不再翻历史页。回补队列重启后是整队重放的，没有这个判断就要把一个月的数据
+// 全部重拉一遍 —— 光 15m 那 442 个已完成的合约就要白跑二十多分钟。
 func (m *BackfillManager) backfillOne(instID, bar string) error {
 	target := time.Now().AddDate(0, 0, -m.cfg.Days)
 	targetMs := target.UnixMilli()
+
+	if cov, cerr := m.db.Coverage(instID, bar); cerr == nil &&
+		cov.Count > 0 && cov.Days >= float64(m.cfg.Days)-0.5 {
+		if latest, err := m.feed.FetchCandles(instID, bar, 100); err == nil && len(latest) > 0 {
+			if _, uerr := m.db.UpsertKlines(latest); uerr != nil {
+				return uerr
+			}
+			m.markKnown(instID, bar, latest[len(latest)-1].Ts)
+		}
+		m.setProgress(instID, bar, "done", fmt.Sprintf("已覆盖 %.1f 天", cov.Days))
+		return nil
+	}
 
 	m.setProgress(instID, bar, "running", "开始回补")
 

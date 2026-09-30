@@ -20,6 +20,7 @@ package service
 import (
 	"context"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,27 +43,48 @@ const sigWarmup = 200
 const sigWindow = 700
 
 var (
-	sigBfMu     sync.Mutex
-	sigBfWater  = map[string]int64{} // "inst|bar" -> 已回算到的最大 ts
-	sigBfBusy   atomic.Bool          // 防止两轮回算叠跑
+	sigBfMu   sync.Mutex
+	sigBfSpan = map[string]repo.SignalScanSpan{} // "inst|bar" -> 已扫描的 K 线区间
+	sigBfBusy atomic.Bool                        // 防止两轮回算叠跑
 )
 
-// LoadSignalWatermarks 启动时从表里恢复水位线。
-func LoadSignalWatermarks(db *repo.DB) {
-	wm, err := db.SignalWatermarks()
+// LoadSignalScanSpans 启动时从表里恢复扫描水位线。
+func LoadSignalScanSpans(db *repo.DB) {
+	sp, err := db.LoadSignalScanSpans()
 	if err != nil {
 		return
 	}
 	sigBfMu.Lock()
-	for k, v := range wm {
-		if v > sigBfWater[k] {
-			sigBfWater[k] = v
+	for k, v := range sp {
+		if v.MaxTs > sigBfSpan[k].MaxTs {
+			sigBfSpan[k] = v
 		}
 	}
 	sigBfMu.Unlock()
 }
 
+// SaveSignalScanSpans 把当前水位线落盘。
+func SaveSignalScanSpans(db *repo.DB) {
+	sigBfMu.Lock()
+	snap := make(map[string]repo.SignalScanSpan, len(sigBfSpan))
+	for k, v := range sigBfSpan {
+		snap[k] = v
+	}
+	sigBfMu.Unlock()
+	_ = db.SaveSignalScanSpans(snap)
+}
+
 // BackfillSignalsFor 对单个 (合约, 周期) 回算历史信号，返回写入条数。
+//
+// 增量策略（关键）：
+//
+//	K 线回补是「从最近往老补」的，数据区间只会向左扩张：
+//	  [T-1天, now] → [T-30天, now]
+//	早期版本只记 MAX(ts) 当水位线，结果后补进来的老 K 线 ts 全都小于水位线，
+//	被当成「算过了」跳过 —— 信号永远追不上 K 线（1m/3m/5m 卡在只有几个合约）。
+//
+//	现在记闭区间 [MinTs, MaxTs]：区间内的跳过，两头的增量（左边新补的老 K 线、
+//	右边新生成的新 K 线）都算。落盘在 signal_scan_state 表，重启不丢。
 func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int, error) {
 	rows, err := db.QueryKlines(model.KlineQuery{InstID: instID, Bar: bar})
 	if err != nil {
@@ -71,15 +93,27 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 	if len(rows) <= sigWarmup {
 		return 0, nil // 暖机都不够，每根都是 NaN，白算
 	}
-	// QueryKlines 按 ts DESC 返回，转成 ComputeSignal 要的升序（老→新）
+	// QueryKlines 已经返回升序（老→新）。这里不再反转 ——
+	// 曾因为多反转一次导致整段变降序：水位线记反、指标窗口时间倒序，
+	// 算出来的信号全是错的。为了不再被上游顺序变化坑到，显式再排一次。
 	asc := make([]Candle, len(rows))
 	for i, k := range rows {
-		asc[len(rows)-1-i] = Candle{Ts: k.Ts, O: k.O, H: k.H, L: k.L, C: k.C, V: k.V}
+		asc[i] = Candle{Ts: k.Ts, O: k.O, H: k.H, L: k.L, C: k.C, V: k.V}
 	}
+	sort.Slice(asc, func(i, j int) bool { return asc[i].Ts < asc[j].Ts })
 
+	key := instID + "|" + bar
 	sigBfMu.Lock()
-	last := sigBfWater[instID+"|"+bar]
+	sp := sigBfSpan[key]
 	sigBfMu.Unlock()
+
+	oldest := asc[0].Ts
+	newest := asc[len(asc)-1].Ts
+
+	// 整段都扫过了 → 秒退（绝大多数轮次都是这条路）
+	if sp.MaxTs > 0 && oldest >= sp.MinTs && newest <= sp.MaxTs {
+		return 0, nil
+	}
 
 	th := cfg.ThresholdFor(instID)
 	nowMs := time.Now().UnixMilli()
@@ -100,8 +134,10 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 	}
 
 	for i := sigWarmup; i < len(asc); i++ {
-		if asc[i].Ts <= last {
-			continue // 水位线之前算过了
+		ts := asc[i].Ts
+		// 已扫区间内跳过（区间外 = 新回补的老 K 线 或 新生成的新 K 线）
+		if sp.MaxTs > 0 && ts >= sp.MinTs && ts <= sp.MaxTs {
+			continue
 		}
 		// 窗口截断：只喂最近 sigWindow 根（见 sigWindow 注释）。
 		// i < sigWindow 时窗口就是 [0, i]，与全段等价。
@@ -131,10 +167,21 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 		return total, err
 	}
 
+	// 更新水位线：区间并上本次 K 线的范围
 	sigBfMu.Lock()
-	if asc[len(asc)-1].Ts > sigBfWater[instID+"|"+bar] {
-		sigBfWater[instID+"|"+bar] = asc[len(asc)-1].Ts
+	cur := sigBfSpan[key]
+	if cur.MaxTs == 0 {
+		cur = repo.SignalScanSpan{MinTs: oldest, MaxTs: newest}
+	} else {
+		if oldest < cur.MinTs {
+			cur.MinTs = oldest
+		}
+		if newest > cur.MaxTs {
+			cur.MaxTs = newest
+		}
 	}
+	cur.Scanned = int64(len(asc))
+	sigBfSpan[key] = cur
 	sigBfMu.Unlock()
 	return total, nil
 }
@@ -170,7 +217,7 @@ func RunSignalBackfillOnce(cfg *conf.Config, db *repo.DB, bar string,
 	var doneCnt int64
 	jobs := make(chan string)
 	var wg sync.WaitGroup
-	workers := 2 // 2 逻辑核，别抢交易的 CPU
+	workers := 3 // 2 逻辑核，回算以 CPU 为主但夹杂 MySQL 写，压到 3 路能快一些
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -191,6 +238,9 @@ func RunSignalBackfillOnce(cfg *conf.Config, db *repo.DB, bar string,
 	}
 	close(jobs)
 	wg.Wait()
+
+	// 水位线落盘（重启后接着跑，不重算）
+	SaveSignalScanSpans(db)
 
 	n, c := int(doneCnt), int(atomic.LoadInt64(&totalSig))
 	if n > 0 {
@@ -215,22 +265,19 @@ func StartSignalBackfillLoop(ctx context.Context, db *repo.DB,
 				logf("历史信号回算协程退出：%v", r)
 			}
 		}()
-		LoadSignalWatermarks(db)
+		LoadSignalScanSpans(db)
 
 		// 先等数据：回补第一波要一两分钟
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(90 * time.Second):
+		case <-time.After(20 * time.Second):
 		}
 
 		for {
 			cfg := conf.LoadConfig()
 			if cfg != nil && cfg.Enabled {
-				bars := cfg.SignalBars
-				if len(bars) == 0 {
-					bars = []string{cfg.Bar}
-				}
+				bars := normalizeSignalBars(cfg)
 				for _, bar := range bars {
 					select {
 					case <-ctx.Done():
@@ -240,13 +287,67 @@ func StartSignalBackfillLoop(ctx context.Context, db *repo.DB,
 					RunSignalBackfillOnce(cfg, db, bar, logf)
 				}
 			}
+			// 一轮跑完马上开下一轮（增量轮基本秒回），
+			// 但别空转：留 30 秒让 K 线回补插新数据。
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Minute):
+			case <-time.After(30 * time.Second):
 			}
 		}
 	}()
+}
+
+// normalizeSignalBars 取信号回算周期列表，并按周期从大到小排。
+//
+// 大周期（4H/1H）K 线根数少、算得快，先跑完 —— 用户切到这些周期马上
+// 就能看到补齐的 🚀；1m 根数最多放最后，不会把整轮时间全占了。
+func normalizeSignalBars(cfg *conf.Config) []string {
+	bars := cfg.SignalBars
+	if len(bars) == 0 {
+		bars = []string{cfg.Bar}
+	}
+	out := make([]string, 0, len(bars))
+	for _, b := range bars {
+		b = strings.TrimSpace(b)
+		if b == "" {
+			continue
+		}
+		out = append(out, b)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return barRank(out[i]) > barRank(out[j])
+	})
+	return out
+}
+
+// barRank 周期的「大→小」排序权重（越大越长的周期放前面）。
+func barRank(bar string) int {
+	switch strings.ToLower(strings.TrimSpace(bar)) {
+	case "1d":
+		return 900
+	case "12h":
+		return 800
+	case "6h":
+		return 700
+	case "4h":
+		return 600
+	case "2h":
+		return 500
+	case "1h":
+		return 400
+	case "30m":
+		return 300
+	case "15m":
+		return 200
+	case "5m":
+		return 100
+	case "3m":
+		return 50
+	case "1m":
+		return 1
+	}
+	return 0
 }
 
 // signalBarEnabled 信号回算周期白名单判定（大小写不敏感）

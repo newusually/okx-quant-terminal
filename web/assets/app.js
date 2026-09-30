@@ -15,6 +15,8 @@ const state = {
   chart: null, candle: null, volume: null, ma7: null, ma25: null, ma99: null,
   bollUp: null, bollMid: null, bollLo: null,
   pnlChart: null, pnlLine: null,
+  pnlData: [],          // 权益曲线的原始点（悬停时查浮盈/持仓数用）
+  pnlFitted: false,     // 只在首次铺满视野，之后轮询不打断用户缩放
   bfPollTimer: null,
   lastKlineKey: '',
 
@@ -387,15 +389,67 @@ function initPnlChart() {
     grid: { vertLines: { color: '#1d2228' }, horzLines: { color: '#1d2228' } },
     rightPriceScale: { borderColor: '#262b31' },
     timeScale: { borderColor: '#262b31', timeVisible: true },
+    crosshair: {
+      vertLine: { color: '#fcd535', width: 1, style: 2, labelBackgroundColor: '#fcd535' },
+      horzLine: { color: '#fcd535', width: 1, style: 2, labelBackgroundColor: '#fcd535' },
+    },
   });
   state.pnlLine = state.pnlChart.addAreaSeries({
     lineColor: '#fcd535', topColor: 'rgba(252,213,53,.35)', bottomColor: 'rgba(252,213,53,0)',
     lineWidth: 2,
   });
+  // 光标移到曲线上任意位置 → 显示那一刻的权益、相对本金的盈亏、浮盈、持仓数
+  state.pnlChart.subscribeCrosshairMove((param) => showPnlTip(param));
   new ResizeObserver(() => {
     state.pnlChart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
   }).observe(el);
   state.pnlChart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+}
+
+// showPnlTip 权益曲线的悬浮框。鼠标移出图区就隐藏。
+function showPnlTip(param) {
+  const el = $('pnlTip');
+  const box = $('pnlChart');
+  if (!el || !box) return;
+  const pts = state.pnlData || [];
+  if (!param || !param.time || !param.point || !pts.length) {
+    el.classList.add('hidden');
+    return;
+  }
+  // 优先用 seriesData（图表插值后的值），拿不到再按秒级时间戳去原始数据里找
+  let eq = null;
+  if (param.seriesData && state.pnlLine) {
+    const d = param.seriesData.get(state.pnlLine);
+    if (d && typeof d.value === 'number') eq = d.value;
+  }
+  const p = pts.find((x) => Math.floor(x.ts / 1000) === param.time) || null;
+  if (eq === null && p) eq = p.totalEq;
+  if (eq === null) { el.classList.add('hidden'); return; }
+
+  const principal = (state.account && state.account.principal) || 0;
+  const pnl = principal > 0 ? eq - principal : 0;
+  const t = p ? p.ts : param.time * 1000;
+  el.innerHTML =
+    `<div class="tip-time">${fmtTime(t)}</div>` +
+    `<div class="tip-row"><span>账户权益</span><b>${fmtNum(eq, 4)} USDT</b></div>` +
+    (principal > 0
+      ? `<div class="tip-row"><span>相对本金</span><b class="${cls(pnl)}">${pnl >= 0 ? '+' : ''}${fmtNum(pnl, 4)} USDT</b></div>`
+      : '') +
+    (p
+      ? `<div class="tip-row"><span>浮盈</span><b class="${cls(p.upl)}">${p.upl >= 0 ? '+' : ''}${fmtNum(p.upl, 4)}</b></div>` +
+        `<div class="tip-row"><span>持仓</span><b>${p.posCount || 0} 个</b></div>` +
+        `<div class="tip-row"><span>可用</span><b>${fmtNum(p.avail, 4)}</b></div>`
+      : '');
+
+  // 贴边翻转：右侧放不下就移到光标左边
+  el.classList.remove('hidden');
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let x = param.point.x + 16;
+  if (x + w > box.clientWidth) x = Math.max(8, param.point.x - w - 16);
+  let y = param.point.y + 12;
+  if (y + h > box.clientHeight) y = Math.max(8, param.point.y - h - 12);
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
 }
 
 /* ------------------------------------------------------------------ */
@@ -564,10 +618,16 @@ function renderStats() {
   $('stTodayPnl').className = cls(a.todayPnl);
 
   // ---- 持仓 / 胜率 ----
+  // 没成交过时也要显示 0 / 0.0%，不能留 -- —— 留白会让用户以为界面坏了
+  // （顶栏这一排本来就是实时刷新的，给 0 也是「实时」的一部分）。
   $('stPos').textContent = a.posCount || s.posCount || 0;
-  $('stWin').textContent = s.tradesTotal > 0 ? (s.winRate || 0).toFixed(1) + '%' : '--';
-  $('stWinSub').textContent = s.tradesTotal > 0
-    ? `${s.tradesTotal} 笔 · 已实现 ${fmtNum(a.realized, 3)}` : '--';
+  $('stPos').className = (a.posCount || 0) > 0 ? 'accent' : '';
+  const total = s.tradesTotal || 0;
+  $('stWin').textContent = total > 0 ? (s.winRate || 0).toFixed(1) + '%' : '0.0%';
+  $('stWin').className = total > 0 ? (s.winRate >= 50 ? 'up' : 'down') : 'muted';
+  $('stWinSub').textContent = total > 0
+    ? `${total} 笔 · 已实现 ${fmtNum(a.realized, 3)}`
+    : '待首笔平仓';
 
   // ---- 自动交易状态灯 ----
   renderLiveBadge(st.live);
@@ -1089,7 +1149,7 @@ async function loadPositions() {
 }
 
 async function loadHistory() {
-  const j = await api('/api/history?limit=200');
+  const j = await api('/api/history?limit=300');
   const rows = j.list || [];
   $('badgeHis').textContent = rows.length;
   const tb = $('tbHistory');
@@ -1177,16 +1237,38 @@ async function loadBackfill() {
 }
 
 async function loadPnl() {
-  const j = await api('/api/pnl');
+  // 只看最近一周（引擎每 3 秒写一条快照，一周原始点约 20 万个，
+  // 后端会抽稀到 1500 点再返回，不然浏览器画不动）
+  const j = await api('/api/pnl?days=7');
   const rows = j.list || [];
+  state.pnlData = rows;
   const empty = $('pnlEmpty');
   if (!rows.length) {
     empty.classList.remove('hidden');
+    const meta0 = $('pnlMeta');
+    if (meta0) meta0.textContent = '';
     return;
   }
   empty.classList.add('hidden');
   state.pnlLine.setData(rows.map((p) => ({ time: Math.floor(p.ts / 1000), value: p.totalEq || 0 })));
-  state.pnlChart.timeScale().fitContent();
+  // 权益快照是从引擎上线那一刻才开始累积的，还没满一周就如实写出来，
+  // 免得用户以为曲线画错了或者数据丢了。
+  const meta = $('pnlMeta');
+  if (meta) {
+    const t0 = rows[0].ts;
+    const t1 = rows[rows.length - 1].ts;
+    const spanH = (t1 - t0) / 3600000;
+    const spanTxt = spanH >= 48 ? (spanH / 24).toFixed(1) + ' 天' : spanH.toFixed(1) + ' 小时';
+    meta.textContent =
+      `最近一周 · ${rows.length} 个采样点（${fmtShort(t0)} → ${fmtShort(t1)}，跨度 ${spanTxt}）` +
+      (j.rawCount > rows.length ? ` · 原始 ${j.rawCount} 点已抽稀` : '');
+  }
+  // 只在第一次铺满视野：之后每 10 秒轮询不再 fitContent，
+  // 否则用户刚缩放/拖动就被拽回去。
+  if (!state.pnlFitted) {
+    state.pnlChart.timeScale().fitContent();
+    state.pnlFitted = true;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1313,7 +1395,13 @@ function pollBackfillUntilDone() {
   setInterval(() => { loadAccount().catch(() => {}); }, 2000);
   setInterval(() => { loadPositions().catch(() => {}); }, 3000);
   setInterval(() => { loadHistory().catch(() => {}); loadSignals().catch(() => {}); }, 10000);
-  setInterval(() => { loadBackfill().catch(() => {}); loadState().catch(() => {}); }, 20000);
+  setInterval(() => {
+    loadBackfill().catch(() => {});
+    loadState().catch(() => {});
+    // 权益曲线也实时刷新：只在面板开着的时候拉，省得白跑
+    const pnlTab = $('tabPnl');
+    if (pnlTab && !pnlTab.classList.contains('hidden')) loadPnl().catch(() => {});
+  }, 10000);
 
   // 页面重新可见时立刻补一次数据（后台标签页会被浏览器节流）
   document.addEventListener('visibilitychange', () => {

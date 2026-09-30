@@ -205,7 +205,12 @@
   </div>
 
   <div class="tab-body hidden" id="tabPnl">
-    <div class="pnl-box"><div id="pnlChart"></div><div class="empty" id="pnlEmpty">暂无权益快照（策略引擎运行时每分钟写入）</div></div>
+    <div class="pnl-meta" id="pnlMeta"></div>
+    <div class="pnl-box">
+      <div id="pnlChart"></div>
+      <div class="pnl-tip hidden" id="pnlTip"></div>
+      <div class="empty" id="pnlEmpty">暂无权益快照（策略引擎运行时每 3 秒写入一条）</div>
+    </div>
   </div>
 </section>
 

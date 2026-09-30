@@ -81,6 +81,14 @@ type OKXClient struct {
 	instruments   map[string]Instrument
 	instLoadedAt  time.Time
 	lastQuoteVols map[string]float64
+
+	// 账户持仓模式（net_mode / long_short_mode）。启动后探一次就缓存。
+	//
+	// 单向模式下 posSide 传 net 或不传；双向模式下**必须**传 long/short，
+	// 否则 OKX 直接回 51000 Parameter posSide error —— 下单、设杠杆全被拒，
+	// 表现就是「有信号但一条买入记录都没有」。
+	posModeOnce sync.Once
+	posMode     string
 }
 
 func newOKXClient(cfg *conf.Config) (*OKXClient, error) {
@@ -671,15 +679,62 @@ func (c *OKXClient) Balance() (*Account, error) {
 	return acc, nil
 }
 
+// PosMode 探测账户持仓模式（net_mode / long_short_mode），只探一次。
+//
+// 用户在 OKX 后台改过持仓模式的话，这里探测到的值决定后面所有下单参数 ——
+// 不写死 "net"，省得账户一切模式整条链路就哑掉。
+func (c *OKXClient) PosMode() string {
+	c.posModeOnce.Do(func() {
+		c.posMode = "net_mode" // 探测失败时的保守默认
+		raw, err := c.Get("/api/v5/account/config", true)
+		if err != nil {
+			logx.Logf("WARN", "读 OKX 账户配置失败，按单向持仓（posSide=net）处理：%v", err)
+			return
+		}
+		var rows []struct {
+			PosMode string `json:"posMode"`
+		}
+		if json.Unmarshal(raw, &rows) == nil && len(rows) > 0 && rows[0].PosMode != "" {
+			c.posMode = rows[0].PosMode
+		}
+		// 这里不能调 EffectivePosSide（它内部又会进 PosMode → sync.Once 自锁）
+		ps := "net"
+		if c.posMode == "long_short_mode" {
+			ps = "long"
+		}
+		logx.Logf("INFO", "OKX 账户持仓模式=%s → 下单 posSide 采用 %q", c.posMode, ps)
+	})
+	return c.posMode
+}
+
+// EffectivePosSide 把配置里写的 posSide 翻译成当前账户模式下合法的值。
+//
+//	双向持仓（long_short_mode）：只做多 → long；传 net 会被 OKX 拒（51000）
+//	单向持仓（net_mode）：net
+func (c *OKXClient) EffectivePosSide(want string) string {
+	if c.PosMode() == "long_short_mode" {
+		if want == "" || want == "net" {
+			return "long"
+		}
+		return want
+	}
+	return "net"
+}
+
 func (c *OKXClient) SetLeverage(instID string, lever int, mgnMode string) error {
 	if mgnMode == "" {
 		mgnMode = "isolated"
 	}
-	_, err := c.Post("/api/v5/account/set-leverage", map[string]string{
+	p := map[string]string{
 		"instId":  instID,
 		"lever":   strconv.Itoa(lever),
 		"mgnMode": mgnMode,
-	})
+	}
+	// 双向持仓模式下 posSide 是必填项，缺了 OKX 直接回 51000
+	if c.PosMode() == "long_short_mode" {
+		p["posSide"] = "long"
+	}
+	_, err := c.Post("/api/v5/account/set-leverage", p)
 	return err
 }
 
@@ -699,8 +754,10 @@ func (c *OKXClient) PlaceOrder(instID, tdMode, side, posSide, ordType, sz string
 		"ordType": ordType,
 		"sz":      sz,
 	}
-	if posSide != "" && posSide != "net" {
-		payload["posSide"] = posSide
+	// posSide 要按账户实际持仓模式翻译：
+	// 双向模式传 net 会被拒，必须传 long（本策略只做多；平仓时 long + reduceOnly）
+	if ps := c.EffectivePosSide(posSide); ps != "" && ps != "net" {
+		payload["posSide"] = ps
 	}
 	if reduceOnly {
 		payload["reduceOnly"] = "true"
@@ -746,4 +803,39 @@ func toInt64(s string) int64 {
 		return 0
 	}
 	return v
+}
+
+// ---------------------------------------------------------------------------
+// 交易链路自检
+// ---------------------------------------------------------------------------
+
+// ProbeTrading 交易链路自检：探测账户持仓模式，并试设一次杠杆（不下单）。
+//
+// 给命令行 / 运维用：不开网页、不下单也能确认「下单参数会不会被 OKX 拒」。
+// 起因是账户切到双向持仓后 posSide=net 被 OKX 直接拒（51000 Parameter
+// posSide error），表现就是「图上有信号、后台也在扫，但一条买入记录都没有」。
+// 这个自检就是防这种「参数不对但没人知道」的情况。
+func ProbeTrading(instID string, lever int) (string, error) {
+	cfg := conf.LoadConfig()
+	if cfg == nil {
+		return "", errors.New("读不到配置（configs/okx_strategy.json）")
+	}
+	cli, err := newOKXClient(cfg)
+	if err != nil {
+		return "", err
+	}
+	if err := cli.EnsureReady(); err != nil {
+		return "", fmt.Errorf("连接 OKX 失败：%w", err)
+	}
+	mode := cli.PosMode()
+	if instID == "" {
+		return mode, nil
+	}
+	if lever <= 0 {
+		lever = cfg.Entry.Leverage
+	}
+	if err := cli.SetLeverage(instID, lever, cfg.Entry.TdMode); err != nil {
+		return mode, fmt.Errorf("设杠杆失败：%w", err)
+	}
+	return mode, nil
 }

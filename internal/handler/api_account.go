@@ -194,7 +194,10 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, error) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 200)
+	limit := atoiDefault(r.URL.Query().Get("limit"), 300)
+	if limit > 2000 {
+		limit = 2000
+	}
 	rows, err := s.db.ClosedTrades(limit)
 	if err != nil {
 		return nil, err
@@ -258,32 +261,83 @@ func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) (any, err
 // /api/pnl
 // ---------------------------------------------------------------------------
 
+// pnlPoint 权益曲线上的一个采样点
+type pnlPoint struct {
+	Ts      int64   `json:"ts"`
+	TotalEq float64 `json:"totalEq"`
+	Avail   float64 `json:"avail"`
+	Upl     float64 `json:"upl"`
+	PosCnt  int     `json:"posCount"`
+}
+
+// handlePnl 权益曲线数据。
+//
+// 参数：
+//
+//	days  只看最近多少天（默认 7，前端画「最近一周」；传 0 = 不限）
+//	limit 最多取多少行原始快照（默认 20000）
+//	max   抽稀后最多返回多少个点（默认 1500）
+//
+// 为什么要抽稀：引擎每 3 秒写一条权益快照，一周就是 20 万条 ——
+// 直接塞给前端画图，浏览器会卡死。这里按等间隔抽，首尾必留。
 func (s *Server) handlePnl(w http.ResponseWriter, r *http.Request) (any, error) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 2000)
-	rows, err := s.db.SQL().Query(
-		`SELECT ts,total_eq,COALESCE(avail,0),COALESCE(upl,0),COALESCE(pos_count,0)
-		 FROM equity ORDER BY ts DESC LIMIT ?`, limit)
+	days := atoiDefault(r.URL.Query().Get("days"), 7)
+	if r.URL.Query().Get("days") == "0" {
+		days = 0
+	}
+	limit := atoiDefault(r.URL.Query().Get("limit"), 20000)
+	maxPts := atoiDefault(r.URL.Query().Get("max"), 1500)
+
+	sqlStr := `SELECT ts,total_eq,COALESCE(avail,0),COALESCE(upl,0),COALESCE(pos_count,0)
+		 FROM equity WHERE 1=1`
+	args := []any{}
+	if days > 0 {
+		sqlStr += " AND ts >= ?"
+		args = append(args, time.Now().AddDate(0, 0, -days).UnixMilli())
+	}
+	sqlStr += " ORDER BY ts DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.SQL().Query(sqlStr, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	type pt struct {
-		Ts      int64   `json:"ts"`
-		TotalEq float64 `json:"totalEq"`
-		Avail   float64 `json:"avail"`
-		Upl     float64 `json:"upl"`
-		PosCnt  int     `json:"posCount"`
-	}
-	tmp := []pt{}
+	tmp := []pnlPoint{}
 	for rows.Next() {
-		var p pt
+		var p pnlPoint
 		if err := rows.Scan(&p.Ts, &p.TotalEq, &p.Avail, &p.Upl, &p.PosCnt); err != nil {
 			return nil, err
 		}
 		tmp = append(tmp, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// DESC 取回来 → 反转成时间升序（图表要的）
 	for i, j := 0, len(tmp)-1; i < j; i, j = i+1, j-1 {
 		tmp[i], tmp[j] = tmp[j], tmp[i]
 	}
-	return map[string]any{"ok": true, "count": len(tmp), "list": tmp}, nil
+
+	raw := len(tmp)
+	if maxPts > 0 && len(tmp) > maxPts {
+		tmp = downsamplePnl(tmp, maxPts)
+	}
+	return map[string]any{
+		"ok": true, "count": len(tmp), "rawCount": raw, "days": days, "list": tmp,
+	}, nil
+}
+
+// downsamplePnl 等间隔抽稀，首尾必留（首尾是曲线的起止点，丢了会看起来不对）。
+func downsamplePnl(in []pnlPoint, maxPts int) []pnlPoint {
+	n := len(in)
+	out := make([]pnlPoint, 0, maxPts+1)
+	step := float64(n) / float64(maxPts)
+	for f := 0.0; f < float64(n); f += step {
+		out = append(out, in[int(f)])
+	}
+	if len(out) == 0 || out[len(out)-1].Ts != in[n-1].Ts {
+		out = append(out, in[n-1])
+	}
+	return out
 }
