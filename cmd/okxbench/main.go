@@ -5,10 +5,14 @@ package main
 // 目的：验证 478 个 USDT-SWAP 合约「同时」写库时 MySQL 的表现，
 // 证明换成 MySQL 之后不再有 SQLite 那种「单写者排队」的瓶颈。
 //
+// ★ 重要：压测只写 kline_bench 这张独立表，绝不碰生产表 kline。
+//   历史事故：早期版本直接写 kline，28.68 万行合成数据（价格 ~740、
+//   时间戳带毫秒尾巴）留在库里，把所有合约的 MA25/MA99/布林带全算歪了。
+//
 // 用法：
 //   go run ./cmd/okxbench                       # 478 个合约并发，每个写 300 根 K 线
 //   go run ./cmd/okxbench -contracts 478 -bars 300 -rounds 3
-//   go run ./cmd/okxbench -keep                 # 压测完保留数据（默认压测完清理）
+//   go run ./cmd/okxbench -keep                 # 压测完保留数据（默认压测完清空 kline_bench）
 //
 // 输出：每轮耗时、总行数、行/秒、P50/P95/P99 单合约耗时。
 
@@ -24,6 +28,9 @@ import (
 	"finally-main/internal/repo"
 )
 
+// benchTable 压测写入的表名，写死避免误伤生产表
+const benchTable = "kline_bench"
+
 func main() {
 	var (
 		mHost = flag.String("mysql-host", "127.0.0.1", "MySQL 主机")
@@ -37,7 +44,7 @@ func main() {
 		rounds       = flag.Int("rounds", 3, "压测轮数")
 		batchSize    = flag.Int("batch", 500, "单次批量写入行数上限")
 		symbol       = flag.String("symbol", "BENCH-USDT-SWAP", "压测用的合约前缀（默认用真实合约）")
-		useReal      = flag.Bool("real", true, "用库里真实合约污染方式压测；false 则全部写 BENCH- 假合约")
+		useReal      = flag.Bool("real", false, "用库里真实合约 ID 压测（只影响 ID 文本，数据一律写 kline_bench）")
 		keep         = flag.Bool("keep", false, "压测后保留数据")
 		proxy        = flag.String("proxy", "", "保留参数（压测不联网）")
 	)
@@ -54,7 +61,6 @@ func main() {
 	fmt.Println("==============================================================")
 	fmt.Println(" MySQL 并发写入压测 · 模拟 400+ 合约同时落库")
 	fmt.Println("==============================================================")
-
 	db, err := repo.OpenMySQL(mcfg)
 	if err != nil {
 		fmt.Printf("连接 MySQL 失败：%v\n", err)
@@ -64,6 +70,7 @@ func main() {
 	fmt.Printf(" MySQL 版本 : %s\n", db.ServerVersion())
 	fmt.Printf(" 连接池     : %d\n", mcfg.MaxOpenConns)
 	fmt.Printf(" 批量分片   : %d 行/次\n", mcfg.BatchSize)
+	fmt.Printf(" 目标表     : %s（独立表，绝不写生产表 kline）\n", benchTable)
 
 	// ---- 选合约 ----
 	var contracts []string
@@ -122,7 +129,7 @@ func main() {
 				}
 
 				t0 := time.Now()
-				n, err := db.UpsertKlines(rows)
+				n, err := db.UpsertKlinesInto(benchTable, rows)
 				d := time.Since(t0)
 
 				mu.Lock()
@@ -166,9 +173,8 @@ func main() {
 		st["open"], st["inUse"], st["idle"], st["waitCount"], st["waitSeconds"])
 
 	if !*keep {
-		fmt.Println("清理压测数据…")
-		cut := now - int64(*perContract+10)*60000
-		n, err := db.CleanupBench(cut)
+		fmt.Printf("清理压测数据（整表清空 %s）…\n", benchTable)
+		n, err := db.CleanupBench()
 		if err != nil {
 			fmt.Printf("清理失败：%v\n", err)
 		} else {

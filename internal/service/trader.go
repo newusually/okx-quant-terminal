@@ -146,7 +146,13 @@ func EngineRun(minute string) error {
 
 	// ①.5 加仓（浮亏补仓）：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3
 	//      必须在出场之后（刚平的仓不加）、入场之前（总保证金按新值算）
-	added := runAddons(cfg, cli, store, openPos, markPrices)
+	//
+	//      加满 3 次之后信号再来 → 这一轮直接把仓位平掉（不设止损下唯一的离场通道），
+	//      返回的 closedIDs 要并回本轮平仓集合，后面的入场闸门才不会把额度算错。
+	added, addonClosed := runAddons(cfg, cli, store, openPos, markPrices)
+	closed += len(addonClosed)
+	openPos = dropClosed(openPos, addonClosed)
+	closedIDs = mergeIDs(closedIDs, addonClosed)
 
 	// ② 入场
 	scanInfo := fmt.Sprintf("周期 %s 未启用扫描（bars_enabled 未包含）", bar)
@@ -270,6 +276,13 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 			reason = fmt.Sprintf("止盈 %+.2f%%", pnlPct)
 		} else if cfg.Exit.StopLossPct > 0 && pnlPct <= -cfg.Exit.StopLossPct {
 			reason = fmt.Sprintf("止损 %.2f%%", pnlPct)
+		} else if cfg.Exit.MaxHoldMinutes > 0 {
+			// 超时平仓（按分钟，默认 60 分钟）：
+			// 开仓满一小时还没够到止盈线就撤，别让仓位一直占着并发额度。
+			// 用「分钟」而不是「根」是因为 1H 图和 15m 图的 4 根完全不是一个时长。
+			if nowMs-p.OpenTs >= int64(cfg.Exit.MaxHoldMinutes)*60000 {
+				reason = fmt.Sprintf("超时 %d 分钟未止盈", cfg.Exit.MaxHoldMinutes)
+			}
 		} else if cfg.Exit.MaxHoldBars > 0 {
 			dur := BarDurationMs(p.Bar)
 			if dur <= 0 {
@@ -289,34 +302,70 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 			continue
 		}
 
-		pnl := p.Margin * float64(p.Leverage) * pnlPct / 100
-		ordID := "(dry_run)"
-		if !cfg.DryRun {
-			ord, err := cli.PlaceOrder(p.InstID, cfg.Entry.TdMode, "sell", cfg.Entry.PosSide,
-				"market", fmtSz(p.Sz, 10), true)
-			if err != nil {
-				logx.Logf("ERROR", "%s 平仓失败，下一轮重试：%v", p.InstID, err)
-				continue
-			}
-			ordID = ord.OrdID
-		}
-		row := repo.CloseRow{
-			ID: p.ID, ExitPx: px, Pnl: pnl, PnlPct: pnlPct,
-			Reason: reason, CloseTs: nowMs, OrdID: ordID,
-		}
-		if err := store.Ingest(repo.StorePayload{CloseTrade: &row}); err != nil {
-			logx.Logf("WARN", "写平仓记录失败：%v", err)
+		if err := closeOne(cfg, cli, store, p, px, reason); err != nil {
+			logx.Logf("ERROR", "%s 平仓失败，下一轮重试：%v", p.InstID, err)
+			continue
 		}
 		closed++
 		closedIDs[p.ID] = true
-		logx.Logf("SIGNAL", "平仓 %s 张数=%s 开仓价=%.6f 平仓价=%.6f 盈亏=%+.4fU(%+.2f%%) 原因=%s",
-			p.InstID, fmtSz(p.Sz, 10), p.EntryPx, px, pnl, pnlPct, reason)
 	}
 	return closed, closedIDs
 }
 
-// dropClosed 把本轮已平掉的仓位从在持仓列表里摘掉。
+// closeOne 平掉一个仓位：下单（或 dry_run 跳过）+ 写回平仓记录 + 记日志。
 //
+// 出场有两条路会调它：常规出场（runExits）和「加仓加满仍在亏」（runAddons）。
+// 抽出来是为了两边的下单口径、滑点处理、落库字段完全一致 —— 复制一遍迟早改漏。
+func closeOne(cfg *conf.Config, cli *OKXClient, store *repo.Store,
+	p repo.OpenPos, px float64, reason string) error {
+
+	if px <= 0 || p.EntryPx <= 0 {
+		return fmt.Errorf("价格缺失（px=%.6f entryPx=%.6f）", px, p.EntryPx)
+	}
+	pnlPct := (px/p.EntryPx - 1) * 100
+	pnl := p.Margin * float64(p.Leverage) * pnlPct / 100
+
+	ordID := "(dry_run)"
+	if !cfg.DryRun {
+		ord, err := cli.PlaceOrder(p.InstID, cfg.Entry.TdMode, "sell", cfg.Entry.PosSide,
+			"market", fmtSz(p.Sz, 10), true)
+		if err != nil {
+			return err
+		}
+		ordID = ord.OrdID
+	}
+
+	row := repo.CloseRow{
+		ID: p.ID, ExitPx: px, Pnl: pnl, PnlPct: pnlPct,
+		Reason: reason, CloseTs: time.Now().UnixMilli(), OrdID: ordID,
+	}
+	if err := store.Ingest(repo.StorePayload{CloseTrade: &row}); err != nil {
+		logx.Logf("WARN", "写平仓记录失败：%v", err)
+	}
+	logx.Logf("SIGNAL", "平仓 %s 张数=%s 开仓价=%.6f 平仓价=%.6f 盈亏=%+.4fU(%+.2f%%) 原因=%s",
+		p.InstID, fmtSz(p.Sz, 10), p.EntryPx, px, pnl, pnlPct, reason)
+	return nil
+}
+
+// mergeIDs 把 b 里的 ID 并进 a（a 为空时直接返回 b）。
+//
+// 一轮里可能有两条路同时平仓：常规出场（止盈/超时/布林上轨）和
+// 「加仓加满仍在亏」（addon.go）。两拨平掉的仓位都要让后面的入场闸门看见，
+// 否则会出现「刚平掉的仓又占着并发额度」这种诡异现象。
+func mergeIDs(a, b map[int64]bool) map[int64]bool {
+	if len(b) == 0 {
+		return a
+	}
+	if a == nil {
+		a = make(map[int64]bool, len(b))
+	}
+	for id := range b {
+		a[id] = true
+	}
+	return a
+}
+
+// dropClosed 把本轮已平掉的仓位从在持仓列表里摘掉。
 // 不做这一步的话，同一轮里刚平掉的仓还会被当成「在持仓」：
 // 加仓会对已平仓的単子补仓、开仓闸门也会被无谓占用。
 func dropClosed(pos []repo.OpenPos, closedIDs map[int64]bool) []repo.OpenPos {

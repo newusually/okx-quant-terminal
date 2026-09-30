@@ -46,18 +46,26 @@ type AddonDecision struct {
 	AllMargin float64 // 合并后累计加仓保证金
 	Ts        int64   // 触发用的那根 K 线时间
 	Reason    string
+
+	// Exhausted 加仓条件又成立了，但次数已经加满 —— 这时候不再补仓，
+	// 而是由上层直接平仓出局（「加仓最多三次，超过自动平仓」）。
+	Exhausted bool
 }
 
-// runAddons 对所有在持仓检查加仓条件，满足就补仓。返回加仓成功的笔数。
+// runAddons 对所有在持仓检查加仓条件，满足就补仓。
+//
+// 返回 (加仓成功笔数, 因加满而平掉的仓位 ID 集合)。
 //
 // 传入的 openPos 会被就地更新（张数 / 均价 / 保证金 / 加仓计数），
 // 这样同一轮后面的开仓闸门（总保证金、持仓数）看到的就是最新数据。
 func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
-	openPos []repo.OpenPos, markPrices map[string]float64) int {
+	openPos []repo.OpenPos, markPrices map[string]float64) (int, map[int64]bool) {
+
+	closedIDs := map[int64]bool{}
 
 	a := cfg.Addon
 	if a == nil || !a.Enabled || len(openPos) == 0 {
-		return 0
+		return 0, closedIDs
 	}
 	bar := strings.TrimSpace(a.RiseBar)
 	if bar == "" {
@@ -88,6 +96,17 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 		dec, err := checkAddon(cfg, cli, *p, px, bar, durMs)
 		if err != nil {
 			logx.Logf("WARN", "%s 加仓判定失败：%v", p.InstID, err)
+			continue
+		}
+
+		// ★ 加仓加满了，而且加仓信号又出现 → 不再补仓，直接平掉出局。
+		//   这是「不设止损」前提下唯一的亏损离场通道，别把它漏了。
+		if dec.Exhausted {
+			if err := closeOne(cfg, cli, store, *p, px, dec.Reason); err != nil {
+				logx.Logf("ERROR", "%s 加满自动平仓失败，下一轮重试：%v", p.InstID, err)
+				continue
+			}
+			closedIDs[p.ID] = true
 			continue
 		}
 		if !dec.Add {
@@ -142,7 +161,7 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 			p.InstID, dec.Count, fmtSz(dec.Sz, ins.LotSzDec), dec.AddPx,
 			dec.Margin, dec.NewAvgPx, ordID)
 	}
-	return added
+	return added, closedIDs
 }
 
 // checkAddon 单仓加仓判定：抓 K 线 + 合约信息，然后交给纯逻辑 decideAddon
@@ -153,10 +172,9 @@ func checkAddon(cfg *conf.Config, cli *OKXClient, p repo.OpenPos,
 	if a == nil || !a.Enabled {
 		return AddonDecision{}, nil
 	}
-	// ① 次数
-	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
-		return AddonDecision{}, nil
-	}
+	// ★ 注意这里**故意不**在次数加满时直接返回空：
+	//   加满了还要继续往下判，因为「加满之后信号再来一次」是要平仓的，
+	//   提前 return 会把这条兜底规则整条吃掉。
 	if p.EntryPx <= 0 {
 		return AddonDecision{}, nil
 	}
@@ -211,9 +229,6 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if a == nil || !a.Enabled || len(win) < 2 || p.EntryPx <= 0 || markPx <= 0 {
 		return AddonDecision{}
 	}
-	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
-		return AddonDecision{}
-	}
 
 	// ② 先跌：出现过 ≤ 开仓价 ×(1 - drop_pct%) 的最低价
 	dropPct := a.DropPct
@@ -251,6 +266,26 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	// ⑤ 间隔
 	if a.MinGapBars > 0 && p.LastAddonTs > 0 && durMs > 0 &&
 		last.Ts-p.LastAddonTs < int64(a.MinGapBars)*durMs {
+		return AddonDecision{}
+	}
+
+	// ⑥ 次数：加满了。
+	//
+	// 走到这里说明「先跌 0.5% → 重新转涨」这套加仓信号**又成立了一次**，
+	// 但三次额度已经用完，说明摊薄均价这一招没能把这笔救回来。
+	// 再往下加就是无底洞，所以这里不再补仓，改为交给上层直接市价平掉。
+	//
+	// （注意：这是「加满之后再触发信号」才平，不是一加满就立刻砍 ——
+	//   否则第三笔加仓刚成交就马上被平掉，白白付两次手续费。）
+	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
+		if a.CloseWhenFull {
+			return AddonDecision{
+				Exhausted: true,
+				Ts:        last.Ts,
+				Reason: fmt.Sprintf("加仓已满 %d 次，信号再次出现仍未回转（现价 %.6f / 均价 %.6f）→ 自动平仓",
+					a.MaxTimes, markPx, p.EntryPx),
+			}
+		}
 		return AddonDecision{}
 	}
 

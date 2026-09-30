@@ -42,7 +42,7 @@ echo ==============================================================
 echo.
 
 rem ---- 1. VC 运行库 --------------------------------------------------------
-echo [1/5] 检查 VC++ 运行库 ...
+echo [1/6] 检查 VC++ 运行库 ...
 if exist "%ROOT%\runtime\vcruntime140.dll" (
     echo       已就绪（runtime\ 下已有运行库）。
 ) else (
@@ -53,7 +53,7 @@ if exist "%ROOT%\runtime\vcruntime140.dll" (
 echo.
 
 rem ---- 2. MySQL 数据目录初始化 ---------------------------------------------
-echo [2/5] 检查 MySQL 数据目录 ...
+echo [2/6] 检查 MySQL 数据目录 ...
 if exist "%ROOT%\mysql\data\mysql" (
     echo       已初始化，跳过。
 ) else (
@@ -69,7 +69,7 @@ if exist "%ROOT%\mysql\data\mysql" (
 echo.
 
 rem ---- 3. 注册 MySQL 服务 --------------------------------------------------
-echo [3/5] 注册 MySQL 服务 OKXMySQL ...
+echo [3/6] 注册 MySQL 服务 OKXMySQL ...
 sc query OKXMySQL >nul 2>&1
 if errorlevel 1 (
     echo       服务不存在，正在注册 ...
@@ -97,7 +97,7 @@ if errorlevel 1 (
 echo.
 
 rem ---- 4. 建库 / 建账号 ----------------------------------------------------
-echo [4/5] 建库 okx + 账号 okx ...
+echo [4/6] 建库 okx + 账号 okx ...
 "%ROOT%\mysql\bin\mysql.exe" -uroot -h127.0.0.1 --default-character-set=utf8mb4 -e "CREATE DATABASE IF NOT EXISTS okx DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; CREATE USER IF NOT EXISTS 'okx'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; CREATE USER IF NOT EXISTS 'okx'@'localhost' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'127.0.0.1'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'localhost'; FLUSH PRIVILEGES;" >nul 2>&1
 if errorlevel 1 (
     echo       [提示] root 可能已设密码，自动建库被拒。手工执行一次：
@@ -108,7 +108,7 @@ if errorlevel 1 (
 echo.
 
 rem ---- 5. 注册 Apache ------------------------------------------------------
-echo [5/5] 注册 Apache 服务 OKXApache ...
+echo [5/6] 注册 Apache 服务 OKXApache ...
 if not exist "%ROOT%\apache\bin\httpd.exe" (
     echo       [错误] 找不到 apache\bin\httpd.exe
 ) else (

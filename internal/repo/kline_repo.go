@@ -11,6 +11,7 @@ package repo
 import (
 	"database/sql"
 	"strings"
+	"sync/atomic"
 )
 
 // klineCols kline 表列序（批量写入用）
@@ -18,6 +19,34 @@ var klineCols = []string{"inst_id", "bar", "ts", "o", "h", "l", "c", "v"}
 
 // klineUpdateCols 冲突（同一合约+周期+时间戳）时覆盖的字段
 var klineUpdateCols = []string{"o", "h", "l", "c", "v"}
+
+// KlineRejected 累计被合法性校验拦下的行数。
+//
+// 背景：曾经有个压测工具把 28.68 万根「合成 K 线」（价格 ~740、时间戳带毫秒尾巴）
+// 直接写进了生产 kline 表，把每个合约的 MA25/MA99/布林带全部算歪。
+// 现在所有写入都必须先过 IsValidKline，拦下的行数在这里累计，接口层可以报出来。
+var KlineRejected atomic.Int64
+
+// IsValidKline 一根 K 线是否可信。
+//
+// 不变量（OKX 的数据天然满足）：
+//   - bar 开盘时间戳必定对齐到整秒（毫秒位为 0）—— 合成/压测数据必带毫秒尾巴
+//   - 开高低收都必须 > 0，且 high >= low
+func IsValidKline(k Kline) bool {
+	if k.InstID == "" || k.Bar == "" {
+		return false
+	}
+	if k.Ts <= 0 || k.Ts%1000 != 0 {
+		return false
+	}
+	if k.O <= 0 || k.H <= 0 || k.L <= 0 || k.C <= 0 {
+		return false
+	}
+	if k.H < k.L {
+		return false
+	}
+	return true
+}
 
 // ---------------------------------------------------------------------------
 // 写
@@ -27,14 +56,45 @@ var klineUpdateCols = []string{"o", "h", "l", "c", "v"}
 //
 // 同一批里不同合约的数据混在一起也没关系，一次网络往返全部落库。
 func (d *DB) UpsertKlines(rows []Kline) (int, error) {
+	return d.UpsertKlinesInto("kline", rows)
+}
+
+// UpsertKlinesInto 写进指定表（压测走 kline_bench，永远碰不到生产数据）
+func (d *DB) UpsertKlinesInto(table string, rows []Kline) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 	args := make([][]any, 0, len(rows))
+	bad := int64(0)
 	for _, r := range rows {
+		if !IsValidKline(r) {
+			bad++
+			continue
+		}
 		args = append(args, []any{r.InstID, r.Bar, r.Ts, r.O, r.H, r.L, r.C, r.V})
 	}
-	return d.bulkUpsert("kline", klineCols, args, klineUpdateCols)
+	if bad > 0 {
+		KlineRejected.Add(bad)
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	return d.bulkUpsert(table, klineCols, args, klineUpdateCols)
+}
+
+// PurgeBadKlines 清掉不符合不变量的脏行，返回删除行数。
+//
+// 启动时跑一次，属于「自愈」：就算有别的工具又塞了脏数据进来，重启就能清干净。
+func (d *DB) PurgeBadKlines() (int64, error) {
+	res, err := d.sql.Exec(
+		`DELETE FROM kline
+		 WHERE ts <= 0 OR ts % 1000 <> 0
+		    OR o <= 0 OR h <= 0 OR l <= 0 OR c <= 0`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -289,8 +349,13 @@ func (d *DB) barsOf(instID string) ([]string, error) {
 }
 
 // CleanupBench 压测清理：删掉早于 cutTs 的 K 线（cmd/okxbench 用）
-func (d *DB) CleanupBench(cutTs int64) (int64, error) {
-	res, err := d.sql.Exec(`DELETE FROM kline WHERE ts < ?`, cutTs)
+// CleanupBench 清空压测表。压测只能写 kline_bench，这里整表删掉。
+//
+// 老实现的坑：它按 `ts < now-(bars+10)*60000` 删生产表 kline，而压测写进去的
+// 时间戳恰好都落在这个区间「之后」，条件永远不成立 —— 一行都没删掉，
+// 28.68 万行合成数据就那样留在生产库里污染了所有均线和布林带。
+func (d *DB) CleanupBench() (int64, error) {
+	res, err := d.sql.Exec(`DELETE FROM kline_bench`)
 	if err != nil {
 		return 0, err
 	}

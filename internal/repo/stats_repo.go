@@ -101,6 +101,34 @@ func (d *DB) TableStats() ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
+// EquitySnap 最近一条账户权益快照（顶栏「权益 / 可用 / 浮盈」的数据源）
+type EquitySnap struct {
+	Ts       int64   `json:"ts"`
+	TotalEq  float64 `json:"totalEq"`
+	Avail    float64 `json:"avail"`
+	Upl      float64 `json:"upl"`
+	PosCount int     `json:"posCount"`
+}
+
+// LatestEquity 取最近一条权益快照。
+//
+// 引擎每隔几秒就会往 equity 表写一条（见 internal/service/live.go），
+// 所以这里读到的永远是几秒内的新鲜值，顶栏可以放心按秒刷新。
+// 第二条返回值表示「有没有数据」——没有和「有但是 0」要区分开。
+func (d *DB) LatestEquity() (EquitySnap, bool, error) {
+	var e EquitySnap
+	err := d.sql.QueryRow(
+		`SELECT ts,total_eq,COALESCE(avail,0),COALESCE(upl,0),COALESCE(pos_count,0)
+		 FROM equity ORDER BY ts DESC LIMIT 1`).Scan(&e.Ts, &e.TotalEq, &e.Avail, &e.Upl, &e.PosCount)
+	if err == sql.ErrNoRows {
+		return e, false, nil
+	}
+	if err != nil {
+		return e, false, err
+	}
+	return e, true, nil
+}
+
 // ---------------------------------------------------------------------------
 // meta 键值表（公告黑名单缓存等）
 // ---------------------------------------------------------------------------

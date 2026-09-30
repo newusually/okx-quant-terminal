@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"finally-main/internal/ratelimit"
 )
 
 // ClientOptions 可选项，零值即为默认
@@ -206,32 +208,18 @@ func (c *Client) NowMs() int64 {
 // ---------------------------------------------------------------------------
 // 限速
 // ---------------------------------------------------------------------------
+//
+// 闸门在 internal/ratelimit 里，而且是「进程内共享」的。
+//
+// 背景：okxweb 里同时有两拨人在拉 K 线 —— 数据服务（回补，10 并发）
+// 和策略引擎（每 60 秒扫全市场）。两边用的是**两套不同的 HTTP 客户端实现**
+// （这里是其中一套），各自持一把限速器的话速率会叠加成 2 倍，
+// OKX 的 20 次/2 秒 直接被打爆，换来一片 429。
+//
+// 所以这里不再自己滑动窗口，直接排到共享队列上。
 
 func (c *Client) waitRate() {
-	per := time.Second
-	max := c.opts.RatePerSecond
-	for {
-		c.limMu.Lock()
-		now := time.Now()
-		cut := 0
-		for cut < len(c.limLast) && now.Sub(c.limLast[cut]) >= per {
-			cut++
-		}
-		if cut > 0 {
-			c.limLast = append([]time.Time(nil), c.limLast[cut:]...)
-		}
-		if len(c.limLast) < max {
-			c.limLast = append(c.limLast, now)
-			c.limMu.Unlock()
-			return
-		}
-		sleep := per - now.Sub(c.limLast[0])
-		c.limMu.Unlock()
-		if sleep < 5*time.Millisecond {
-			sleep = 5 * time.Millisecond
-		}
-		time.Sleep(sleep)
-	}
+	ratelimit.WaitCandle()
 }
 
 // ---------------------------------------------------------------------------

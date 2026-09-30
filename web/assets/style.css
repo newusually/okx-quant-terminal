@@ -196,6 +196,50 @@ html, body {
   position: absolute; top: 10px; left: 12px; font-size: 11px; color: var(--muted);
   background: rgba(11,14,17,.7); padding: 3px 8px; border-radius: 4px; pointer-events: none;
 }
+
+/* ---------------- 图例（左上角，跟随十字光标）---------------- */
+.legend {
+  position: absolute; top: 8px; left: 12px; z-index: 3;
+  pointer-events: none; font-size: 11px; font-family: var(--mono);
+  line-height: 1.65; text-shadow: 0 1px 2px rgba(0,0,0,.75);
+}
+.legend .lg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.legend .lg-sym { font-size: 12.5px; font-weight: 700; color: var(--text); letter-spacing: .3px; }
+.legend .lg-tf {
+  font-size: 10px; color: #101010; background: var(--accent);
+  padding: 0 5px; border-radius: 3px; font-weight: 700;
+}
+.legend .lg-ohlc { color: var(--text-2); }
+.legend .lg-ohlc .k { color: var(--muted); margin-right: 2px; }
+.legend .lg-item { color: var(--muted); white-space: nowrap; }
+.legend .lg-item b { color: var(--text-2); font-weight: 500; }
+.legend .lg-item i {
+  display: inline-block; width: 7px; height: 7px; border-radius: 2px;
+  margin-right: 4px; vertical-align: 1px;
+}
+.legend .lg-ind.hidden { display: none; }
+/* 提示条挪到左下，别和右上图例挤在一起 */
+.chart-box .chart-hint { top: auto; bottom: 8px; left: auto; right: 12px; }
+
+/* 收盘倒计时 */
+.countdown {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  background: var(--bg-3); border: 1px solid var(--line);
+  padding: 1px 6px; border-radius: 4px; align-self: center;
+}
+.countdown.hot { color: #101010; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+
+/* 指标开关 */
+.ind-group { display: flex; gap: 4px; }
+.ind {
+  height: 24px; padding: 0 9px; font-size: 11px; cursor: pointer;
+  background: var(--bg-3); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px;
+  font-family: var(--mono);
+}
+.ind:hover { color: var(--text); border-color: #40474f; }
+.ind.active { color: var(--accent); border-color: var(--accent); }
+
 .chart-foot {
   display: flex; align-items: center; height: 30px; padding: 0 12px;
   border-top: 1px solid var(--line); font-size: 11px; color: var(--text-2);
@@ -263,6 +307,61 @@ table.data td.empty { text-align: center; color: var(--muted); padding: 26px; fo
   display: flex; justify-content: space-between;
   padding: 0 16px 14px; color: var(--muted); font-size: 11px;
 }
+
+/* ==========================================================================
+   实时顶栏：本金 / 浮盈 / 自动交易状态灯
+   ========================================================================== */
+
+.stat .sub {
+  font-size: 10px; font-style: normal; color: var(--muted);
+  font-family: var(--mono); letter-spacing: .2px; line-height: 1.2;
+}
+
+.live-pill {
+  font-size: 12px !important;
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--line-2); color: var(--muted);
+  background: rgba(132, 142, 156, .1);
+}
+.live-pill.on   { color: var(--up);     border-color: rgba(14, 203, 129, .45);  background: rgba(14, 203, 129, .12); }
+.live-pill.warn { color: var(--accent); border-color: rgba(252, 213, 53, .45);  background: rgba(252, 213, 53, .12); }
+.live-pill.err  { color: var(--down);   border-color: rgba(246, 70, 93, .5);    background: rgba(246, 70, 93, .12); }
+
+/* ==========================================================================
+   K 线悬浮提示框（时间 / 开 / 收 / 高 / 低 / 振幅 / 量）
+   ========================================================================== */
+
+.tip {
+  position: absolute; z-index: 20;
+  min-width: 172px; padding: 8px 10px;
+  background: rgba(22, 26, 30, .96);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .5);
+  pointer-events: none;               /* 别把十字光标挡住 */
+  font-family: var(--mono); font-size: 12px;
+  color: var(--text-2);
+  backdrop-filter: blur(3px);
+}
+
+.tip-time {
+  color: var(--muted); font-size: 11px; margin-bottom: 5px;
+  padding-bottom: 5px; border-bottom: 1px solid var(--line);
+}
+.tip-row { display: flex; justify-content: space-between; gap: 16px; line-height: 1.7; }
+.tip-row span { color: var(--muted); }
+.tip-row b { font-weight: 600; }
+
+.tip-mks { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+.tip-mk { font-size: 11px; line-height: 1.65; white-space: nowrap; }
+.tip-mk.mk-buy  { color: var(--accent); }
+.tip-mk.mk-sell { color: var(--up); }
+.tip-mk.mk-sig  { color: var(--accent-2); }
+
+/* K 线图例里的买卖标记说明 */
+.mk-legend { color: var(--muted); font-size: 12px; }
+.mk-legend .mk-buy  { color: var(--accent); }
+.mk-legend .mk-sell { color: var(--up); }
 
 @media (max-width: 1500px) {
   .stats { gap: 16px; }

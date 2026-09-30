@@ -29,7 +29,22 @@ type BackfillConfig struct {
 	// 这是默认行为：既省磁盘也省时间，而且回补的就是真正会下单的那批
 	OnlyTradeable bool
 	// FocusAll 若为 true 则忽略 FocusN，回补全部（可交易）合约
-	FocusAll    bool
+	FocusAll bool
+
+	// Scope 决定启动时回补多少东西：
+	//   "plan"      默认。先给「全部 live 合约」补 15m/1H/4H（便宜，图先能用），
+	//               再给「可交易合约」补 5m/3m/1m。约 1.4 GB 磁盘，图最快可用。
+	//   "tradeable" 可交易合约 × 全部周期
+	//   "live"      全部 live 合约 × 全部周期（约 3.6 GB，磁盘不够会自动暂停）
+	//   "focus"     只回补 FocusN 个焦点合约（旧行为）
+	Scope string
+
+	// MinFreeMB 剩余磁盘低于这个数就暂停回补（默认 800MB）。
+	// 数据量算得出来：一行约 107 字节，171 合约 × 6 周期 × 30 天 ≈ 1200 万行 ≈ 1.3 GB。
+	MinFreeMB int
+	// RootDir 用来查所在卷的剩余空间
+	RootDir string
+
 	Workers     int // 并发回补协程数，默认 6
 	MaxPages    int // 单个 (合约,周期) 最多翻多少页，默认 2000（防跑飞）
 	RealtimeSec int // 实时行情落库间隔（秒），默认 5
@@ -42,10 +57,18 @@ func DefaultBackfillConfig() BackfillConfig {
 		Bars:          append([]string{}, SupportedBars...),
 		FocusN:        8,
 		OnlyTradeable: true,
-		Workers:       6,
+		Scope:         "plan",
+		MinFreeMB:     800,
+		Workers:       10,
 		MaxPages:      2000,
 		RealtimeSec:   5,
 	}
+}
+
+// BackfillTask 一个 (合约,周期) 回补任务
+type BackfillTask struct {
+	InstID string
+	Bar    string
 }
 
 // jobKey 任务唯一键
@@ -64,6 +87,11 @@ type BackfillManager struct {
 
 	progressMu sync.Mutex
 	progress   map[string]model.BackfillJob
+
+	// 已入库的 (合约,周期) → 最新一根 ts。实时续 K 线时用它做差量，
+	// 避免每轮都对千万行的 kline 表做 GROUP BY。
+	knownMu sync.Mutex
+	knownTs map[string]int64
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -91,11 +119,18 @@ func NewBackfillManager(db *repo.DB, feed *DataFeed, cfg BackfillConfig, logf fu
 	if cfg.RealtimeSec <= 0 {
 		cfg.RealtimeSec = 5
 	}
+	if cfg.Scope == "" {
+		cfg.Scope = "plan"
+	}
+	if cfg.MinFreeMB <= 0 {
+		cfg.MinFreeMB = 800
+	}
 	return &BackfillManager{
 		db: db, feed: feed, cfg: cfg,
 		queue:    make(chan [2]string, 4096),
 		queued:   map[string]bool{},
 		progress: map[string]model.BackfillJob{},
+		knownTs:  map[string]int64{},
 		stopCh:   make(chan struct{}),
 		logf:     logf,
 	}
@@ -139,13 +174,15 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 		go m.worker()
 	}
 
-	// 焦点合约入队
-	focus := m.focusList()
-	m.logf("回补焦点合约（%d 个）：%s", len(focus), strings.Join(focus, " "))
-	for _, inst := range focus {
-		for _, bar := range m.cfg.Bars {
-			m.Enqueue(inst, bar)
-		}
+	// 入队：按 Scope 决定回补范围
+	plan := m.buildPlan()
+	m.logf("回补计划（Scope=%s）：%d 个任务，并发 %d，磁盘守卫 %dMB",
+		m.cfg.Scope, len(plan), m.cfg.Workers, m.cfg.MinFreeMB)
+	for _, t := range plan {
+		m.Enqueue(t.InstID, t.Bar)
+	}
+	if free := FreeDiskMB(m.cfg.RootDir); free > 0 {
+		m.logf("当前剩余磁盘 %d MB", free)
 	}
 
 	// 实时落库
@@ -153,6 +190,102 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 	go m.realtimeLoop()
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 回补计划
+// ---------------------------------------------------------------------------
+
+// buildPlan 生成启动时的回补队列。
+//
+// 排序原则：**便宜的先跑**。周期越长、翻页越少，先用极小的代价让「每个合约的
+// 主图都有一个月数据」，再回头补贵的 1m。
+//
+//	plan（默认）：全部 live 合约 × 15m/1H/4H  →  可交易合约 × 5m/3m/1m
+//	             约 13.1M 行 ≈ 1.4 GB，15m 图几分钟内即可用
+//	tradeable  ：可交易合约 × 全部 6 个周期
+//	live       ：全部 live 合约 × 全部 6 个周期（≈3.6 GB，磁盘不够会自动暂停）
+//	focus      ：只回补 FocusN 个焦点合约（旧行为）
+func (m *BackfillManager) buildPlan() []BackfillTask {
+	all := m.liveIDs()
+	tradable := m.tradeableIDs()
+
+	appendAll := func(dst []BackfillTask, ids []string, bars ...string) []BackfillTask {
+		for _, bar := range bars {
+			for _, id := range ids {
+				dst = append(dst, BackfillTask{InstID: id, Bar: bar})
+			}
+		}
+		return dst
+	}
+
+	switch m.cfg.Scope {
+	case "focus":
+		out := []BackfillTask{}
+		for _, inst := range m.focusList() {
+			out = appendAll(out, []string{inst}, m.cfg.Bars...)
+		}
+		return out
+
+	case "tradeable":
+		if len(tradable) == 0 {
+			tradable = all
+		}
+		return appendAll([]BackfillTask{}, tradable, m.cfg.Bars...)
+
+	case "live":
+		return appendAll([]BackfillTask{}, all, m.cfg.Bars...)
+	}
+
+	// 默认 plan：便宜的周期铺满全部合约，贵的周期只铺可交易合约
+	if len(tradable) == 0 {
+		tradable = all
+	}
+	out := []BackfillTask{}
+	out = appendAll(out, all, "15m", "1H", "4H")
+	out = appendAll(out, tradable, "5m", "3m", "1m")
+	return out
+}
+
+// liveIDs 全部 live 状态的合约
+func (m *BackfillManager) liveIDs() []string {
+	insts, err := m.db.ListInstruments()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(insts))
+	for _, it := range insts {
+		if it.State != "" && it.State != "live" {
+			continue
+		}
+		out = append(out, it.InstID)
+	}
+	return out
+}
+
+// tradeableIDs 通过准入过滤的合约
+func (m *BackfillManager) tradeableIDs() []string {
+	ts, err := m.db.ListTradeableInstruments()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(ts))
+	for _, it := range ts {
+		out = append(out, it.InstID)
+	}
+	return out
+}
+
+// diskOK 剩余磁盘是否够用（守卫，防止把系统盘写爆）
+func (m *BackfillManager) diskOK() bool {
+	if m.cfg.MinFreeMB <= 0 {
+		return true
+	}
+	free := FreeDiskMB(m.cfg.RootDir)
+	if free == 0 {
+		return true // 查不到就不拦
+	}
+	return free >= uint64(m.cfg.MinFreeMB)
 }
 
 // Stop 停止所有后台协程
@@ -327,6 +460,7 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 	oldest := int64(0)
 	if len(latest) > 0 {
 		oldest = latest[0].Ts
+		m.markKnown(instID, bar, latest[len(latest)-1].Ts)
 	}
 
 	// 2) 往前翻页
@@ -337,6 +471,13 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 			m.setProgress(instID, bar, "stopped", "收到停止信号")
 			return nil
 		default:
+		}
+		// 磁盘守卫：宁可停下来，也不能把系统盘写爆导致 MySQL 起不来
+		if !m.diskOK() {
+			msg := fmt.Sprintf("剩余磁盘不足 %dMB，已暂停（已入库 %d 根）", m.cfg.MinFreeMB, total)
+			m.setProgress(instID, bar, "paused", msg)
+			m.logf("⏸ %s", msg)
+			return nil
 		}
 		if oldest > 0 && oldest <= targetMs {
 			break
@@ -372,7 +513,6 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 		total += int64(len(cut))
 		oldest = cut[0].Ts
 		pages++
-
 		if pages%20 == 0 {
 			m.setProgress(instID, bar, "running",
 				fmt.Sprintf("已翻 %d 页，最老 %s，累计 %d 根",
@@ -381,10 +521,37 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 	}
 
 	cov, _ := m.db.Coverage(instID, bar)
+	m.markKnown(instID, bar, cov.MaxTs)
 	m.setProgress(instID, bar, "done",
 		fmt.Sprintf("覆盖 %.1f 天 / %d 根（目标 %d 天）", cov.Days, cov.Count, m.cfg.Days))
 	m.logf("✓ 回补完成 %s %s：%d 根，覆盖 %.1f 天", instID, bar, cov.Count, cov.Days)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 已入库集合（实时续 K 线时用，避免每次都全表 GROUP BY）
+// ---------------------------------------------------------------------------
+
+// markKnown 记下某个 (合约,周期) 最近入库到哪一根
+func (m *BackfillManager) markKnown(instID, bar string, maxTs int64) {
+	m.knownMu.Lock()
+	k := jobKey(instID, bar)
+	prev := m.knownTs[k]
+	if maxTs > prev {
+		m.knownTs[k] = maxTs
+	}
+	m.knownMu.Unlock()
+}
+
+// knownSnapshot 当前「有数据」的 (合约,周期) 快照
+func (m *BackfillManager) knownSnapshot() map[string]int64 {
+	m.knownMu.Lock()
+	defer m.knownMu.Unlock()
+	out := make(map[string]int64, len(m.knownTs))
+	for k, v := range m.knownTs {
+		out[k] = v
+	}
+	return out
 }
 
 // setProgress 更新并持久化进度
@@ -431,8 +598,6 @@ func (m *BackfillManager) realtimeLoop() {
 	tick := time.NewTicker(time.Duration(m.cfg.RealtimeSec) * time.Second)
 	defer tick.Stop()
 
-	// 最新 K 线不用每轮都拉，按周期各自节流
-	lastKline := map[string]time.Time{}
 	seconds := 0
 
 	for {
@@ -445,9 +610,10 @@ func (m *BackfillManager) realtimeLoop() {
 				m.logf("⚠ 实时行情落库失败：%v", err)
 			}
 
-			// 每 3 分钟续一次 K 线（只续「已回补过」的合约，避免炸 OKX）
-			if seconds%180 == 0 {
-				m.refreshLatestKlines(lastKline)
+			// 每 30 秒扫一遍「已经该出新一根」的 (合约,周期)，内部按周期节流，
+			// 所以 15m/1H/4H 这些并不会真的每 30 秒发一次请求。
+			if seconds%30 == 0 {
+				m.refreshLatestKlines()
 			}
 			// 每 6 小时把库里最老的数据裁一次；保留量按 cfg.Days 天算，
 			// 保证每轮回补完之后每个周期都还覆盖至少一个月。
@@ -460,31 +626,54 @@ func (m *BackfillManager) realtimeLoop() {
 	}
 }
 
-// refreshLatestKlines 只给「库里有数据」的 (合约,周期) 续最新一根
-func (m *BackfillManager) refreshLatestKlines(last map[string]time.Time) {
-	covs, err := m.db.CoverageAll()
-	if err != nil {
+// refreshLatestKlines 给「库里有数据」的 (合约,周期) 续最新一根
+//
+// 老实现每轮都调 CoverageAll()（对 kline 全表按合约 GROUP BY）。表一旦长到
+// 千万行，这个查询要几十秒，而且每 3 分钟跑一次 —— 会把数据库拖垮。
+// 现在改成走内存里的 knownTs 快照：谁有数据、最新到哪根，写入时就记下来了。
+func (m *BackfillManager) refreshLatestKlines() {
+	known := m.knownSnapshot()
+	if len(known) == 0 {
 		return
 	}
-	for _, c := range covs {
-		if c.Count == 0 {
+	now := time.Now().UnixMilli()
+	for k, maxTs := range known {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		if !m.diskOK() {
+			return
+		}
+		instID, bar, ok := splitJobKey(k)
+		if !ok {
 			continue
 		}
-		k := jobKey(c.InstID, c.Bar)
-		minGap := BarDuration(c.Bar) / 3
-		if minGap < 20*time.Second {
-			minGap = 20 * time.Second
-		}
-		if t, ok := last[k]; ok && time.Since(t) < minGap {
+		// 最新一根还没走完（离下根开盘还早）就跳过，省一次请求
+		d := BarDuration(bar)
+		if d <= 0 {
 			continue
 		}
-		ks, err := m.feed.FetchCandles(c.InstID, c.Bar, 5)
+		if now-maxTs < int64(d/time.Millisecond)-3000 {
+			continue
+		}
+		ks, err := m.feed.FetchCandles(instID, bar, 3)
 		if err != nil {
 			continue
 		}
 		if len(ks) > 0 {
 			_, _ = m.db.UpsertKlines(ks)
+			m.markKnown(instID, bar, ks[len(ks)-1].Ts)
 		}
-		last[k] = time.Now()
 	}
+}
+
+// splitJobKey 反解 "INST|bar"
+func splitJobKey(k string) (instID, bar string, ok bool) {
+	i := strings.LastIndex(k, "|")
+	if i <= 0 || i == len(k)-1 {
+		return "", "", false
+	}
+	return k[:i], k[i+1:], true
 }

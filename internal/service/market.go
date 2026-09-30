@@ -16,6 +16,7 @@ import (
 	"errors"
 	"finally-main/internal/conf"
 	"finally-main/internal/logx"
+	"finally-main/internal/ratelimit"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,45 +56,11 @@ func (e *OKXError) Retryable() bool {
 // ---------------------------------------------------------------------------
 // 限速
 // ---------------------------------------------------------------------------
-
-type rateLimiter struct {
-	mu    sync.Mutex
-	times []time.Time
-	max   int
-	per   time.Duration
-}
-
-func newRateLimiter(max int, per time.Duration) *rateLimiter {
-	if max <= 0 {
-		max = 1
-	}
-	return &rateLimiter{max: max, per: per}
-}
-
-func (l *rateLimiter) Wait() {
-	for {
-		l.mu.Lock()
-		now := time.Now()
-		cut := 0
-		for cut < len(l.times) && now.Sub(l.times[cut]) >= l.per {
-			cut++
-		}
-		if cut > 0 {
-			l.times = append([]time.Time(nil), l.times[cut:]...)
-		}
-		if len(l.times) < l.max {
-			l.times = append(l.times, now)
-			l.mu.Unlock()
-			return
-		}
-		sleep := l.per - now.Sub(l.times[0])
-		l.mu.Unlock()
-		if sleep < 5*time.Millisecond {
-			sleep = 5 * time.Millisecond
-		}
-		time.Sleep(sleep)
-	}
-}
+//
+// 实现在 internal/ratelimit 里，而且是「进程内共享」的：
+// 数据服务（回补）和策略引擎用的是两套不同的 HTTP 客户端，
+// 各自持一把限速器的话速率会叠加，直接把 OKX 的 20 次/2 秒 打爆。
+// 所以两边都从 ratelimit 取同一把闸门，见那个包的注释。
 
 // ---------------------------------------------------------------------------
 // 客户端
@@ -102,8 +69,8 @@ func (l *rateLimiter) Wait() {
 type OKXClient struct {
 	cfg         *conf.Config
 	http        *http.Client
-	candleLimit *rateLimiter
-	tradeLimit  *rateLimiter
+	candleLimit *ratelimit.Limiter
+	tradeLimit  *ratelimit.Limiter
 
 	mu        sync.Mutex
 	base      string
@@ -137,8 +104,8 @@ func newOKXClient(cfg *conf.Config) (*OKXClient, error) {
 	return &OKXClient{
 		cfg:         cfg,
 		http:        &http.Client{Transport: tr, Timeout: timeout},
-		candleLimit: newRateLimiter(20, 2*time.Second), // /market/candles 限 40/2s，取一半更稳
-		tradeLimit:  newRateLimiter(8, 2*time.Second),  // 交易类接口更保守
+		candleLimit: ratelimit.Candle(), // 行情：与回补共用同一把闸门
+		tradeLimit:  ratelimit.Trade(),  // 交易：独立、更保守
 	}, nil
 }
 
@@ -252,7 +219,7 @@ func (c *OKXClient) probeTime(base string) (int64, error) {
 // 请求
 // ---------------------------------------------------------------------------
 
-func (c *OKXClient) request(method, path string, body []byte, signed bool, lim *rateLimiter) (json.RawMessage, error) {
+func (c *OKXClient) request(method, path string, body []byte, signed bool, lim *ratelimit.Limiter) (json.RawMessage, error) {
 	if err := c.EnsureReady(); err != nil {
 		return nil, err
 	}
@@ -343,7 +310,7 @@ func (c *OKXClient) sign(req *http.Request, method, path string, body []byte) er
 }
 
 func (c *OKXClient) Get(path string, signed bool) (json.RawMessage, error) {
-	var lim *rateLimiter
+	var lim *ratelimit.Limiter
 	if strings.Contains(path, "/market/candles") || strings.Contains(path, "/market/history-candles") {
 		lim = c.candleLimit
 	}

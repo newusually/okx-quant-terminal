@@ -33,8 +33,23 @@ type StrategyEntry struct {
 type StrategyExit struct {
 	TakeProfitPct float64 `json:"take_profit_pct"`
 	BollUpperExit bool    `json:"boll_upper_exit"`
-	MaxHoldBars   int     `json:"max_hold_bars"`
-	StopLossPct   float64 `json:"stop_loss_pct"`
+	// MaxHoldMinutes 超时平仓（分钟）。>0 时优先于 MaxHoldBars。
+	// 用户口径：开仓满 60 分钟还没止盈就自动平掉。
+	MaxHoldMinutes int     `json:"max_hold_minutes"`
+	MaxHoldBars    int     `json:"max_hold_bars"`
+	StopLossPct    float64 `json:"stop_loss_pct"`
+}
+
+// StrategyAddon 加仓参数（前端展示用）
+//
+//	用户口径：加仓最多 3 次，超过自动平仓。
+type StrategyAddon struct {
+	Enabled       bool    `json:"enabled"`
+	Ratio         float64 `json:"ratio"`
+	DropPct       float64 `json:"drop_pct"`
+	RiseBar       string  `json:"rise_bar"`
+	MaxTimes      int     `json:"max_times"`
+	CloseWhenFull bool    `json:"close_when_full"`
 }
 
 // StrategyConfig 只取前端要展示的字段
@@ -53,10 +68,25 @@ type StrategyConfig struct {
 	ExcludeDelisting      bool    `json:"exclude_delisting"`
 	MaxOrderMarginUSDT    float64 `json:"max_order_margin_usdt"`
 
+	// 本金（USDT）。用来算「累计收益率 = 总盈亏 ÷ 本金」。
+	// 留 0 = 由「权益 − 浮盈 − 已实现盈亏」自动反推（没有出入金时是准的）。
+	PrincipalUSDT float64 `json:"principal_usdt"`
+
 	Entry StrategyEntry `json:"entry"`
 	Exit  StrategyExit  `json:"exit"`
+	Addon StrategyAddon `json:"addon"`
+	Live  StrategyLive  `json:"live"`
 
 	Path string `json:"path"` // 配置文件路径（不在 JSON 里）
+}
+
+// StrategyLive 实时引擎的两条心跳间隔（秒）
+//
+//	ExitSec  止盈巡检：只看在持仓，浮盈够线立刻平。要快，默认 3 秒。
+//	EntrySec 买入信号扫描：全市场扫一遍，贵。默认 60 秒。
+type StrategyLive struct {
+	ExitSec  int `json:"exit_sec"`
+	EntrySec int `json:"entry_sec"`
 }
 
 // LoadStrategy 读配置文件。带注释的 JSON 也能读（先把注释剥掉）。
@@ -71,7 +101,10 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
 			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 8,
 			CooldownBars: 6, DailyMaxEntries: 30, MarginPolicy: "min_one", MaxMarginUSDT: 0.5},
-		Exit: StrategyExit{TakeProfitPct: 2.0, BollUpperExit: true},
+		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 60},
+		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
+			RiseBar: "15m", MaxTimes: 3, CloseWhenFull: true},
+		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,
 	}
 	raw, err := os.ReadFile(path)
@@ -111,6 +144,33 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	}
 	if cfg.MinQuoteVolume24h < 0 {
 		cfg.MinQuoteVolume24h = 0
+	}
+	// 实时引擎节奏归一化：配置里没写 live 段时用默认值，
+	// 并且夹住下限——止盈巡检最快 1 秒，再快就是白烧 OKX 接口。
+	if cfg.Live.ExitSec <= 0 {
+		cfg.Live.ExitSec = def.Live.ExitSec
+	}
+	if cfg.Live.ExitSec < 1 {
+		cfg.Live.ExitSec = 1
+	}
+	if cfg.Live.EntrySec <= 0 {
+		cfg.Live.EntrySec = def.Live.EntrySec
+	}
+	if cfg.Live.EntrySec < 5 {
+		cfg.Live.EntrySec = 5
+	}
+	// 加仓口径归一化：「最多 3 次」是用户硬口径，配置里写 0/负数一律回默认。
+	if cfg.Addon.MaxTimes <= 0 {
+		cfg.Addon.MaxTimes = def.Addon.MaxTimes
+	}
+	if cfg.Addon.Ratio <= 0 {
+		cfg.Addon.Ratio = def.Addon.Ratio
+	}
+	if cfg.Addon.RiseBar == "" {
+		cfg.Addon.RiseBar = def.Addon.RiseBar
+	}
+	if cfg.Exit.MaxHoldMinutes < 0 {
+		cfg.Exit.MaxHoldMinutes = 0
 	}
 	return &cfg, nil
 }

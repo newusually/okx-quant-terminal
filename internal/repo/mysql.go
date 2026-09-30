@@ -156,6 +156,21 @@ var schemaStmts = []string{
 		PRIMARY KEY (inst_id, bar, ts)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
 
+	// ---- 压测专用表：结构和 kline 完全一致，但压测永远只写这张表 ----
+	// 血泪教训：压测工具曾经直接写 kline，28.68 万行合成数据把线上所有
+	// 均线/布林带算歪。隔离到独立表之后，物理上就不可能再污染生产数据。
+	`CREATE TABLE IF NOT EXISTS kline_bench (
+		inst_id VARCHAR(32) NOT NULL,
+		bar     VARCHAR(4)  NOT NULL,
+		ts      BIGINT      NOT NULL,
+		o DOUBLE NOT NULL DEFAULT 0,
+		h DOUBLE NOT NULL DEFAULT 0,
+		l DOUBLE NOT NULL DEFAULT 0,
+		c DOUBLE NOT NULL DEFAULT 0,
+		v DOUBLE NOT NULL DEFAULT 0,
+		PRIMARY KEY (inst_id, bar, ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
+
 	// ---- 信号：8 因子明细 ----
 	`CREATE TABLE IF NOT EXISTS signals (
 		id      BIGINT NOT NULL AUTO_INCREMENT,

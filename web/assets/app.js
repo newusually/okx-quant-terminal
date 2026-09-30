@@ -13,6 +13,7 @@ const state = {
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
   universe: null,       // 准入统计 {total,kept,dropped,byReason}
   chart: null, candle: null, volume: null, ma7: null, ma25: null, ma99: null,
+  bollUp: null, bollMid: null, bollLo: null,
   pnlChart: null, pnlLine: null,
   bfPollTimer: null,
   lastKlineKey: '',
@@ -20,9 +21,30 @@ const state = {
   // ---- K 线分页：初始一页，向左滚动自动向前翻 ----
   klines: [],           // 已加载的 K 线（升序），翻页时不断往前拼
   ind: {},              // 指标序列 {ma7:[], ma25:[], ...}，同样按 ts 合并
+  indMap: {},           // ts -> 值 的快查表（画图例用）
+  kMap: new Map(),      // ts -> K 线
   hasMore: false,       // 更早还有没有数据
   loadingOlder: false,  // 防止一次滚动触发多次翻页
+
+  // ---- 显示开关 & 实时 ----
+  indVisible: { ma: true, boll: true, vol: true },
+  tickTimer: null,      // 每秒：收盘倒计时 + 用最新价刷新最后一根
+
+  // ---- K 线标注（买入小火箭 / 卖出小绿叶）----
+  markers: [],          // 已加载区间内的标注点（升序）
+  markerKey: new Set(), // 去重：翻页时同一笔成交会被两页都返回
+
+  // ---- 账户（顶栏实时数字）----
+  account: null,
 };
+
+// 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
+const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3, '1H': 3600e3, '4H': 14400e3 };
+
+// 币安配色：涨绿跌红
+const C_UP = '#0ecb81', C_DOWN = '#f6465d';
+const C_MA7 = '#f0b90b', C_MA25 = '#e056fd', C_MA99 = '#4facfe';
+const C_BOLL = '#5c6b7a', C_BOLL_MID = '#9aa4b2';
 
 const KLINE_PAGE = 1000;   // 一页多少根（初始加载 & 每次向前翻都这么多）
 const PAGE_TRIGGER = 5;    // 可视区左边界落到第几根之前就预加载下一页
@@ -98,17 +120,35 @@ function initChart() {
       textColor: '#b7bdc6',
       fontSize: 11,
       fontFamily: 'Menlo, Consolas, monospace',
+      attributionLogo: false,
     },
+    // 网格压到最暗，K 线才跳得出来（原来 #181d23 太抢眼）
     grid: {
-      vertLines: { color: '#181d23' },
-      horzLines: { color: '#181d23' },
+      vertLines: { color: '#14181d' },
+      horzLines: { color: '#14181d' },
     },
-    rightPriceScale: { borderColor: '#262b31', scaleMargins: { top: 0.06, bottom: 0.26 } },
-    timeScale: { borderColor: '#262b31', timeVisible: true, secondsVisible: false, rightOffset: 6 },
+    rightPriceScale: {
+      borderColor: '#262b31',
+      borderVisible: true,
+      scaleMargins: { top: 0.08, bottom: 0.26 },
+      entireTextOnly: true,
+    },
+    timeScale: {
+      borderColor: '#262b31',
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 8,
+      barSpacing: 7,
+      minBarSpacing: 0.4,
+    },
     crosshair: {
       mode: LightweightCharts.CrosshairMode.Normal,
-      vertLine: { color: '#4a515c', width: 1, style: 2, labelBackgroundColor: '#2b3139' },
-      horzLine: { color: '#4a515c', width: 1, style: 2, labelBackgroundColor: '#2b3139' },
+      vertLine: { color: '#4a515c', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#2b3139' },
+      horzLine: { color: '#4a515c', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#2b3139' },
+    },
+    watermark: {
+      visible: false,   // 图例已经写了合约名，水印只会显得脏
+      text: '', color: '#1e2329', fontSize: 48, horzAlign: 'center', vertAlign: 'center',
     },
     localization: {
       locale: 'zh-CN',
@@ -124,10 +164,11 @@ function initChart() {
 
   // 币安口径：涨绿跌红
   state.candle = state.chart.addCandlestickSeries({
-    upColor: '#0ecb81', downColor: '#f6465d',
-    borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
-    wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+    upColor: C_UP, downColor: C_DOWN,
+    borderUpColor: C_UP, borderDownColor: C_DOWN,
+    wickUpColor: C_UP, wickDownColor: C_DOWN,
     priceLineVisible: true, lastValueVisible: true,
+    priceLineColor: '#848e9c', priceLineStyle: LightweightCharts.LineStyle.Dotted,
   });
 
   state.volume = state.chart.addHistogramSeries({
@@ -137,27 +178,205 @@ function initChart() {
   });
   state.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
 
-  state.ma7 = state.chart.addLineSeries({ color: '#fcd535', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'MA7' });
-  state.ma25 = state.chart.addLineSeries({ color: '#5b8def', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'MA25' });
-  state.ma99 = state.chart.addLineSeries({ color: '#c26bf0', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'MA99' });
+  state.ma7 = state.chart.addLineSeries({ color: C_MA7, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  state.ma25 = state.chart.addLineSeries({ color: C_MA25, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+  state.ma99 = state.chart.addLineSeries({ color: C_MA99, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+
+  // 布林带：上下轨虚线、中轨实线（之前取了数据却从来没画出来）
+  const bollOpts = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, lineStyle: LightweightCharts.LineStyle.Dashed };
+  state.bollUp = state.chart.addLineSeries({ ...bollOpts, color: C_BOLL });
+  state.bollLo = state.chart.addLineSeries({ ...bollOpts, color: C_BOLL });
+  state.bollMid = state.chart.addLineSeries({ ...bollOpts, color: C_BOLL_MID, lineStyle: LightweightCharts.LineStyle.Solid });
 
   new ResizeObserver(() => {
     state.chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
   }).observe(el);
   state.chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
 
-  // 十字光标联动 OHLC 显示
+  // 十字光标联动：图例 + 悬浮提示框 + 买卖标记气泡
   state.chart.subscribeCrosshairMove((param) => {
-    if (!param || !param.time || !param.seriesData) return;
+    if (!param || param.time === undefined || !param.seriesData) {
+      hideTip();
+      renderLegend(state.klines[state.klines.length - 1] || null);
+      return;
+    }
     const c = param.seriesData.get(state.candle);
-    if (!c) return;
+    const ts = param.time * 1000;
+    if (!c) {
+      hideTip();
+      renderLegend(state.kMap.get(ts) || state.klines[state.klines.length - 1] || null);
+      return;
+    }
+    const k = state.kMap.get(ts) || { ts, o: c.open, h: c.high, l: c.low, c: c.close };
     $('pairOhlc').textContent =
       `开 ${fmtPrice(c.open)}  高 ${fmtPrice(c.high)}  低 ${fmtPrice(c.low)}  收 ${fmtPrice(c.close)}`;
+    renderLegend(k);
+    showTip(param, k);
   });
 
   // 向左滚动 → 自动加载更早的 K 线（每次一页 1000 根）
   state.scrollGuardUntil = Date.now() + 3000;   // 首屏渲染期间不触发
   state.chart.timeScale().subscribeVisibleLogicalRangeChange(onScroll);
+}
+
+/* ------------------------------------------------------------------ */
+/* 图例（左上角，跟随十字光标实时刷新）                                  */
+/* ------------------------------------------------------------------ */
+
+const lgCls = (v) => (v >= 0 ? 'up' : 'down');
+
+// renderLegend 画左上角的图例。k 为 null 时全部显示 --
+function renderLegend(k) {
+  const name = (state.tickers[state.curInst] && state.tickers[state.curInst].name) || state.curInst || '--';
+  $('lgSym').textContent = name;
+  $('lgTf').textContent = state.curBar;
+  if (!k) {
+    $('lgOhlc').textContent = '';
+    ['lgMa7', 'lgMa25', 'lgMa99', 'lgBollUp', 'lgBollMid', 'lgBollLo', 'lgVol'].forEach((id) => { $(id).textContent = '--'; });
+    return;
+  }
+  const chg = k.o ? (k.c - k.o) / k.o * 100 : 0;
+  const col = k.c >= k.o ? 'up' : 'down';
+  $('lgOhlc').innerHTML =
+    `<span class="k">O</span><span class="${col}">${fmtPrice(k.o)}</span> ` +
+    `<span class="k">H</span><span class="${col}">${fmtPrice(k.h)}</span> ` +
+    `<span class="k">L</span><span class="${col}">${fmtPrice(k.l)}</span> ` +
+    `<span class="k">C</span><span class="${col}">${fmtPrice(k.c)}</span> ` +
+    `<span class="${lgCls(chg)}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`;
+
+  const m = state.indMap || {};
+  const pick = (map, ts) => (map && map.get(ts) !== undefined ? fmtPrice(map.get(ts)) : '--');
+  $('lgMa7').textContent = pick(m.ma7, k.ts);
+  $('lgMa25').textContent = pick(m.ma25, k.ts);
+  $('lgMa99').textContent = pick(m.ma99, k.ts);
+  $('lgBollUp').textContent = pick(m.bollUp, k.ts);
+  $('lgBollMid').textContent = pick(m.bollMid, k.ts);
+  $('lgBollLo').textContent = pick(m.bollLo, k.ts);
+  $('lgVol').textContent = fmtVol(k.v);
+}
+
+// buildIdx 重建 ts→值 的快查表（图例 O(1) 查指标）
+function buildIdx() {
+  const mk = (arr) => {
+    const m = new Map();
+    (arr || []).forEach((p) => m.set(p.ts, p.v));
+    return m;
+  };
+  state.indMap = {
+    ma7: mk(state.ind.ma7), ma25: mk(state.ind.ma25), ma99: mk(state.ind.ma99),
+    bollUp: mk(state.ind.bollUp), bollMid: mk(state.ind.bollMid), bollLo: mk(state.ind.bollLo),
+  };
+  state.kMap = new Map();
+  state.klines.forEach((k) => state.kMap.set(k.ts, k));
+}
+
+// applyIndVisibility 按开关显示/隐藏指标
+function applyIndVisibility() {
+  const v = state.indVisible;
+  const maVis = v.ma, bollVis = v.boll;
+  [state.ma7, state.ma25, state.ma99].forEach((s) => s.applyOptions({ visible: maVis }));
+  [state.bollUp, state.bollMid, state.bollLo].forEach((s) => s.applyOptions({ visible: bollVis }));
+  state.volume.applyOptions({ visible: v.vol });
+  $('lgMA').classList.toggle('hidden', !maVis);
+  $('lgBOLL').classList.toggle('hidden', !bollVis);
+  $('lgVOL').classList.toggle('hidden', !v.vol);
+}
+
+// ------------------------------------------------------------------ */
+// 悬浮提示框（时间 / 开 / 收 / 高 / 低）
+// ------------------------------------------------------------------ */
+
+// showTip 把提示框跟在鼠标旁边。
+//
+// 边界处理：靠右/靠下时自动翻到另一侧，否则会被图表容器裁掉半个。
+function showTip(param, k) {
+  const el = $('tip');
+  if (!el || !param.point) return;
+
+  const chg = k.o ? (k.c - k.o) / k.o * 100 : 0;
+  const col = k.c >= k.o ? 'up' : 'down';
+  const amp = k.l ? (k.h - k.l) / k.l * 100 : 0;
+
+  // 这一根上挂了哪些标记（🚀 买入 / 🍃 平仓），一并显示在提示框底部
+  const mk = markersAt(k.ts).map((m) => {
+    if (m.kind === 'close') {
+      return `<div class="tip-mk mk-sell">🍃 平仓 ${fmtPrice(m.price)} · ${fmtNum(m.pnl, 4)}U（${fmtPct(m.pnlPct)}）${m.reason ? ' · ' + esc(m.reason) : ''}</div>`;
+    }
+    if (m.kind === 'open') {
+      return `<div class="tip-mk mk-buy">🚀 开仓 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U · ${m.leverage || ''}x</div>`;
+    }
+    return `<div class="tip-mk mk-sig">🚀 买入信号 ${m.score}/8${m.hitList ? ' · ' + esc(m.hitList) : ''}</div>`;
+  }).join('');
+
+  el.innerHTML =
+    `<div class="tip-time">${fmtTime(k.ts)}</div>` +
+    `<div class="tip-row"><span>开盘</span><b class="${col}">${fmtPrice(k.o)}</b></div>` +
+    `<div class="tip-row"><span>收盘</span><b class="${col}">${fmtPrice(k.c)}</b></div>` +
+    `<div class="tip-row"><span>最高</span><b class="${col}">${fmtPrice(k.h)}</b></div>` +
+    `<div class="tip-row"><span>最低</span><b class="${col}">${fmtPrice(k.l)}</b></div>` +
+    `<div class="tip-row"><span>涨跌</span><b class="${k.c >= k.o ? 'up' : 'down'}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</b></div>` +
+    `<div class="tip-row"><span>振幅</span><b>${amp.toFixed(2)}%</b></div>` +
+    `<div class="tip-row"><span>成交量</span><b>${fmtVol(k.v)}</b></div>` +
+    (mk ? `<div class="tip-mks">${mk}</div>` : '');
+
+  el.classList.remove('hidden');
+
+  // 先亮出来才能量到尺寸
+  const host = el.parentElement;
+  const bw = host ? host.clientWidth : 800;
+  const bh = host ? host.clientHeight : 400;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let x = param.point.x + 16;
+  let y = param.point.y + 16;
+  if (x + w > bw - 8) x = param.point.x - w - 16;
+  if (y + h > bh - 8) y = param.point.y - h - 16;
+  el.style.left = Math.max(4, Math.min(x, bw - w - 4)) + 'px';
+  el.style.top = Math.max(4, Math.min(y, bh - h - 4)) + 'px';
+}
+
+function hideTip() {
+  const el = $('tip');
+  if (el) el.classList.add('hidden');
+}
+
+/* ------------------------------------------------------------------ */
+/* 买卖标记：🚀 买入信号/开仓   🍃 平仓卖出                              */
+/* ------------------------------------------------------------------ */
+/* 标记由后端 /api/mark 随 K 线一起返回（只回当前这一页覆盖的时间区间），
+   所以往前翻页时历史那段（含回补出来的一个月）也会自动带上标记。    */
+
+// markersAt 取某个时间点上的所有标记（提示框里用）
+function markersAt(ts) {
+  const sec = Math.floor(ts / 1000);
+  return state.markers.filter((m) => m.time === sec);
+}
+
+// mergeMarkers 把一页的标记并进来。
+// 翻页时同一笔成交会被相邻两页都返回，用 time|kind|id 去重。
+function mergeMarkers(list) {
+  let added = 0;
+  (list || []).forEach((m) => {
+    if (!m || !m.time) return;
+    const key = `${m.time}|${m.kind}|${m.id === undefined ? '' : m.id}`;
+    if (state.markerKey.has(key)) return;
+    state.markerKey.add(key);
+    state.markers.push(m);
+    added++;
+  });
+  if (added) state.markers.sort((a, b) => a.time - b.time);
+  return added;
+}
+
+function resetMarkers() {
+  state.markers = [];
+  state.markerKey = new Set();
+  if (state.candle) state.candle.setMarkers([]);
+}
+
+// paintMarkers 把标记贴到蜡烛系列上（整幅重绘时调一次）
+function paintMarkers() {
+  if (!state.candle) return;
+  state.candle.setMarkers(state.markers);
 }
 
 function initPnlChart() {
@@ -286,11 +505,22 @@ function renderInstInfo() {
 
 function renderServiceInfo(st) {
   if (!st) return;
+  const sx = (st.strategy && st.strategy.exit) || {};
+  const sa = (st.strategy && st.strategy.addon) || {};
+  const addonTxt = sa.enabled === false
+    ? '关闭'
+    : `最多 ${sa.max_times || '--'} 次${sa.close_when_full ? '（满则平仓）' : ''}`;
+  const holdTxt = sx.max_hold_minutes > 0
+    ? sx.max_hold_minutes + ' 分钟'
+    : (sx.max_hold_bars > 0 ? sx.max_hold_bars + ' 根' : '关闭');
   const info = [
     ['每笔保证金', state.marginText || '--'],
     ['策略周期', (st.strategy && st.strategy.bar) || '--'],
     ['扫描周期', ((st.strategy && st.strategy.bars_enabled) || []).join(' / ') || '--'],
-    ['止盈', (st.strategy && st.strategy.exit && st.strategy.exit.take_profit_pct) + '%'],
+    ['止盈', (sx.take_profit_pct != null ? sx.take_profit_pct : '--') + '%'],
+    ['止损', sx.stop_loss_pct > 0 ? sx.stop_loss_pct + '%' : '不设'],
+    ['超时平仓', holdTxt],
+    ['加仓', addonTxt],
     ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8'],
     ['回补天数', String(st.backfillDays) + ' 天'],
     ['队列', String(st.queueLen)],
@@ -305,19 +535,70 @@ function renderServiceInfo(st) {
     .map((k) => `<tr><td>${esc(k)}</td><td>${fmtNum(st.tables[k], 0)}</td></tr>`).join('');
 }
 
-function renderStats(st) {
+// renderStats 顶栏 + 底栏。
+//
+// 顶栏这几个数字是「实时」的：/api/account 每 2 秒拉一次（引擎那边每 3 秒
+// 往 equity 表写一条快照），所以权益 / 可用 / 浮盈 是跟着盘面跳的。
+//
+// 注意：老版本这里写的是 `s.klineRows ? '--' : '--'`，两个分支都是 '--'，
+// 导致「账户权益」从来没显示过 —— 顺手修掉。
+function renderStats() {
+  const st = state.lastState || {};
   const s = st.stats || {};
-  $('stEquity').textContent = s.klineRows ? '--' : '--';
-  $('stPos').textContent = s.posCount || 0;
-  $('stTodayPnl').textContent = fmtNum(s.todayPnl, 2);
-  $('stTodayPnl').className = cls(s.todayPnl);
-  $('stPnl').textContent = fmtNum(s.pnlTotal, 2);
-  $('stPnl').className = cls(s.pnlTotal);
-  $('stWin').textContent = s.tradesTotal > 0 ? s.winRate.toFixed(1) + '%' : '--';
-  $('stKline').textContent = fmtNum(s.klineRows, 0);
-  $('stInst').textContent = fmtNum(s.instCount, 0);
-  $('stMargin').textContent = state.marginText || '--';
+  const a = state.account || st.account || {};
+
+  // ---- 账户三件套：权益 / 可用 / 本金 ----
+  $('stEquity').textContent = a.hasEquity ? fmtNum(a.totalEq, 4) : '--';
+  $('stEquity').className = a.hasEquity ? 'accent' : '';
+  $('stAvail').textContent = a.hasEquity ? fmtNum(a.avail, 4) : '--';
+  $('stPrincipal').textContent = a.principal > 0 ? fmtNum(a.principal, 4) : '--';
+
+  // ---- 浮盈 / 总盈亏 / 今日 ----
+  $('stUpl').textContent = fmtNum(a.upl, 4);
+  $('stUpl').className = cls(a.upl);
+  $('stPnl').textContent = fmtNum(a.totalPnl, 4);
+  $('stPnl').className = cls(a.totalPnl);
+  $('stRoi').textContent = a.principal > 0 ? fmtPct(a.roi, 2) : '--';
+  $('stRoi').className = 'sub ' + cls(a.roi);
+  $('stTodayPnl').textContent = fmtNum(a.todayPnl, 4);
+  $('stTodayPnl').className = cls(a.todayPnl);
+
+  // ---- 持仓 / 胜率 ----
+  $('stPos').textContent = a.posCount || s.posCount || 0;
+  $('stWin').textContent = s.tradesTotal > 0 ? (s.winRate || 0).toFixed(1) + '%' : '--';
+  $('stWinSub').textContent = s.tradesTotal > 0
+    ? `${s.tradesTotal} 笔 · 已实现 ${fmtNum(a.realized, 3)}` : '--';
+
+  // ---- 自动交易状态灯 ----
+  renderLiveBadge(st.live);
+
+  // 底栏：把原来挤在顶栏的 K线行数 / 合约数 / 计划仓位挪过来
+  $('footLeft').textContent =
+    `OKX 全量化终端 · ${st.version || ''} · 数据覆盖 ${state.days} 天 · ${state.marginText || ''}` +
+    ` · K线 ${fmtNum(s.klineRows, 0)} 行 · 合约 ${fmtNum(s.instCount, 0)} 个`;
   $('footRight').textContent = `数据库：${st.dbPath || '--'} · 服务器时间 ${s.serverTime || '--'}`;
+}
+
+// renderLiveBadge 顶栏右侧那个「自动交易」状态灯
+function renderLiveBadge(live) {
+  const el = $('stLive');
+  if (!el) return;
+  if (!live) { el.textContent = '--'; el.className = 'live-pill'; return; }
+  if (!live.running) { el.textContent = '已关闭'; el.className = 'live-pill off'; return; }
+
+  // 有错误优先报错，其次显示「dry_run / 实盘」
+  if (live.lastError) {
+    el.textContent = '异常';
+    el.className = 'live-pill err';
+    el.title = live.lastError;
+    return;
+  }
+  const mode = live.dryRun ? '试算' : (live.simulated ? '模拟' : '实盘');
+  el.textContent = `${mode} 巡检 ${live.exitEverySec}s`;
+  el.className = 'live-pill' + (live.dryRun || live.simulated ? ' warn' : ' on');
+  el.title = `止盈巡检每 ${live.exitEverySec} 秒 · 信号扫描每 ${live.entryEverySec} 秒\n` +
+    `累计：巡检 ${live.ticks} 轮 / 扫描 ${live.scans} 轮 / 开仓 ${live.opens} 笔 / 平仓 ${live.exits} 笔\n` +
+    (live.lastNote || '');
 }
 
 function setConn(live, text) {
@@ -332,17 +613,28 @@ function setConn(live, text) {
 
 async function loadState() {
   const st = await api('/api/state');
+  state.lastState = st;
   state.bars = st.bars || state.bars;
   state.days = st.backfillDays || 30;
   state.marginText = st.marginText || '';
   state.entryMargin = (((st.strategy || {}).entry || {}).margin_usdt) || 0.1;
   state.maxMargin = (((st.strategy || {}).entry || {}).max_margin_usdt) || 0.5;
+  if (st.account) state.account = st.account;
   renderTimeframes();
-  renderStats(st);
+  renderStats();
   renderServiceInfo(st);
   setConn(true, '已连接');
-  $('footLeft').textContent =
-    `OKX 全合约量化终端 · ${st.version} · 数据覆盖 ${state.days} 天 · ${state.marginText}`;
+}
+
+// loadAccount 顶栏的实时数字（每 2 秒）。
+//
+// 单独开一个轻接口而不是反复拉 /api/state：/api/state 要顺着 information_schema
+// 数各表行数，2 秒一次太浪费；这里只有一条 equity 快照 + 几个 COUNT。
+async function loadAccount() {
+  const j = await api('/api/account');
+  state.account = j.account || state.account;
+  if (j.live) state.lastState = Object.assign({}, state.lastState || {}, { live: j.live });
+  renderStats();
 }
 
 async function loadInstruments() {
@@ -358,17 +650,24 @@ async function loadInstruments() {
   }
 }
 
+let tickerN = 0;
+
 async function loadTickers() {
   const j = await api('/api/tickers');
   const map = {};
   (j.list || []).forEach((t) => { map[t.instId] = t; });
   state.tickers = map;
+  tickerN++;
+
+  // 行情每 2 秒来一次，但合约列表（400 行 DOM）和信息面板不用这么勤，
+  // 每 5 次（≈10 秒）重建一次就够，否则页面会被无谓的重排拖卡。
   renderTickerTape();
-  renderInstList();
-  renderInstInfo();
+  if (tickerN % 5 === 1) { renderInstList(); renderInstInfo(); }
+
   const t = map[state.curInst];
   if (t) {
     $('pairPrice').textContent = fmtPrice(t.last);
+    $('pairPrice').className = t.chgPct > 0 ? 'up' : (t.chgPct < 0 ? 'down' : '');
     const cg = $('pairChg');
     cg.textContent = fmtPct(t.chgPct);
     cg.className = 'chg ' + cls(t.chgPct);
@@ -390,6 +689,9 @@ function mergeByTs(older, newer) {
 }
 
 // mergePage 把一页新数据并进 state（klines 与指标一起按 ts 对齐）
+//
+// 顺带把「这一页新增了多少根」记在 j.__added 上：定时刷新时只需要
+// 重画最后这几根，不用整幅 setData。
 function mergePage(j, reset) {
   const k = j.kline || [];
   const ind = {
@@ -399,15 +701,21 @@ function mergePage(j, reset) {
   if (reset) {
     state.klines = k.slice();
     state.ind = ind;
+    resetMarkers();
+    mergeMarkers(j.markers);
+    j.__added = k.length;
     return;
   }
+  const before = state.kMap && state.kMap.size ? state.kMap.size : state.klines.length;
   state.klines = mergeByTs(state.klines, k);
   Object.keys(ind).forEach((key) => {
     state.ind[key] = mergeByTs(state.ind[key] || [], ind[key]);
   });
+  mergeMarkers(j.markers);
+  j.__added = Math.max(3, state.klines.length - before + 1);
 }
 
-// renderKline 把 state 里的数据铺到图上
+// renderKline 把 state 里的数据整幅铺到图上（换合约 / 换周期 / 翻页时用）
 //
 // keepRange：翻页（往前插数据）时必须保持当前可视位置，
 //            否则 setData 之后画面会跳回最左边。
@@ -415,28 +723,81 @@ function renderKline(tickSize, keepRange) {
   const lr = keepRange ? state.chart.timeScale().getVisibleLogicalRange() : null;
   const prevCount = state.klines.length;
 
-  state.candle.setData(state.klines.map((k) => ({
-    time: Math.floor(k.ts / 1000), open: k.o, high: k.h, low: k.l, close: k.c,
-  })));
-  state.volume.setData(state.klines.map((k) => ({
-    time: Math.floor(k.ts / 1000), value: k.v,
-    color: k.c >= k.o ? 'rgba(14,203,129,.45)' : 'rgba(246,70,93,.45)',
-  })));
-  const toLine = (arr) => (arr || []).map((p) => ({ time: Math.floor(p.ts / 1000), value: p.v }));
-  state.ma7.setData(toLine(state.ind.ma7));
-  state.ma25.setData(toLine(state.ind.ma25));
-  state.ma99.setData(toLine(state.ind.ma99));
-
-  if (tickSize) {
-    const prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
-    state.candle.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: tickSize } });
-  }
+  setCandleFormat(tickSize);
+  buildIdx();
+  paintAll();
+  paintMarkers();
 
   if (lr && state.klines.length > prevCount) {
     // 往前插了 bar，逻辑索引整体右移，可视区跟着右移同样的量
     const shift = state.klines.length - prevCount;
     state.chart.timeScale().setVisibleLogicalRange({ from: lr.from + shift, to: lr.to + shift });
     state.scrollGuardUntil = Date.now() + 600;   // 插完数据别再立刻触发下一页
+  }
+  renderLegend(state.klines[state.klines.length - 1] || null);
+}
+
+// setCandleFormat 按合约最小变动价位设置价格精度
+function setCandleFormat(tickSize) {
+  if (!tickSize) return;
+  const prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
+  state.candle.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: tickSize } });
+}
+
+const toCandle = (k) => ({ time: Math.floor(k.ts / 1000), open: k.o, high: k.h, low: k.l, close: k.c });
+const toVolBar = (k) => ({
+  time: Math.floor(k.ts / 1000), value: k.v,
+  color: k.c >= k.o ? 'rgba(14,203,129,.45)' : 'rgba(246,70,93,.45)',
+});
+const toLine = (arr) => (arr || [])
+  .filter((p) => p.v !== null && p.v !== undefined && isFinite(p.v))
+  .map((p) => ({ time: Math.floor(p.ts / 1000), value: p.v }));
+
+// paintAll 全量重绘（只在「数据集合变了」时调用）
+function paintAll() {
+  state.candle.setData(state.klines.map(toCandle));
+  state.volume.setData(state.klines.map(toVolBar));
+  state.ma7.setData(toLine(state.ind.ma7));
+  state.ma25.setData(toLine(state.ind.ma25));
+  state.ma99.setData(toLine(state.ind.ma99));
+  state.bollUp.setData(toLine(state.ind.bollUp));
+  state.bollMid.setData(toLine(state.ind.bollMid));
+  state.bollLo.setData(toLine(state.ind.bollLo));
+}
+
+// paintTail 只更新最后 n 根（定时刷新 / 实时报价走这条路径）
+//
+// 这是「实时更新」的关键：以前每次轮询都对几千根 K 线 setData 一遍，
+// 既卡又会让可视区抖动。改成系列 update() 之后，只有最后一根在动。
+function paintTail(n) {
+  const len = state.klines.length;
+  if (!len) return;
+  if (!n || n < 1) n = 1;
+  const from = Math.max(0, len - n);
+  const tail = state.klines.slice(from);
+  tail.forEach((k) => {
+    state.candle.update(toCandle(k));
+    state.volume.update(toVolBar(k));
+  });
+  updateLineTail(state.ma7, state.ind.ma7, from, len);
+  updateLineTail(state.ma25, state.ind.ma25, from, len);
+  updateLineTail(state.ma99, state.ind.ma99, from, len);
+  updateLineTail(state.bollUp, state.ind.bollUp, from, len);
+  updateLineTail(state.bollMid, state.ind.bollMid, from, len);
+  updateLineTail(state.bollLo, state.ind.bollLo, from, len);
+}
+
+// updateLineTail 指标序列只 update 落在 [from,to) 区间里的点
+function updateLineTail(series, arr, from, to) {
+  if (!series || !arr || !arr.length) return;
+  const kFrom = state.klines[from] ? state.klines[from].ts : 0;
+  const kTo = state.klines[to - 1] ? state.klines[to - 1].ts : 0;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const ts = arr[i].ts;
+    if (ts < kFrom) break;
+    if (ts <= kTo && arr[i].v !== null && isFinite(arr[i].v)) {
+      series.update({ time: Math.floor(ts / 1000), value: arr[i].v });
+    }
   }
 }
 
@@ -469,9 +830,13 @@ function updatePageHint() {
   $('chartHint').textContent = `已加载 ${n} 根 ${state.curBar} K线`;
   const el = $('pageInfo');
   if (!el) return;
-  el.textContent = state.hasMore
+  // 顺带报一下这一段里标了多少个买卖点，免得用户以为标记没出来
+  const buys = state.markers.filter((m) => m.kind === 'open' || m.kind === 'signal').length;
+  const sells = state.markers.filter((m) => m.kind === 'close').length;
+  const mk = state.markers.length ? ` · 🚀 ${buys} · 🍃 ${sells}` : '';
+  el.textContent = (state.hasMore
     ? `已加载 ${n} 根 · 向左滚动继续加载（每页 ${KLINE_PAGE} 根）`
-    : `已加载 ${n} 根 · 已到最早`;
+    : `已加载 ${n} 根 · 已到最早`) + mk;
 }
 
 // onScroll 滚到左边缘附近就预加载下一页
@@ -507,6 +872,7 @@ async function loadKline(reset) {
     state.klines = [];
     state.ind = {};
     state.hasMore = false;
+    resetMarkers();
   }
 
   $('chartHint').textContent = '加载中…';
@@ -532,7 +898,17 @@ async function loadKline(reset) {
   $('pairInst').textContent = inst + ' · ' + bar;
 
   const tickSize = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
-  renderKline(tickSize, false);
+
+  // 定时刷新走「只重画尾巴」：整幅 setData 会让可视区抖动，而且越到后面越卡
+  if (reset) {
+    renderKline(tickSize, false);
+  } else {
+    setCandleFormat(tickSize);
+    buildIdx();
+    paintTail(j.__added || 3);
+    paintMarkers();   // 新信号/新平仓会随时冒出来，标记也得跟着刷新
+    renderLegend(state.klines[state.klines.length - 1] || null);
+  }
 
   if (reset || state.lastKlineKey !== key) {
     state.chart.timeScale().fitContent();
@@ -550,13 +926,84 @@ async function loadKline(reset) {
   cg.textContent = fmtPct(chg);
   cg.className = 'chg ' + cls(chg);
 
+  const newest = state.klines[state.klines.length - 1];
+  if (newest) {
+    // 「延迟」不能拿 now - 最新一根开盘时间算：一根 15m K 线要走 15 分钟，
+    // 开盘时间天生落后 now 0~15 分钟，那是「走盘中」不是「数据滞后」。
+    // 真正的滞后口径 = 最新一根的「结束时间」落后 now 多少。
+    const barMs = BAR_MS[bar] || 900000;
+    const lag = Date.now() - newest.ts;               // 距开盘
+    const stale = Date.now() - (newest.ts + barMs);   // 距本根该结束的时刻（<0 = 还在走）
+    if (stale < 0) {
+      const leftMin = Math.ceil(-stale / 60000);
+      const leftTxt = barMs >= 3600000
+        ? Math.ceil(-stale / 3600000) + ' 小时'
+        : leftMin + ' 分';
+      $('liveInfo').textContent =
+        `实时 · 最新一根 ${fmtTime(newest.ts)} 走盘中（本根还剩 ${leftTxt}）`;
+      $('liveInfo').className = 'muted';
+    } else if (lag < barMs * 1.5) {
+      $('liveInfo').textContent =
+        `实时 · 最新一根 ${fmtTime(newest.ts)}（更新于 ${Math.max(0, Math.round(stale / 1000))}s 前）`;
+      $('liveInfo').className = 'muted';
+    } else {
+      $('liveInfo').textContent = `⚠ 数据滞后 ${Math.round(stale / 60000)} 分钟`;
+      $('liveInfo').className = 'down';
+    }
+  }
+
   scheduleKlineRefresh();
 }
 
+// 各周期的轮询间隔：短周期勤一点，长周期没必要
+const REFRESH_MS = { '1m': 4000, '3m': 5000, '5m': 6000, '15m': 8000, '1H': 15000, '4H': 30000 };
+
 function scheduleKlineRefresh() {
-  if (klineTimer) clearInterval(klineTimer);
-  const ms = { '1m': 20000, '3m': 30000, '5m': 30000, '15m': 60000, '1H': 120000, '4H': 300000 }[state.curBar] || 60000;
-  klineTimer = setInterval(() => loadKline(false), ms);
+  if (klineTimer) clearTimeout(klineTimer);
+  const ms = REFRESH_MS[state.curBar] || 10000;
+  // 用 setTimeout 串起来而不是 setInterval：请求慢的时候不会堆积
+  klineTimer = setTimeout(async () => {
+    if (!document.hidden) await loadKline(false).catch(() => {});
+    scheduleKlineRefresh();
+  }, ms);
+}
+
+/* ------------------------------------------------------------------ */
+/* 实时：收盘倒计时 + 用最新价刷新最后一根                                */
+/* ------------------------------------------------------------------ */
+
+// tickLive 每秒跑一次
+//   1) 更新本根 K 线的收盘倒计时（币安那种 14:59 倒数）
+//   2) 用 ticker 的最新价就地刷新最后一根 K 线的高低收 —— 图会「跳」
+//
+// 只在这一根还没走完的时候才动它，否则会把已经收盘的历史 K 线改坏。
+function tickLive() {
+  // ---- 倒计时 ----
+  const d = BAR_MS[state.curBar];
+  if (d) {
+    const left = Math.max(0, Math.ceil(Date.now() / d) * d - Date.now());
+    const mm = String(Math.floor(left / 60000)).padStart(2, '0');
+    const ss = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
+    $('barCountdown').textContent = `${mm}:${ss}`;
+    $('barCountdown').className = left < 10000 ? 'countdown hot' : 'countdown';
+  }
+
+  // ---- 用最新价刷新最后一根 ----
+  const t = state.tickers[state.curInst];
+  const n = state.klines.length;
+  if (!t || !t.last || !n || !d) return;
+  const last = state.klines[n - 1];
+  if (Date.now() - last.ts >= d) return;   // 这根已经收盘了，别改它
+
+  const px = t.last;
+  if (px === last.c && px <= last.h && px >= last.l) return;   // 没变化就不重画
+  last.c = px;
+  if (px > last.h) last.h = px;
+  if (px < last.l) last.l = px;
+
+  state.candle.update(toCandle(last));
+  state.volume.update(toVolBar(last));
+  if (!document.hidden) renderLegend(last);
 }
 
 /* ------------------------------------------------------------------ */
@@ -569,19 +1016,32 @@ async function loadPositions() {
   $('badgePos').textContent = rows.length;
   const tb = $('tbPositions');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="14" class="empty">暂无持仓</td></tr>';
+    tb.innerHTML = '<tr><td colspan="15" class="empty">暂无持仓</td></tr>';
     return;
   }
   tb.innerHTML = rows.map((p) => {
     const dir = (p.side || 'buy').toLowerCase() === 'sell' ? 'short' : 'long';
+
+    // 距爆仓：标记价离强平价还有几个百分点。越近越红。
+    // 逐仓做多时强平价在下方，所以「跌多少就爆」= (标记价−强平价)/标记价。
+    const liq = p.liqPx || 0;
+    const mark = p.markPx || p.last || 0;
+    let distHtml = '<span class="muted">--</span>';
+    if (liq > 0 && mark > 0) {
+      const dist = Math.abs(mark - liq) / mark * 100;
+      const c = dist < 3 ? 'down' : (dist < 8 ? 'accent' : 'muted');
+      distHtml = `<span class="${c}"><b>${dist.toFixed(2)}%</b></span>`;
+    }
+
     return `<tr>
       <td title="${esc(p.instId)}">${esc(p.name || p.instId)}</td>
       <td><span class="tag-pill pill-${dir}">${dir === 'long' ? '多' : '空'}</span></td>
       <td>${fmtNum(p.sz, 0)}</td>
       <td>${fmtPrice(p.entryPx)}</td>
-      <td>${fmtPrice(p.markPx)}</td>
-      <td class="muted">${fmtPrice(p.liqPx)}</td>
-      <td>${fmtNum(p.margin, 2)}</td>
+      <td>${fmtPrice(mark)}</td>
+      <td class="muted">${fmtPrice(liq)}</td>
+      <td>${distHtml}</td>
+      <td>${fmtNum(p.margin, 3)}</td>
       <td>${p.leverage}x</td>
       <td>${fmtNum(p.notional, 2)}</td>
       <td class="${cls(p.upl)}"><b>${fmtNum(p.upl, 4)}</b></td>
@@ -591,6 +1051,9 @@ async function loadPositions() {
       <td>${p.score ? p.score + '/8' : '--'}</td>
     </tr>`;
   }).join('');
+
+  // 顶栏的持仓数也跟着走，别等下一次 /api/account
+  $('stPos').textContent = rows.length;
 }
 
 async function loadHistory() {
@@ -711,8 +1174,18 @@ function bindEvents() {
   });
 
   $('btnRefresh').onclick = () => {
-    loadTickers(); loadKline(false); loadPositions(); loadHistory(); loadSignals(); loadBackfill();
+    loadTickers(); loadKline(true); loadPositions(); loadHistory(); loadSignals(); loadBackfill();
   };
+
+  // 指标显示开关（MA / BOLL / 成交量）
+  $('indGroup').addEventListener('click', (e) => {
+    const btn = e.target.closest('.ind');
+    if (!btn) return;
+    const key = btn.dataset.ind;
+    state.indVisible[key] = !state.indVisible[key];
+    btn.classList.toggle('active', state.indVisible[key]);
+    applyIndVisibility();
+  });
 
   // 手动往前翻一页（不想滚动时用）
   $('btnOlder').onclick = () => loadOlder();
@@ -777,20 +1250,35 @@ function pollBackfillUntilDone() {
   initChart();
   initPnlChart();
   bindEvents();
+  applyIndVisibility();
   try {
     await loadState();
     renderTimeframes();
     await loadInstruments();
     await loadTickers();
-    await Promise.all([loadPositions(), loadHistory(), loadSignals(), loadBackfill()]);
+    await Promise.all([loadPositions(), loadHistory(), loadSignals(), loadBackfill(), loadAccount()]);
     if (!state.curInst && state.insts.length) await selectInst(state.insts[0].instId);
   } catch (e) {
     setConn(false, '接口异常：' + e.message);
   }
 
-  // 实时：行情 + 持仓 3 秒，历史/信号 15 秒
-  setInterval(() => { loadTickers().catch(() => setConn(false, '行情中断')); }, 3000);
+  // 每秒：收盘倒计时 + 用最新价刷新最后一根 K 线（图会「跳」起来）
+  state.tickTimer = setInterval(tickLive, 1000);
+
+  // 实时：行情 2 秒，账户 2 秒（顶栏权益/持仓/本金跟着跳），
+  //       持仓 3 秒，历史/信号 10 秒，回补进度 20 秒
+  setInterval(() => { loadTickers().catch(() => setConn(false, '行情中断')); }, 2000);
+  setInterval(() => { loadAccount().catch(() => {}); }, 2000);
   setInterval(() => { loadPositions().catch(() => {}); }, 3000);
-  setInterval(() => { loadHistory().catch(() => {}); loadSignals().catch(() => {}); }, 15000);
-  setInterval(() => { loadBackfill().catch(() => {}); loadState().catch(() => {}); }, 30000);
+  setInterval(() => { loadHistory().catch(() => {}); loadSignals().catch(() => {}); }, 10000);
+  setInterval(() => { loadBackfill().catch(() => {}); loadState().catch(() => {}); }, 20000);
+
+  // 页面重新可见时立刻补一次数据（后台标签页会被浏览器节流）
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      loadTickers().catch(() => {});
+      loadAccount().catch(() => {});
+      loadKline(false).catch(() => {});
+    }
+  });
 })();

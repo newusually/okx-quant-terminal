@@ -8,7 +8,68 @@ import (
 	"time"
 
 	"finally-main/internal/model"
+	"finally-main/internal/service"
 )
+
+// ---------------------------------------------------------------------------
+// /api/account —— 顶栏实时数字（轻量，2 秒一次）
+// ---------------------------------------------------------------------------
+
+// AccountSnapshot 账户快照：顶栏「权益 / 可用 / 本金 / 浮盈 / 总盈亏」的数据源。
+//
+// 本金怎么来的：假设期间没有出入金，则
+//
+//	权益 = 本金 + 已实现盈亏 + 未实现盈亏
+//
+// 反推 本金 = 权益 − 浮盈 − 已实现盈亏。有出入金时会漂，
+// 那时在 configs/okx_strategy.json 里填 principal_usdt 就以内填值为准。
+func (s *Server) AccountSnapshot() map[string]any {
+	eq, hasEq, _ := s.db.LatestEquity()
+
+	st, _ := s.db.Stats()
+
+	principal := eq.TotalEq - eq.Upl - st.PnlTotal
+	if s.strategy != nil && s.strategy.PrincipalUSDT > 0 {
+		principal = s.strategy.PrincipalUSDT
+	}
+	totalPnl := eq.Upl + st.PnlTotal
+	roi := 0.0
+	if principal > 0 {
+		roi = totalPnl / principal * 100
+	}
+	return map[string]any{
+		"hasEquity":    hasEq,
+		"totalEq":      eq.TotalEq,
+		"avail":        eq.Avail,
+		"upl":          eq.Upl,
+		"posCount":     st.PosCount,
+		"equityTs":     eq.Ts,
+		"principal":    principal,
+		"realized":     st.PnlTotal,
+		"todayPnl":     st.TodayPnl,
+		"totalPnl":     totalPnl,
+		"roi":          roi,
+		"winRate":      st.WinRate,
+		"tradesTotal":  st.TradesTotal,
+		"signalsToday": st.SignalsToday,
+		"ordersToday":  st.OrdersToday,
+		"klineRows":    st.KlineRows,
+		"instCount":    st.InstCount,
+		"serverTime":   st.ServerTime,
+	}
+}
+
+// handleAccount 只回账户快照 + 实时引擎状态，供前端 2 秒轮询顶栏。
+//
+// 为什么不直接让前端轮询 /api/state：那个还要顺 information_schema 数
+// 每张表的行数和占用，2 秒一次纯属浪费。
+func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) (any, error) {
+	return map[string]any{
+		"ok":      true,
+		"account": s.AccountSnapshot(),
+		"live":    service.LiveStatusSnapshot(),
+	}, nil
+}
 
 // ---------------------------------------------------------------------------
 // /api/positions —— 持仓 + 实时盈亏

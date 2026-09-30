@@ -41,8 +41,18 @@ type EntryCfg struct {
 type ExitCfg struct {
 	TakeProfitPct float64 `json:"take_profit_pct"`
 	BollUpperExit bool    `json:"boll_upper_exit"`
-	MaxHoldBars   int     `json:"max_hold_bars"`
-	StopLossPct   float64 `json:"stop_loss_pct"`
+
+	// MaxHoldBars 超时平仓（按「根」算）。0 = 关闭。
+	// 注意它依赖持仓自己的周期，1H 图和 15m 图的 4 根完全不是一个时长，
+	// 所以更推荐用 MaxHoldMinutes。
+	MaxHoldBars int `json:"max_hold_bars"`
+
+	// MaxHoldMinutes 超时平仓（按「分钟」算）。>0 时优先于 MaxHoldBars。
+	// 默认 60 —— 也就是「开仓满 1 小时还没到止盈线就自动平掉」，
+	// 免得仓位在里面耗着占额度。
+	MaxHoldMinutes int `json:"max_hold_minutes"`
+
+	StopLossPct float64 `json:"stop_loss_pct"`
 }
 
 // AddonCfg 加仓（浮亏补仓 / 摊薄均价）。
@@ -69,8 +79,15 @@ type AddonCfg struct {
 	// LookbackBars 回看多少根 RiseBar 找「先跌」的低点。默认 24（15m × 24 = 6 小时）。
 	LookbackBars int `json:"lookback_bars"`
 
-	// MaxTimes 每个仓位最多加几次。默认 2。
+	// MaxTimes 每个仓位最多加几次。默认 3。
 	MaxTimes int `json:"max_times"`
+
+	// CloseWhenFull 加满 MaxTimes 之后，加仓信号再次出现时是否直接平仓。
+	//
+	// true（默认）= 「加仓最多三次，超过自动平仓」：说明摊薄均价没救回来，
+	//                再补就是无底洞，直接市价出局。
+	// false        = 加满就不再加，仓位继续挂着等止盈 / 超时平仓。
+	CloseWhenFull bool `json:"close_when_full"`
 
 	// MinGapBars 两次加仓之间至少隔多少根 RiseBar。默认 1。
 	MinGapBars int `json:"min_gap_bars"`
@@ -250,12 +267,28 @@ func (c *Config) LogKeepFiles() int {
 
 // projectRoot 从当前目录往上找 go.mod；找不到就退回当前目录
 func projectRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "."
+	// 1) 当前工作目录往上找 go.mod —— 命令行 / 批处理启动时走这条
+	if dir, err := os.Getwd(); err == nil {
+		if r := walkUpToRoot(dir, 5); r != "" {
+			return r
+		}
 	}
-	start := dir
-	for i := 0; i < 5; i++ {
+	// 2) 可执行文件目录往上找 —— Windows 服务启动时 cwd 是 C:\Windows\System32，
+	//    只能靠 exe 自己的位置反推（bin\okxweb.exe → ..\ = 项目根）。
+	if exe, err := os.Executable(); err == nil {
+		if r := walkUpToRoot(filepath.Dir(exe), 5); r != "" {
+			return r
+		}
+	}
+	if dir, err := os.Getwd(); err == nil {
+		return dir
+	}
+	return "."
+}
+
+// walkUpToRoot 从 dir 开始逐级向上找含 go.mod 的目录，找不到返回空串。
+func walkUpToRoot(dir string, max int) string {
+	for i := 0; i < max; i++ {
 		if _, e := os.Stat(filepath.Join(dir, "go.mod")); e == nil {
 			return dir
 		}
@@ -265,7 +298,7 @@ func projectRoot() string {
 		}
 		dir = parent
 	}
-	return start
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -307,11 +340,12 @@ func defaultConfig() *Config {
 			// 0.1U 买不起 1 张的合约会放大到刚好买 1 张来下单，绝不超过 MaxMarginUSDT。
 			MarginPolicy: "min_one", MaxMarginUSDT: 0.5,
 		},
-		Exit:  &ExitCfg{TakeProfitPct: 2.0, BollUpperExit: true, MaxHoldBars: 0, StopLossPct: 0},
+		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
+			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
 		// 加仓：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3（不超过 max_margin_usdt）
 		Addon: &AddonCfg{
 			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: "15m",
-			LookbackBars: 24, MaxTimes: 2, MinGapBars: 1,
+			LookbackBars: 24, MaxTimes: 3, CloseWhenFull: true, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
 		Risk: &RiskCfg{
@@ -427,14 +461,18 @@ func resolveConfigPath() string {
 		}
 	}
 	// 相对可执行文件目录再找一遍（服务方式启动时 cwd 可能不同）
+	// exe 通常在 <项目根>\bin\ 下，所以既要试 exe 同级的 configs\，
+	// 也要试上一级（= 项目根）的 configs\。
 	if exe, err := os.Executable(); err == nil {
 		base := filepath.Dir(exe)
-		for _, c := range []string{
-			filepath.Join(base, "configs", "okx_strategy.json"),
-			filepath.Join(base, "okx_strategy.json"),
-		} {
-			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-				return c
+		for _, d := range []string{base, filepath.Dir(base)} {
+			for _, c := range []string{
+				filepath.Join(d, "configs", "okx_strategy.json"),
+				filepath.Join(d, "okx_strategy.json"),
+			} {
+				if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+					return c
+				}
 			}
 		}
 	}
@@ -544,6 +582,15 @@ func fillDefaults(c *Config) {
 	}
 	if c.Exit == nil {
 		c.Exit = d.Exit
+	} else if c.Exit.MaxHoldMinutes <= 0 && c.Exit.MaxHoldBars <= 0 {
+		// 两个都没填 → 用默认的「1 小时超时」
+		c.Exit.MaxHoldMinutes = d.Exit.MaxHoldMinutes
+	}
+
+	// 加仓上限归一化：默认 3 次。0 或负数一律回到默认值，
+	// 否则「加满就平」这条兜底规则会因为 MaxTimes=0 而永远触发。
+	if c.Addon != nil && c.Addon.MaxTimes <= 0 {
+		c.Addon.MaxTimes = d.Addon.MaxTimes
 	}
 	if c.Addon == nil {
 		c.Addon = d.Addon

@@ -23,9 +23,16 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		return nil, err
 	}
 	counts, _ := s.db.TableCounts()
+
+	// ---- 账户快照：顶栏「权益 / 可用 / 本金 / 浮盈 / 总盈亏」的数据源 ----
+	// 口径与 /api/account 完全一致（同一个函数），两处不会打架。
+	account := s.AccountSnapshot()
+
 	return map[string]any{
 		"ok":           true,
 		"stats":        st,
+		"account":      account,
+		"live":         service.LiveStatusSnapshot(),
 		"strategy":     s.strategy,
 		"marginText":   s.strategy.MarginText(),
 		"bars":         service.SupportedBars,
@@ -34,7 +41,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		"uptimeSec":    int(time.Since(s.startAt).Seconds()),
 		"queueLen":     s.bf.QueueLen(),
 		"backfillDays": s.bf.Config().Days,
-		"version":      "okx-web/1.0 (pure go)",
+		"version":      "okx-web/1.1 (pure go · live)",
 	}, nil
 }
 
@@ -364,6 +371,12 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		return nil, fmt.Errorf("参数不合法：inst=%q bar=%q", inst, bar)
 	}
 
+	// ★ 实时性：先保证「当前这根」是最新的，再读库。
+	// 前端每几秒轮询一次，这里带节流，不会打爆 OKX 限频。
+	if q.Get("fresh") != "0" {
+		s.ensureFresh(inst, bar)
+	}
+
 	pg, err := s.klineWindow(inst, bar, days, before, limit)
 	if err != nil {
 		return nil, err
@@ -412,18 +425,120 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		return out
 	}
 
+	// ---- 图上标注：买入信号（小火箭）+ 开仓/平仓（火箭 / 绿叶）----
+	//
+	// 只在「当前这一页 K 线覆盖的时间区间」里取，翻页时前端重新请求，
+	// 所以历史回补出来的那段也会照常标出来，不用一次性把全历史塞给浏览器。
+	//
+	// 关键字对齐：成交时间带毫秒（比如 16:42:16.374），而 K 线开盘时间是
+	// 周期毫秒数的整数倍。不向下取整的话标记会落在两根 K 线中间，画不出来。
+	markers := []map[string]any{}
+	if q.Get("markers") != "0" && len(pg.Rows) > 0 {
+		fromTs := pg.Rows[0].Ts
+		toTs := pg.Rows[len(pg.Rows)-1].Ts
+
+		barMs := service.BarDurationMs(bar)
+		if barMs <= 0 {
+			barMs = 15 * 60 * 1000
+		}
+		snap := func(ts int64) int64 {
+			if ts <= 0 {
+				return 0
+			}
+			return ts - ts%barMs
+		}
+
+		// 只保留「确实有这根 K 线」的时间点，否则标记会被图表丢掉或报错
+		hasBar := make(map[int64]bool, len(pg.Rows))
+		for _, k := range pg.Rows {
+			hasBar[k.Ts] = true
+		}
+		push := func(m map[string]any) {
+			t, _ := m["time"].(int64)
+			if t > 0 && hasBar[t] {
+				markers = append(markers, m)
+			}
+		}
+
+		// ① 买入信号：score 够线就画。acted=1（真下过单）用实心火箭，
+		//    只报信号没下单的用浅色小箭头，一眼分得清。
+		//
+		//    颜色用金色（主题强调色）而不是红/绿：红绿在 K 线上已经被
+		//    「涨/跌」占用了，再拿来表示买卖只会看串。
+		if sigs, serr := s.db.SignalsInRange(inst, bar, fromTs, toTs); serr == nil {
+			for _, sg := range sigs {
+				if sg.Score <= 0 {
+					continue
+				}
+				m := map[string]any{
+					"time": snap(sg.Ts), "position": "belowBar", "shape": "arrowUp",
+					"color": "#fcd535", "text": "🚀", "size": 2,
+					"kind": "signal", "price": sg.Close, "score": sg.Score,
+					"hitList": sg.HitList, "reason": sg.Reason, "ts": sg.Ts,
+				}
+				if sg.Acted == 0 {
+					m["color"] = "#8a7a2a"
+					m["text"] = "↑"
+					m["size"] = 1
+					m["kind"] = "signal_only"
+				}
+				push(m)
+			}
+		}
+
+		// ② 实际成交：开仓 = 小火箭（K 线下方朝上），平仓 = 小绿叶（K 线上方朝下）
+		if trs, terr := s.db.TradesInRange(inst, fromTs, toTs); terr == nil {
+			for _, t := range trs {
+				if t.OpenTs >= fromTs && t.OpenTs <= toTs {
+					push(map[string]any{
+						"time": snap(t.OpenTs), "position": "belowBar", "shape": "arrowUp",
+						"color": "#fcd535", "text": "🚀", "size": 2,
+						"kind": "open", "price": t.EntryPx, "sz": t.Sz,
+						"margin": t.Margin, "leverage": t.Leverage, "id": t.ID,
+						"ts": t.OpenTs,
+					})
+				}
+				if t.CloseTs > 0 && t.CloseTs >= fromTs && t.CloseTs <= toTs {
+					col := "#0ecb81" // 绿=赚了
+					if t.Pnl < 0 {
+						col = "#848e9c" // 灰=亏了（别用红，红在图上表示涨）
+					}
+					push(map[string]any{
+						"time": snap(t.CloseTs), "position": "aboveBar", "shape": "arrowDown",
+						"color": col, "text": "🍃", "size": 2,
+						"kind": "close", "price": t.ExitPx, "pnl": t.Pnl,
+						"pnlPct": t.PnlPct, "reason": t.Reason, "id": t.ID,
+						"ts": t.CloseTs,
+					})
+				}
+			}
+		}
+
+		sort.SliceStable(markers, func(i, j int) bool {
+			ti, _ := markers[i]["time"].(int64)
+			tj, _ := markers[j]["time"].(int64)
+			return ti < tj
+		})
+	}
+
+	// 覆盖情况（「覆盖 N 天 / N 根」脚标）。前端 mergePage 直接读
+	// j.coverage.days / j.coverage.count，缺了这个就会一直显示 0。
+	cov, _ := s.db.Coverage(inst, bar)
+
 	return map[string]any{
-		"ok":      true,
-		"inst":    inst,
-		"bar":     bar,
-		"count":   len(pg.Rows),
-		"kline":   pg.Rows,
-		"ma7":     toPts(ma7),
-		"ma25":    toPts(ma25),
-		"ma99":    toPts(ma99),
-		"bollUp":  toPts(bollUp),
-		"bollMid": toPts(bollMid),
-		"bollLo":  toPts(bollLo),
+		"ok":       true,
+		"inst":     inst,
+		"bar":      bar,
+		"count":    len(pg.Rows),
+		"coverage": cov,
+		"kline":    pg.Rows,
+		"markers":  markers,
+		"ma7":      toPts(ma7),
+		"ma25":     toPts(ma25),
+		"ma99":     toPts(ma99),
+		"bollUp":   toPts(bollUp),
+		"bollMid":  toPts(bollMid),
+		"bollLo":   toPts(bollLo),
 		"page": map[string]any{
 			"limit":      pg.Limit,
 			"beforeTs":   pg.BeforeTs,

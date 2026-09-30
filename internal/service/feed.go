@@ -30,7 +30,10 @@ type DataFeed struct {
 // 而不是实盘的 493 个（USDT-SWAP 478 个）—— 合约列表会少一大半。
 // 模拟盘标志只该用于账户/交易接口，公共行情一律实盘。
 func NewDataFeed(proxy string) *DataFeed {
-	opts := okx.ClientOptions{Proxy: proxy, Timeout: 25 * time.Second, MaxRetries: 5, RatePerSecond: 15}
+	// RatePerSecond 必须 <= OKX 最紧的那档限频：history-candles 是 20 次 / 2 秒，
+	// 也就是 10 次/秒。这里压到 9，留一点余量给 tickers / 实时续 K 线。
+	// 回补一个 (合约,周期) 要翻几百页，跑快了会被 429，反而更慢。
+	opts := okx.ClientOptions{Proxy: proxy, Timeout: 25 * time.Second, MaxRetries: 5, RatePerSecond: 9}
 	return &DataFeed{
 		market: okx.NewMarketAPIWith("", "", "", false, okx.FlagLive, opts),
 		pub:    okx.NewPublicAPIWith("", "", "", false, okx.FlagLive, opts),
