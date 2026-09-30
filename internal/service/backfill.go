@@ -449,10 +449,11 @@ func (m *BackfillManager) realtimeLoop() {
 			if seconds%180 == 0 {
 				m.refreshLatestKlines(lastKline)
 			}
-			// 每小时把库里最老的数据裁一次
+			// 每 6 小时把库里最老的数据裁一次；保留量按 cfg.Days 天算，
+			// 保证每轮回补完之后每个周期都还覆盖至少一个月。
 			if seconds%(3600*6) == 0 && seconds > 0 {
-				if n, err := m.db.CleanupKlines(30000); err == nil && n > 0 {
-					m.logf("滚动清理：删除 %d 根过老 K 线", n)
+				if n, err := m.db.CleanupKlines(m.cfg.Days); err == nil && n > 0 {
+					m.logf("滚动清理：删除 %d 根过老 K 线（保留最近 %d 天）", n, m.cfg.Days)
 				}
 			}
 		}

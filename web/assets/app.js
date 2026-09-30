@@ -16,7 +16,16 @@ const state = {
   pnlChart: null, pnlLine: null,
   bfPollTimer: null,
   lastKlineKey: '',
+
+  // ---- K 线分页：初始一页，向左滚动自动向前翻 ----
+  klines: [],           // 已加载的 K 线（升序），翻页时不断往前拼
+  ind: {},              // 指标序列 {ma7:[], ma25:[], ...}，同样按 ts 合并
+  hasMore: false,       // 更早还有没有数据
+  loadingOlder: false,  // 防止一次滚动触发多次翻页
 };
+
+const KLINE_PAGE = 1000;   // 一页多少根（初始加载 & 每次向前翻都这么多）
+const PAGE_TRIGGER = 5;    // 可视区左边界落到第几根之前就预加载下一页
 
 /* ------------------------------------------------------------------ */
 /* 工具                                                                */
@@ -145,6 +154,10 @@ function initChart() {
     $('pairOhlc').textContent =
       `开 ${fmtPrice(c.open)}  高 ${fmtPrice(c.high)}  低 ${fmtPrice(c.low)}  收 ${fmtPrice(c.close)}`;
   });
+
+  // 向左滚动 → 自动加载更早的 K 线（每次一页 1000 根）
+  state.scrollGuardUntil = Date.now() + 3000;   // 首屏渲染期间不触发
+  state.chart.timeScale().subscribeVisibleLogicalRangeChange(onScroll);
 }
 
 function initPnlChart() {
@@ -362,6 +375,117 @@ async function loadTickers() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* K 线分页：初始 1000 根，向左滚到边上自动加载更早的 1000 根            */
+/* ------------------------------------------------------------------ */
+
+// mergeByTs 把两组 {ts,...} 序列按时间合并去重（新的覆盖旧的），返回升序数组
+function mergeByTs(older, newer) {
+  if (!older || !older.length) return (newer || []).slice();
+  if (!newer || !newer.length) return older.slice();
+  const map = new Map();
+  older.forEach((x) => map.set(x.ts, x));
+  newer.forEach((x) => map.set(x.ts, x));   // 新的覆盖旧的
+  return Array.from(map.values()).sort((a, b) => a.ts - b.ts);
+}
+
+// mergePage 把一页新数据并进 state（klines 与指标一起按 ts 对齐）
+function mergePage(j, reset) {
+  const k = j.kline || [];
+  const ind = {
+    ma7: j.ma7 || [], ma25: j.ma25 || [], ma99: j.ma99 || [],
+    bollUp: j.bollUp || [], bollMid: j.bollMid || [], bollLo: j.bollLo || [],
+  };
+  if (reset) {
+    state.klines = k.slice();
+    state.ind = ind;
+    return;
+  }
+  state.klines = mergeByTs(state.klines, k);
+  Object.keys(ind).forEach((key) => {
+    state.ind[key] = mergeByTs(state.ind[key] || [], ind[key]);
+  });
+}
+
+// renderKline 把 state 里的数据铺到图上
+//
+// keepRange：翻页（往前插数据）时必须保持当前可视位置，
+//            否则 setData 之后画面会跳回最左边。
+function renderKline(tickSize, keepRange) {
+  const lr = keepRange ? state.chart.timeScale().getVisibleLogicalRange() : null;
+  const prevCount = state.klines.length;
+
+  state.candle.setData(state.klines.map((k) => ({
+    time: Math.floor(k.ts / 1000), open: k.o, high: k.h, low: k.l, close: k.c,
+  })));
+  state.volume.setData(state.klines.map((k) => ({
+    time: Math.floor(k.ts / 1000), value: k.v,
+    color: k.c >= k.o ? 'rgba(14,203,129,.45)' : 'rgba(246,70,93,.45)',
+  })));
+  const toLine = (arr) => (arr || []).map((p) => ({ time: Math.floor(p.ts / 1000), value: p.v }));
+  state.ma7.setData(toLine(state.ind.ma7));
+  state.ma25.setData(toLine(state.ind.ma25));
+  state.ma99.setData(toLine(state.ind.ma99));
+
+  if (tickSize) {
+    const prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
+    state.candle.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: tickSize } });
+  }
+
+  if (lr && state.klines.length > prevCount) {
+    // 往前插了 bar，逻辑索引整体右移，可视区跟着右移同样的量
+    const shift = state.klines.length - prevCount;
+    state.chart.timeScale().setVisibleLogicalRange({ from: lr.from + shift, to: lr.to + shift });
+    state.scrollGuardUntil = Date.now() + 600;   // 插完数据别再立刻触发下一页
+  }
+}
+
+// loadOlder 向左翻一页：拿 state.klines 第一根之前的那 KLINE_PAGE 根
+async function loadOlder() {
+  if (state.loadingOlder || !state.hasMore || !state.curInst) return;
+  if (!state.klines.length) return;
+  state.loadingOlder = true;
+  const inst = state.curInst, bar = state.curBar;
+  const before = state.klines[0].ts;
+  $('chartHint').textContent = `加载更早的 ${KLINE_PAGE} 根…`;
+  try {
+    const j = await api(`/api/mark?inst=${encodeURIComponent(inst)}&bar=${encodeURIComponent(bar)}` +
+      `&limit=${KLINE_PAGE}&before=${before}&_=${Date.now()}`);
+    if (inst !== state.curInst || bar !== state.curBar) return;   // 期间切了合约，丢弃
+    mergePage(j, false);
+    const ts = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
+    renderKline(ts, true);
+    updatePageHint();
+  } catch (e) {
+    $('chartHint').textContent = '加载更早数据失败：' + e.message;
+  } finally {
+    state.loadingOlder = false;
+  }
+}
+
+// updatePageHint 底部提示：已加载多少根 / 还能不能继续往前翻
+function updatePageHint() {
+  const n = state.klines.length;
+  $('chartHint').textContent = `已加载 ${n} 根 ${state.curBar} K线`;
+  const el = $('pageInfo');
+  if (!el) return;
+  el.textContent = state.hasMore
+    ? `已加载 ${n} 根 · 向左滚动继续加载（每页 ${KLINE_PAGE} 根）`
+    : `已加载 ${n} 根 · 已到最早`;
+}
+
+// onScroll 滚到左边缘附近就预加载下一页
+//
+// scrollGuard：刚 fitContent / 刚往前插完数据时会触发一次可视区回调，
+// 那一次不能当成「用户往左拖」——否则一打开就把所有历史页全拉下来了。
+function onScroll() {
+  if (!state.hasMore || state.loadingOlder) return;
+  if (Date.now() < (state.scrollGuardUntil || 0)) return;
+  const lr = state.chart.timeScale().getVisibleLogicalRange();
+  if (!lr) return;
+  if (lr.from <= PAGE_TRIGGER) loadOlder();
+}
+
 let klineTimer = null;
 
 async function selectInst(instId) {
@@ -371,49 +495,52 @@ async function selectInst(instId) {
   await loadKline(true);
 }
 
+// loadKline(reset)
+//   reset=true  → 重新载入最新一页（换合约 / 换周期 / 手动刷新）
+//   reset=false → 定时刷新，只把最新一页并进来（已加载的老数据保留）
 async function loadKline(reset) {
   if (!state.curInst) return;
   const inst = state.curInst, bar = state.curBar;
   const key = inst + '|' + bar;
-  if (reset) state.lastKlineKey = '';
+  if (reset) {
+    state.lastKlineKey = '';
+    state.klines = [];
+    state.ind = {};
+    state.hasMore = false;
+  }
 
   $('chartHint').textContent = '加载中…';
   let j;
   try {
-    j = await api(`/api/mark?inst=${encodeURIComponent(inst)}&bar=${encodeURIComponent(bar)}&days=${state.days}&_=${Date.now()}`);
+    j = await api(`/api/mark?inst=${encodeURIComponent(inst)}&bar=${encodeURIComponent(bar)}` +
+      `&days=${state.days}&limit=${KLINE_PAGE}&_=${Date.now()}`);
   } catch (e) {
     $('chartHint').textContent = '加载失败：' + e.message;
     return;
   }
+  if (inst !== state.curInst || bar !== state.curBar) return;     // 期间切了，丢弃
 
-  const list = j.kline || [];
+  mergePage(j, reset);
+
   const cov = j.coverage || {};
+  const page = j.page || {};
+  // hasMore 以「已加载的最老一根」与「库里最老一根」比较为准
+  state.hasMore = state.klines.length > 0 &&
+    page.earliestTs > 0 && state.klines[0].ts > page.earliestTs;
+
   $('pairName').textContent = (state.tickers[inst] && state.tickers[inst].name) || inst;
   $('pairInst').textContent = inst + ' · ' + bar;
 
   const tickSize = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
-  const prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
-
-  state.candle.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: tickSize } });
-  state.candle.setData(list.map((k) => ({
-    time: Math.floor(k.ts / 1000), open: k.o, high: k.h, low: k.l, close: k.c,
-  })));
-  state.volume.setData(list.map((k) => ({
-    time: Math.floor(k.ts / 1000), value: k.v,
-    color: k.c >= k.o ? 'rgba(14,203,129,.45)' : 'rgba(246,70,93,.45)',
-  })));
-
-  const toLine = (arr) => arr.map((p) => ({ time: Math.floor(p.ts / 1000), value: p.v }));
-  state.ma7.setData(toLine(j.ma7 || []));
-  state.ma25.setData(toLine(j.ma25 || []));
-  state.ma99.setData(toLine(j.ma99 || []));
+  renderKline(tickSize, false);
 
   if (reset || state.lastKlineKey !== key) {
     state.chart.timeScale().fitContent();
+    state.scrollGuardUntil = Date.now() + 1200;   // fitContent 也会触发可视区回调，先压住
     state.lastKlineKey = key;
   }
 
-  $('chartHint').textContent = `${list.length} 根 ${bar} K线`;
+  updatePageHint();
   $('covInfo').textContent =
     `覆盖 ${(cov.days || 0).toFixed(1)} 天 / ${fmtNum(cov.count || 0, 0)} 根` +
     (cov.minTs ? `（${fmtShort(cov.minTs)} → ${fmtShort(cov.maxTs)}）` : '');
@@ -586,6 +713,9 @@ function bindEvents() {
   $('btnRefresh').onclick = () => {
     loadTickers(); loadKline(false); loadPositions(); loadHistory(); loadSignals(); loadBackfill();
   };
+
+  // 手动往前翻一页（不想滚动时用）
+  $('btnOlder').onclick = () => loadOlder();
 
   $('btnBackfill').onclick = async () => {
     if (!state.curInst) return;

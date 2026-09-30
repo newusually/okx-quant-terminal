@@ -187,15 +187,23 @@ func (d *DB) ListInstrumentIDs() ([]string, error) {
 // 滚动清理 —— 防止 3000 万行继续膨胀
 // ---------------------------------------------------------------------------
 
-// CleanupKlines 每个 (合约,周期) 只保留最新 keep 根
+// CleanupKlines 每个 (合约,周期) 只保留最近 keepDays 天。
 //
-// 先定位第 keep 根的时间戳（主键倒序 + OFFSET，毫秒级），
-// 再按 ts < 该值 批量删。规避 MySQL
-// 「不能在 DELETE 的子查询中引用目标表」的限制。
-func (d *DB) CleanupKlines(keep int) (int64, error) {
-	if keep <= 0 {
-		keep = 20000
+// 为什么按「天」而不是按「根数」：
+//
+//	1m 一天 1440 根、4H 一天只有 6 根，同一个根数对这两个周期是完全不同的时间跨度。
+//	按固定根数裁（原来的 30000）会得到「1m 只留 20.8 天、4H 留 13.7 年」这种畸形结果，
+//	而需求是「每个周期都至少覆盖一个月」。所以这里按周期把天换算成根数。
+//
+// 实现：先定位第 keep 根的时间戳（主键倒序 + OFFSET，毫秒级），
+// 再按 ts < 该值 批量删。规避 MySQL「不能在 DELETE 的子查询中引用目标表」的限制。
+func (d *DB) CleanupKlines(keepDays int) (int64, error) {
+	if keepDays <= 0 {
+		keepDays = 30
 	}
+	// 留 20% 余量 + 2 天，避免把「刚好一个月」的边界数据裁掉
+	keepDays = keepDays*6/5 + 2
+
 	insts, err := d.ListInstrumentIDs()
 	if err != nil {
 		return 0, err
@@ -207,6 +215,10 @@ func (d *DB) CleanupKlines(keep int) (int64, error) {
 			return total, err
 		}
 		for _, bar := range bars {
+			keep := barsPerDay(bar) * keepDays
+			if keep <= 0 {
+				continue // 不认识的周期，不动它
+			}
 			var cut sql.NullInt64
 			err := d.sql.QueryRow(
 				`SELECT ts FROM kline WHERE inst_id=? AND bar=? ORDER BY ts DESC LIMIT 1 OFFSET ?`,
@@ -227,6 +239,35 @@ func (d *DB) CleanupKlines(keep int) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// barsPerDay 一个周期一天有多少根 K 线（OKX 口径，7×24 小时不停地开盘）
+func barsPerDay(bar string) int {
+	switch strings.ToLower(strings.TrimSpace(bar)) {
+	case "1m":
+		return 1440
+	case "3m":
+		return 480
+	case "5m":
+		return 288
+	case "15m":
+		return 96
+	case "30m":
+		return 48
+	case "1h":
+		return 24
+	case "2h":
+		return 12
+	case "4h":
+		return 6
+	case "6h":
+		return 4
+	case "12h":
+		return 2
+	case "1d":
+		return 1
+	}
+	return 0
 }
 
 // barsOf 某合约在库里有哪些周期（主键前缀查询，很快）

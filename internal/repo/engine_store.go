@@ -425,17 +425,19 @@ func (s *Store) Counters(dayStartMs int64) (*Counters, error) {
 	return c, nil
 }
 
-// Cleanup 滚动清理（kline 只保留最新 N 根、runlog 7 天、equity 90 天）
+// Cleanup 滚动清理（kline 只保留最近 N 天、runlog 7 天、equity 90 天、ai_call 30 天）
 func (s *Store) Cleanup() error {
 	db, err := s.open()
 	if err != nil {
 		return err
 	}
-	keep := s.cfg.Store.KeepKlineBars
-	if keep <= 0 {
-		keep = 60000
+	// 「天」而不是「根数」：1m 一天 1440 根、4H 一天 6 根，
+	// 用同一个根数会得到「1m 只留 3 天、4H 留 27 年」这种畸形结果。
+	days := s.cfg.Store.KeepKlineDays
+	if days <= 0 {
+		days = 30 // 兜底：至少留一个月
 	}
-	if _, err := db.CleanupKlines(keep); err != nil {
+	if _, err := db.CleanupKlines(days); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()

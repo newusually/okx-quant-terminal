@@ -204,12 +204,98 @@ func (s *Server) handleTickers(w http.ResponseWriter, r *http.Request) (any, err
 // /api/kline
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// K 线窗口（支持「往左翻页」累加加载）
+// ---------------------------------------------------------------------------
+
+// indicatorWarmup 指标暖机根数。
+//
+// MA99 需要前 98 根才能算准第一根，布林要前 19 根。
+// 所以每次多抓 99 根，算完指标再把多出来的裁掉——
+// 这样翻页拼起来之后，均线在拼接处不会出现「突然从第 99 根才开始」的断层。
+const indicatorWarmup = 99
+
+// KlinePage 一页 K 线 + 翻页元信息
+type KlinePage struct {
+	// Raw 含暖机段的原始序列 —— 指标必须在它上面算，不能在 Rows 上算，
+	// 否则每页最前面 98 根会因为缺少历史而没有 MA99。
+	Raw  []model.Kline `json:"-"`
+	Trim int           `json:"-"` // 要从头部裁掉多少根（= 暖机段长度）
+
+	Rows       []model.Kline `json:"rows"`       // 已裁掉暖机段、按时间升序
+	Limit      int           `json:"limit"`      // 本次请求的根数
+	BeforeTs   int64         `json:"beforeTs"`   // 本次的「往前取」边界（0 = 取最新）
+	FirstTs    int64         `json:"firstTs"`    // 本页最老一根
+	LastTs     int64         `json:"lastTs"`     // 本页最新一根
+	HasMore    bool          `json:"hasMore"`    // 更早还有没有数据
+	EarliestTs int64         `json:"earliestTs"` // 库里该 (合约,周期) 的最老一根
+	TotalBars  int64         `json:"totalBars"`  // 库里该 (合约,周期) 的总根数
+}
+
+// klineWindow 取一段 K 线窗口。
+//
+//	beforeTs > 0  → 取 ts < beforeTs 的最近 limit 根（向左翻页）
+//	beforeTs == 0 → 取最新 limit 根
+//	limit    <= 0 → 退回「按天数取」，一次拿全（老行为，给小 limit 的调用方用）
+//
+// ★ 分页模式下多抓 indicatorWarmup 根，并且【不在这里裁】：
+// 指标要在含暖机段的 Raw 上算完，再按 Trim 同步裁掉，两边的下标才对得齐。
+func (s *Server) klineWindow(inst, bar string, days int, beforeTs int64, limit int) (KlinePage, error) {
+	pg := KlinePage{Limit: limit, BeforeTs: beforeTs}
+
+	if limit <= 0 {
+		fromTs := time.Now().AddDate(0, 0, -days).UnixMilli()
+		rows, err := s.db.QueryKlines(model.KlineQuery{InstID: inst, Bar: bar, FromTs: fromTs})
+		if err != nil {
+			return pg, err
+		}
+		pg.Raw, pg.Trim, pg.Rows = rows, 0, rows
+		if n := len(rows); n > 0 {
+			pg.FirstTs, pg.LastTs = rows[0].Ts, rows[n-1].Ts
+		}
+		return pg, nil
+	}
+
+	// 多抓暖机段，算指标时才有历史
+	q := model.KlineQuery{InstID: inst, Bar: bar, Limit: limit + indicatorWarmup}
+	if beforeTs > 0 {
+		q.ToTs = beforeTs - 1 // 严格往前，不含 beforeTs 那根
+	}
+	raw, err := s.db.QueryKlines(q)
+	if err != nil {
+		return pg, err
+	}
+	pg.Raw = raw
+	if len(raw) > limit {
+		pg.Trim = len(raw) - limit
+	}
+	pg.Rows = raw[pg.Trim:]
+	if n := len(pg.Rows); n > 0 {
+		pg.FirstTs, pg.LastTs = pg.Rows[0].Ts, pg.Rows[n-1].Ts
+	}
+
+	// 库里还有没有更早的 / 一共多少根
+	if first, err := s.db.FirstKlineTs(inst, bar); err == nil {
+		pg.EarliestTs = first
+		pg.HasMore = pg.FirstTs > first && pg.FirstTs > 0
+	}
+	if cov, err := s.db.Coverage(inst, bar); err == nil {
+		pg.TotalBars = cov.Count
+	}
+	return pg, nil
+}
+
+// ---------------------------------------------------------------------------
+// /api/kline
+// ---------------------------------------------------------------------------
+
 func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error) {
 	q := r.URL.Query()
 	inst := q.Get("inst")
 	bar := q.Get("bar")
 	days := atoiDefault(q.Get("days"), s.bf.Config().Days)
 	limit := atoiDefault(q.Get("limit"), 0)
+	before := int64(atoiDefault(q.Get("before"), 0))
 	auto := q.Get("auto") != "0" // 默认自动按需回补
 
 	if inst == "" || !service.IsSupportedBar(bar) {
@@ -225,16 +311,16 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 		}
 	}
 
-	fromTs := time.Now().AddDate(0, 0, -days).UnixMilli()
-	rows, err := s.db.QueryKlines(model.KlineQuery{InstID: inst, Bar: bar, FromTs: fromTs, Limit: limit})
+	pg, err := s.klineWindow(inst, bar, days, before, limit)
 	if err != nil {
 		return nil, err
 	}
 	// 本地不足时，兜底直接从 OKX 现拉最新一批，保证图不空
-	if len(rows) == 0 {
+	if len(pg.Rows) == 0 && before == 0 {
 		if latest, ferr := s.feed.FetchCandles(inst, bar, 300); ferr == nil && len(latest) > 0 {
 			_, _ = s.db.UpsertKlines(latest)
-			rows = latest
+			pg.Rows = latest
+			pg.FirstTs, pg.LastTs = latest[0].Ts, latest[len(latest)-1].Ts
 			cov.Count = int64(len(latest))
 		}
 	}
@@ -244,39 +330,60 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 		"inst":        inst,
 		"bar":         bar,
 		"days":        days,
-		"count":       len(rows),
+		"count":       len(pg.Rows),
 		"coverage":    cov,
 		"backfilling": needBackfill,
-		"list":        rows,
+		"page": map[string]any{
+			"limit":      pg.Limit,
+			"beforeTs":   pg.BeforeTs,
+			"firstTs":    pg.FirstTs,
+			"lastTs":     pg.LastTs,
+			"hasMore":    pg.HasMore,
+			"earliestTs": pg.EarliestTs,
+			"totalBars":  pg.TotalBars,
+		},
+		"list": pg.Rows,
 	}, nil
 }
 
 // ---------------------------------------------------------------------------
-// /api/mark —— K 线 + 均线 + 布林 + MACD（前端画指标用，一次拿全）
+// /api/mark —— K 线 + 均线 + 布林 + 指标（前端画图用，一次拿全）
 // ---------------------------------------------------------------------------
+//
+// 支持分页：默认一页 1000 根；传 before=<ts> 拿更早的一页（向左无限翻）。
+// 指标用「多抓 99 根暖机」的方式算，所以拼接处不会断层。
 
 func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error) {
 	q := r.URL.Query()
 	inst := q.Get("inst")
 	bar := q.Get("bar")
 	days := atoiDefault(q.Get("days"), s.bf.Config().Days)
+	limit := atoiDefault(q.Get("limit"), DefaultKlinePage)
+	before := int64(atoiDefault(q.Get("before"), 0))
 	if inst == "" || !service.IsSupportedBar(bar) {
 		return nil, fmt.Errorf("参数不合法：inst=%q bar=%q", inst, bar)
 	}
-	fromTs := time.Now().AddDate(0, 0, -days).UnixMilli()
-	rows, err := s.db.QueryKlines(model.KlineQuery{InstID: inst, Bar: bar, FromTs: fromTs})
+
+	pg, err := s.klineWindow(inst, bar, days, before, limit)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	if len(pg.Rows) == 0 && before == 0 {
 		if latest, ferr := s.feed.FetchCandles(inst, bar, 300); ferr == nil && len(latest) > 0 {
 			_, _ = s.db.UpsertKlines(latest)
-			rows = latest
+			pg.Raw, pg.Trim, pg.Rows = latest, 0, latest
+			pg.FirstTs, pg.LastTs = latest[0].Ts, latest[len(latest)-1].Ts
 		}
 	}
 
-	closes := make([]float64, len(rows))
-	for i, k := range rows {
+	// ★ 指标在「含暖机段的 Raw」上算，再把前面 Trim 根丢掉。
+	// 这样每页最前面那些 bar 也能拿到正确的 MA99 / 布林，翻页拼接不会断层。
+	src := pg.Raw
+	if len(src) == 0 {
+		src = pg.Rows
+	}
+	closes := make([]float64, len(src))
+	for i, k := range src {
 		closes[i] = k.C
 	}
 	ma7 := smaSeries(closes, 7)
@@ -288,13 +395,19 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		Ts int64   `json:"ts"`
 		V  float64 `json:"v"`
 	}
+	trim := pg.Trim
+	if trim > len(src) {
+		trim = len(src)
+	}
+	// 对齐到输出行：Raw[trim:] 对应 Rows[0:]，所以指标也从下标 trim 开始吐
 	toPts := func(vals []float64) []pt {
 		out := []pt{}
-		for i, v := range vals {
+		for i := trim; i < len(vals) && i < len(src); i++ {
+			v := vals[i]
 			if math.IsNaN(v) || math.IsInf(v, 0) {
 				continue
 			}
-			out = append(out, pt{Ts: rows[i].Ts, V: v})
+			out = append(out, pt{Ts: src[i].Ts, V: v})
 		}
 		return out
 	}
@@ -303,13 +416,25 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		"ok":      true,
 		"inst":    inst,
 		"bar":     bar,
-		"count":   len(rows),
-		"kline":   rows,
+		"count":   len(pg.Rows),
+		"kline":   pg.Rows,
 		"ma7":     toPts(ma7),
 		"ma25":    toPts(ma25),
 		"ma99":    toPts(ma99),
 		"bollUp":  toPts(bollUp),
 		"bollMid": toPts(bollMid),
 		"bollLo":  toPts(bollLo),
+		"page": map[string]any{
+			"limit":      pg.Limit,
+			"beforeTs":   pg.BeforeTs,
+			"firstTs":    pg.FirstTs,
+			"lastTs":     pg.LastTs,
+			"hasMore":    pg.HasMore,
+			"earliestTs": pg.EarliestTs,
+			"totalBars":  pg.TotalBars,
+		},
 	}, nil
 }
+
+// DefaultKlinePage 前端一页默认加载多少根 K 线（向左翻页时每次也是这个数）
+const DefaultKlinePage = 1000

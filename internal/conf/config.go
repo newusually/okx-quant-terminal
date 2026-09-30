@@ -134,10 +134,18 @@ type StoreCfg struct {
 	MaxIdleConns int `json:"max_idle_conns"`
 	BatchSize    int `json:"batch_size"` // 批量写入分片大小
 
-	KeepKlineBars int    `json:"keep_kline_bars"`
-	LogDir        string `json:"log_dir"`
-	LogMaxMB      int    `json:"log_max_mb"`
-	LogKeep       int    `json:"log_keep"`
+	// KeepKlineDays 每个 (合约,周期) 只保留最近这么多天的 K 线。
+	//
+	// 用「天」而不是「根数」：1m 一天 1440 根、4H 一天 6 根，
+	// 同一个根数对两个周期是完全不同的时间跨度。留 0 表示按 30 天兜底。
+	KeepKlineDays int `json:"keep_kline_days"`
+
+	// KeepKlineBars 旧字段（按根数），已废弃，只在老配置里出现时做换算兜底。
+	KeepKlineBars int `json:"keep_kline_bars,omitempty"`
+
+	LogDir   string `json:"log_dir"`
+	LogMaxMB int    `json:"log_max_mb"`
+	LogKeep  int    `json:"log_keep"`
 
 	// 兼容旧配置（不再使用）
 	DBPath string `json:"db_path,omitempty"`
@@ -328,7 +336,7 @@ func defaultConfig() *Config {
 			Host: "127.0.0.1", Port: 3306,
 			User: "okx", Password: "OkxQuant2026", Database: "okx",
 			MaxOpenConns: 64, MaxIdleConns: 32, BatchSize: 500,
-			KeepKlineBars: 60000, LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
+			KeepKlineDays: 30, LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
 		},
 		path: "configs/okx_strategy.json",
 		dir:  "configs",
@@ -625,8 +633,14 @@ func fillDefaults(c *Config) {
 		if s.BatchSize <= 0 {
 			s.BatchSize = ds.BatchSize
 		}
-		if s.KeepKlineBars <= 0 {
-			s.KeepKlineBars = ds.KeepKlineBars
+		if s.KeepKlineDays <= 0 {
+			// 老配置只写了 keep_kline_bars（根数）→ 按 1m 口径换算成天数兜底
+			if s.KeepKlineBars > 0 {
+				s.KeepKlineDays = s.KeepKlineBars/1440 + 1
+			}
+			if s.KeepKlineDays <= 0 {
+				s.KeepKlineDays = ds.KeepKlineDays
+			}
 		}
 		if s.LogDir == "" {
 			s.LogDir = ds.LogDir

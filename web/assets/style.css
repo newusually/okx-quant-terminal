@@ -187,6 +187,8 @@ html, body {
 .btn:hover { background: var(--accent-2); }
 .btn.ghost { background: transparent; border-color: var(--line-2); color: var(--text-2); }
 .btn.ghost:hover { color: var(--text); border-color: #40474f; }
+/* 页脚里的小按钮（往前翻页） */
+.btn.mini { height: 20px; padding: 0 8px; margin-left: auto; font-size: 10.5px; border-radius: 4px; }
 
 .chart-box { position: relative; flex: 1; min-height: 0; }
 #chart { position: absolute; inset: 0; }
