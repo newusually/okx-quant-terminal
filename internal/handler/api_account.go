@@ -32,7 +32,11 @@ func (s *Server) AccountSnapshot() map[string]any {
 	if s.strategy != nil && s.strategy.PrincipalUSDT > 0 {
 		principal = s.strategy.PrincipalUSDT
 	}
+	// 总盈亏 = 累计已实现 + 当前浮动盈亏（有持仓时每秒都在动）。
 	totalPnl := eq.Upl + st.PnlTotal
+	// 今日盈亏同理：今日已实现 + 当前浮动盈亏。
+	// 原来只算「今日已平仓」，没平仓就恒为 0，顶栏看着像坏了。
+	todayPnl := st.TodayPnl + eq.Upl
 	roi := 0.0
 	if principal > 0 {
 		roi = totalPnl / principal * 100
@@ -46,7 +50,8 @@ func (s *Server) AccountSnapshot() map[string]any {
 		"equityTs":     eq.Ts,
 		"principal":    principal,
 		"realized":     st.PnlTotal,
-		"todayPnl":     st.TodayPnl,
+		"todayRealized": st.TodayPnl,
+		"todayPnl":     todayPnl,
 		"totalPnl":     totalPnl,
 		"roi":          roi,
 		"winRate":      st.WinRate,
@@ -202,6 +207,12 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, err
 	if err != nil {
 		return nil, err
 	}
+	// 当前还持仓的仓位排在最前面：用户开完仓就能在列表里看到这一笔，
+	// 而不是等平仓后才「突然出现」。它的实时盈亏由前端用行情补。
+	openRows, err := s.db.OpenTrades(limit)
+	if err != nil {
+		return nil, err
+	}
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
@@ -211,7 +222,14 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, err
 		model.ClosedTrade
 		Name string `json:"name"`
 	}
-	out := make([]item, 0, len(rows))
+	out := make([]item, 0, len(rows)+len(openRows))
+	for _, t := range openRows {
+		if t.Status == "" {
+			t.Status = "open"
+		}
+		out = append(out, item{ClosedTrade: t, Name: nameOf[t.InstID]})
+	}
+	// 已实现的统计口径只算已平仓，不受持仓影响
 	var sum float64
 	wins := 0
 	for _, t := range rows {
@@ -226,7 +244,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, err
 		winRate = float64(wins) / float64(len(rows)) * 100
 	}
 	return map[string]any{
-		"ok": true, "count": len(out), "sumPnl": sum,
+		"ok": true, "count": len(out), "openCount": len(openRows),
+		"closedCount": len(rows), "sumPnl": sum,
 		"wins": wins, "winRate": winRate, "list": out,
 	}, nil
 }

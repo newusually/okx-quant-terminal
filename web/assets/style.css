@@ -298,6 +298,10 @@ table.data td.empty { text-align: center; color: var(--muted); padding: 26px; fo
 .pill-ok { color: var(--up); border-color: rgba(14,203,129,.4); }
 .pill-run { color: var(--accent); border-color: rgba(252,213,53,.4); }
 .pill-err { color: var(--down); border-color: rgba(246,70,93,.4); }
+/* 历史列表里「还持仓」的那一行：整行淡金底 + 状态胶囊，跟已平仓的区分开 */
+.pill-live { color: var(--accent); border-color: rgba(252,213,53,.45); background: rgba(252,213,53,.08); }
+tr.row-open { background: rgba(252,213,53,.045); }
+tr.row-open:hover { background: rgba(252,213,53,.09); }
 
 .pnl-box { position: relative; height: 300px; }
 #pnlChart { position: absolute; inset: 0; }

@@ -17,6 +17,7 @@ const state = {
   pnlChart: null, pnlLine: null,
   pnlData: [],          // 权益曲线的原始点（悬停时查浮盈/持仓数用）
   pnlFitted: false,     // 只在首次铺满视野，之后轮询不打断用户缩放
+  positions: [],        // 当前持仓（历史列表里给「持仓中」的行补实时盈亏）
   bfPollTimer: null,
   lastKlineKey: '',
 
@@ -1105,6 +1106,7 @@ function tickLive() {
 async function loadPositions() {
   const j = await api('/api/positions');
   const rows = j.list || [];
+  state.positions = rows;   // 历史列表里「持仓中」的行要用它补实时浮盈
   $('badgePos').textContent = rows.length;
   const tb = $('tbPositions');
   if (!rows.length) {
@@ -1151,27 +1153,38 @@ async function loadPositions() {
 async function loadHistory() {
   const j = await api('/api/history?limit=300');
   const rows = j.list || [];
-  $('badgeHis').textContent = rows.length;
+  // 列表里同时有「持仓中」和「已平仓」：持仓中的排在最前面，
+  // 盈亏取实时行情（positions 每 2 秒刷一次），所以数字是跳动的。
+  const openN = rows.filter((t) => (t.status || 'closed') === 'open').length;
+  $('badgeHis').textContent = openN > 0 ? `${rows.length} · ${openN} 持仓中` : rows.length;
   const tb = $('tbHistory');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="12" class="empty">暂无平仓记录</td></tr>';
+    tb.innerHTML = '<tr><td colspan="12" class="empty">暂无开仓记录 —— 引擎出信号开仓后会立刻出现在这里</td></tr>';
     return;
   }
+  const posMap = {};
+  (state.positions || []).forEach((p) => { posMap[p.instId] = p; });
   tb.innerHTML = rows.map((t) => {
     const dir = (t.side || 'buy').toLowerCase() === 'sell' ? 'short' : 'long';
-    return `<tr>
+    const isOpen = (t.status || 'closed') === 'open';
+    const live = isOpen ? posMap[t.instId] : null;
+    // 持仓中的行没有平仓价/平仓盈亏，用实时浮盈顶上，让用户看到它一直在动
+    const pnl = isOpen ? (live ? live.upl : 0) : t.pnl;
+    const pnlPct = isOpen ? (live ? live.uplPct : 0) : t.pnlPct;
+    const reason = isOpen ? '持仓中（未平仓）' : (t.reason || '');
+    return `<tr${isOpen ? ' class="row-open"' : ''}>
       <td><a class="inst-link" href="#" data-inst="${esc(t.instId)}" title="点开 ${esc(t.instId)} 的 K 线图">${esc(t.name || t.instId)}</a></td>
       <td><span class="tag-pill pill-${dir}">${dir === 'long' ? '多' : '空'}</span></td>
       <td>${fmtNum(t.sz, 0)}</td>
       <td>${fmtPrice(t.entryPx)}</td>
-      <td>${fmtPrice(t.exitPx)}</td>
+      <td>${isOpen ? '<span class="pill-live">持仓中</span>' : fmtPrice(t.exitPx)}</td>
       <td>${fmtNum(t.margin, 2)}</td>
       <td>${t.leverage}x</td>
-      <td class="${cls(t.pnl)}"><b>${fmtNum(t.pnl, 4)}</b></td>
-      <td class="${cls(t.pnlPct)}">${fmtPct(t.pnlPct)}</td>
-      <td class="muted" title="${esc(t.reason)}">${esc((t.reason || '').slice(0, 18))}</td>
+      <td class="${cls(pnl)}"><b>${fmtNum(pnl, 4)}</b></td>
+      <td class="${cls(pnlPct)}">${fmtPct(pnlPct)}</td>
+      <td class="muted" title="${esc(reason)}">${esc(reason.slice(0, 18))}</td>
       <td class="muted">${fmtTime(t.openTs)}</td>
-      <td class="muted">${fmtTime(t.closeTs)}</td>
+      <td class="muted">${isOpen ? '待平仓' : fmtTime(t.closeTs)}</td>
     </tr>`;
   }).join('');
 }

@@ -88,6 +88,7 @@ var (
 	// 起因：账户切到双向持仓后 posSide=net 被 OKX 拒（51000），表现是
 	// 「图上有信号、后台也在扫，但一条买入记录都没有」。
 	probeInst = flag.String("probe", "", "交易链路自检：探测持仓模式并试设杠杆（传合约名，如 ETH-USDT-SWAP）")
+	acctDiag  = flag.Bool("acct", false, "账户只读诊断：保证金模式 acctLv / 持仓模式 posMode / 顶层 upl / 持仓汇总 upl")
 
 	// 注册服务时 CreateService 会带上 -service；这里必须显式认领，
 	// 否则 flag.Parse() 会当成未知参数直接打 usage 退出。
@@ -108,6 +109,20 @@ func main() {
 	if *uninstallSvc {
 		if err := uninstallService(); err != nil {
 			fmt.Printf("✘ 卸载服务失败：%v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// ---- 账户只读诊断：打印 acctLv / posMode / 顶层 upl / 持仓汇总 upl ----
+	// 用来回答「为什么顶栏浮盈是 0」这类问题，全走原始字段，不猜。
+	if *acctDiag {
+		lines, err := service.ProbeAccountDiag()
+		for _, ln := range lines {
+			fmt.Println(ln)
+		}
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -177,11 +192,18 @@ func runApp(ctx context.Context) error {
 	// 时间戳非整秒 / 价格非正的，一定是外部工具或异常写入塞进来的。
 	// 教训：压测工具曾把 28.68 万行合成数据写进生产表，把每个合约的
 	// MA25/MA99/布林带全算歪 —— 这里每次都兜一道底。
-	if n, err := db.PurgeBadKlines(); err != nil {
-		fmt.Printf("[DB] ⚠ 脏 K 线自检失败：%v\n", err)
-	} else if n > 0 {
-		fmt.Printf("[DB] ✔ 自愈：清掉 %d 行非法 K 线（时间戳非整秒或价格非正）\n", n)
-	}
+	//
+	// ★ 放到后台、延迟 45 秒再跑：这个 DELETE 用不上索引，是纯全表扫描，
+	//   kline 到 400 万行时要跑几十秒。以前同步执行，服务得等它跑完才
+	//   ListenAndServe，表现就是「启动卡死、网页打不开」。
+	go func() {
+		time.Sleep(45 * time.Second)
+		if n, err := db.PurgeBadKlines(); err != nil {
+			logx.Logf("WARN", "[DB] 脏 K 线自检失败：%v", err)
+		} else if n > 0 {
+			logx.Logf("INFO", "[DB] 自愈：清掉 %d 行非法 K 线（时间戳非整秒或价格非正）", n)
+		}
+	}()
 
 	tabs, err := db.Tables()
 	if err != nil {

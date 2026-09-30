@@ -85,16 +85,31 @@ func (d *DB) UpsertKlinesInto(table string, rows []Kline) (int, error) {
 // PurgeBadKlines 清掉不符合不变量的脏行，返回删除行数。
 //
 // 启动时跑一次，属于「自愈」：就算有别的工具又塞了脏数据进来，重启就能清干净。
+//
+// ★ 这个 DELETE 用不上任何索引（ts % 1000 是函数表达式），每次都是全表扫描。
+// kline 涨到 400 万行后一次要跑几十秒，还是长事务 + 大量 undo/binlog。所以：
+//   - 分批删（每批 2000 行，最多 20 批），把长事务切成小事务；
+//   - 调用方必须放后台 goroutine，绝不能挡在 HTTP 监听前面 ——
+//     以前是同步调，服务要等它跑完才 ListenAndServe，看起来就像「启动失败」。
 func (d *DB) PurgeBadKlines() (int64, error) {
-	res, err := d.sql.Exec(
-		`DELETE FROM kline
-		 WHERE ts <= 0 OR ts % 1000 <> 0
-		    OR o <= 0 OR h <= 0 OR l <= 0 OR c <= 0`)
-	if err != nil {
-		return 0, err
+	const batch, maxRounds = 2000, 20
+	var total int64
+	for i := 0; i < maxRounds; i++ {
+		res, err := d.sql.Exec(
+			`DELETE FROM kline
+			 WHERE ts <= 0 OR ts % 1000 <> 0
+			    OR o <= 0 OR h <= 0 OR l <= 0 OR c <= 0
+			 LIMIT ?`, batch)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < batch {
+			break // 没删满一批，说明已经干净了
+		}
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return total, nil
 }
 
 // ---------------------------------------------------------------------------

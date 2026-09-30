@@ -676,6 +676,22 @@ func (c *OKXClient) Balance() (*Account, error) {
 			break
 		}
 	}
+
+	// 逐仓（isolated）模式下，/account/balance 顶层的 upl 恒为 0 ——
+	// OKX 只在全仓/跨币种保证金下才回填这个字段，逐仓的未实现盈亏
+	// 只存在于持仓明细里。所以顶层为 0 时必须自己去 /account/positions
+	// 把每条持仓的 upl 加总，否则顶栏「浮盈」永远是 0（有仓也不动）。
+	if acc.Upl == 0 {
+		if pos, err := c.Positions(); err == nil && len(pos) > 0 {
+			sum := 0.0
+			for _, p := range pos {
+				sum += toF(p.Upl)
+			}
+			acc.Upl = sum
+			acc.PositionList = pos
+			acc.PosCount = len(pos)
+		}
+	}
 	return acc, nil
 }
 
@@ -838,4 +854,73 @@ func ProbeTrading(instID string, lever int) (string, error) {
 		return mode, fmt.Errorf("设杠杆失败：%w", err)
 	}
 	return mode, nil
+}
+
+// ProbeAccountDiag 只读诊断：把 OKX 那边和「权益 / 浮盈」相关的真实字段全打出来。
+//
+// 为什么需要它：OKX 的「全仓 / 逐仓」和「账户级 upl 有没有值」不是一回事 ——
+// /account/balance 顶层的 upl 只在跨币种保证金（acctLv=3/4）下才回填，
+// 单币种保证金（acctLv=2）哪怕仓位是全仓，顶层 upl 也恒为 0，
+// 真实浮盈只存在于 /account/positions 的每条持仓里。
+// 不看这几个原始字段光猜，会一直在「为什么浮盈是 0」上面打转。
+func ProbeAccountDiag() ([]string, error) {
+	cfg := conf.LoadConfig()
+	if cfg == nil {
+		return nil, errors.New("读不到配置（configs/okx_strategy.json）")
+	}
+	cli, err := newOKXClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := cli.EnsureReady(); err != nil {
+		return nil, fmt.Errorf("连接 OKX 失败：%w", err)
+	}
+	out := []string{}
+
+	// ① 账户配置：保证金模式 acctLv + 持仓模式 posMode
+	acctLv, posMode := "", ""
+	if raw, err := cli.Get("/api/v5/account/config", true); err == nil {
+		var rows []struct {
+			AcctLv  string `json:"acctLv"`
+			PosMode string `json:"posMode"`
+		}
+		if json.Unmarshal(raw, &rows) == nil && len(rows) > 0 {
+			acctLv, posMode = rows[0].AcctLv, rows[0].PosMode
+		}
+	}
+	lvName := map[string]string{
+		"1": "简单交易模式", "2": "单币种保证金模式",
+		"3": "跨币种保证金模式", "4": "组合保证金模式",
+	}[acctLv]
+	out = append(out, fmt.Sprintf("账户保证金模式 acctLv=%s（%s）", acctLv, lvName))
+	out = append(out, fmt.Sprintf("持仓模式 posMode=%s", posMode))
+
+	// ② 账户余额顶层 upl（跨币种模式下才有值）
+	var topUpl, topEq float64
+	if raw, err := cli.Get("/api/v5/account/balance?ccy=USDT", true); err == nil {
+		var rows []struct {
+			TotalEq string `json:"totalEq"`
+			Upl     string `json:"upl"`
+		}
+		if json.Unmarshal(raw, &rows) == nil && len(rows) > 0 {
+			topEq, topUpl = toF(rows[0].TotalEq), toF(rows[0].Upl)
+		}
+	}
+	out = append(out, fmt.Sprintf("账户余额 totalEq=%.6f 顶层 upl=%.6f  ← 单币种保证金模式下这里恒为 0", topEq, topUpl))
+
+	// ③ 持仓明细：这才是浮盈的真实来源
+	pos, err := cli.Positions()
+	if err != nil {
+		return out, fmt.Errorf("读持仓失败：%w", err)
+	}
+	sum := 0.0
+	out = append(out, fmt.Sprintf("持仓 %d 条：", len(pos)))
+	for _, p := range pos {
+		upl := toF(p.Upl)
+		sum += upl
+		out = append(out, fmt.Sprintf("  · %s mgnMode=%s posSide=%s pos=%s avgPx=%s markPx=%s upl=%.6f imr=%s",
+			p.InstID, p.MgnMode, p.PosSide, p.Pos, p.AvgPx, p.MarkPx, upl, p.Imr))
+	}
+	out = append(out, fmt.Sprintf("持仓汇总 upl=%.6f  ← 顶栏「浮盈」就该用这个值", sum))
+	return out, nil
 }

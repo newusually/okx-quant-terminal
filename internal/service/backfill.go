@@ -435,7 +435,8 @@ func (m *BackfillManager) enqueueTask(t BackfillTask) bool {
 
 	select {
 	case m.queue <- t:
-		m.setProgress(t.InstID, t.Bar, "queued", "已排队")
+		// 入队阶段只记内存：几千个任务逐个写库会把启动拖死
+		m.setProgressMem(t.InstID, t.Bar, "queued", "已排队")
 		return true
 	default:
 		m.mu.Lock()
@@ -642,9 +643,33 @@ func (m *BackfillManager) setProgress(instID, bar, status, msg string) {
 		j.ToTs = cov.MaxTs
 	}
 	m.progressMu.Lock()
+	prev, had := m.progress[jobKey(instID, bar)]
 	m.progress[jobKey(instID, bar)] = j
 	m.progressMu.Unlock()
+
+	// 节流落库：同一个任务「状态没变 + 距上次写库不到 30 秒」就直接丢掉。
+	//
+	// 前端读进度走的是内存里的 Progress()，不看 backfill_job 表，所以
+	// 少写几次库对界面毫无影响；但启动时几千个任务挨个写库会把服务
+	// 启动拖成好几分钟（每次 INSERT ... ON DUPLICATE 都是一次磁盘事务）。
+	if had && prev.Status == status && j.UpdatedAt-prev.UpdatedAt < 30000 {
+		return
+	}
 	_ = m.db.SaveJob(j)
+}
+
+// setProgressMem 只写内存，完全不碰数据库。
+//
+// 给「排队中」这种一次性、高频、且每条都要标一遍的瞬时状态用：
+// 启动时几千个任务如果每个都读一次 Coverage + 写一次 backfill_job，
+// 光是入队就要几分钟 —— 表现就是「服务启动卡死、网页半天打不开」。
+func (m *BackfillManager) setProgressMem(instID, bar, status, msg string) {
+	m.progressMu.Lock()
+	m.progress[jobKey(instID, bar)] = model.BackfillJob{
+		InstID: instID, Bar: bar, Status: status, Msg: msg,
+		UpdatedAt: time.Now().UnixMilli(),
+	}
+	m.progressMu.Unlock()
 }
 
 // Progress 当前所有任务进度

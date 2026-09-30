@@ -126,6 +126,10 @@ type OpenPosition struct {
 }
 
 // ClosedTrade 历史仓位
+//
+// 名字里的 Closed 是历史遗留：现在这张表结构同时承载「持仓中」的仓位
+// （status=open，exit_px/close_ts 为 0），前端历史列表把两类一起展示，
+// 持仓中的行由前端用实时行情补上浮盈。所以额外带一个 Status 字段。
 type ClosedTrade struct {
 	ID       int64   `json:"id"`
 	InstID   string  `json:"instId"`
@@ -142,6 +146,7 @@ type ClosedTrade struct {
 	Reason   string  `json:"reason"`
 	Bar      string  `json:"bar"`
 	AINote   string  `json:"aiNote"`
+	Status   string  `json:"status"`
 }
 
 // TradeRow 开仓成交（引擎侧写入）

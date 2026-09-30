@@ -37,10 +37,26 @@ func (d *DB) ClosedTrades(limit int) ([]ClosedTrade, error) {
 	if limit <= 0 {
 		limit = 200
 	}
+	return d.trades(limit, `status='closed'`, `close_ts DESC`)
+}
+
+// OpenTrades 当前还持仓的仓位（status=open）。
+//
+// 历史列表要把它们排在最前面，用户才能一眼看到「这笔还在跑」，
+// 而不是开完仓之后历史区一直空着（以前就是这个毛病）。
+func (d *DB) OpenTrades(limit int) ([]ClosedTrade, error) {
+	return d.trades(limit, `status='open'`, `open_ts DESC`)
+}
+
+// trades 共用查询：只差一个 WHERE 条件和排序。
+func (d *DB) trades(limit int, where, orderBy string) ([]ClosedTrade, error) {
+	if limit <= 0 {
+		limit = 200
+	}
 	rows, err := d.sql.Query(`SELECT id,inst_id,COALESCE(side,'buy'),sz,entry_px,COALESCE(exit_px,0),
 		margin,COALESCE(leverage,0),open_ts,COALESCE(close_ts,0),COALESCE(pnl,0),COALESCE(pnl_pct,0),
-		COALESCE(reason,''),COALESCE(bar,''),COALESCE(ai_note,'')
-		FROM trade WHERE status='closed' ORDER BY close_ts DESC LIMIT ?`, limit)
+		COALESCE(reason,''),COALESCE(bar,''),COALESCE(ai_note,''),COALESCE(status,'closed')
+		FROM trade WHERE `+where+` ORDER BY `+orderBy+` LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +66,7 @@ func (d *DB) ClosedTrades(limit int) ([]ClosedTrade, error) {
 		var t ClosedTrade
 		if err := rows.Scan(&t.ID, &t.InstID, &t.Side, &t.Sz, &t.EntryPx, &t.ExitPx,
 			&t.Margin, &t.Leverage, &t.OpenTs, &t.CloseTs, &t.Pnl, &t.PnlPct,
-			&t.Reason, &t.Bar, &t.AINote); err != nil {
+			&t.Reason, &t.Bar, &t.AINote, &t.Status); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
