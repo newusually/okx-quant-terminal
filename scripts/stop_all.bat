@@ -1,41 +1,58 @@
 @echo off
-chcp 65001 >nul
-setlocal EnableDelayedExpansion
+chcp 936 >nul 2>&1
+title OKX ÷’∂À - Õ£÷π
+setlocal EnableExtensions
 
 rem ===========================================================================
-rem  OKX ÂÖ®ÂêàÁ∫¶ÈáèÂåñÁªàÁ´Ø ‚Äî‚Äî ‰∏ÄÈîÆÂÅúÊ≠¢
-rem  È°∫Â∫èÔºöApache(ÂØπÂ§ñÂÖ•Âè£) -> Go ÁΩëÈ°µÊúçÂä° -> MySQL
-rem  ÂÖàÊñ≠ÂÖ•Âè£ÂÜçÂÅúÊï∞ÊçÆÔºåÈÅøÂÖçËØ∑Ê±ÇÊâìÂú®ÂçäÂÖ≥Èó≠ÁöÑÊúçÂä°‰∏ä„ÄÇ
+rem  OKX »´∫œ‘º¡øªØ÷’∂À °™°™ “ªº¸Õ£÷π
+rem  À≥–Ú£∫Apache(∂‘Õ‚»Îø⁄) -> Go Õ¯“≥∑˛ŒÒ -> MySQL
+rem  œ»∂œ»Îø⁄‘ŸÕ£ ˝æ›£¨±‹√‚«Î«Û¥Ú‘⁄∞Îπÿ±’µƒ∑˛ŒÒ…œ°£
+rem
+rem  ◊¢“‚£∫findstr “ª¬…◊ﬂ System32 æ¯∂‘¬∑æ∂£¨
+rem        ±‹√‚◊∞¡À Git/Cygwin  ±±ªÕ¨√˚ GNU π§æﬂ∂•µÙ°£
 rem ===========================================================================
 
+set "SYS=%SystemRoot%\System32"
 set "ROOT=%~dp0.."
 pushd "%ROOT%"
 set "ROOT=%CD%"
 popd
+cd /d "%ROOT%"
 
 echo.
 echo ==============================================================
-echo  OKX ÂÖ®ÂêàÁ∫¶ÈáèÂåñÁªàÁ´Ø ¬∑ ÂÅúÊ≠¢
+echo  OKX »´∫œ‘º¡øªØ÷’∂À °§ Õ£÷π
 echo ==============================================================
 echo.
 
-echo [1/3] ÂÅúÊ≠¢ Apache (OKXApache) ...
-net stop OKXApache >nul 2>&1
-if errorlevel 1 (echo       Êú™Âú®ËøêË°å„ÄÇ) else (echo       Â∑≤ÂÅúÊ≠¢„ÄÇ)
+echo [1/3] Õ£÷π Apache ∑˛ŒÒ OKXApache ...
+sc query OKXApache | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+if errorlevel 1 (
+    echo       Œ¥‘⁄‘À––°£
+) else (
+    net stop OKXApache >nul 2>&1
+    if errorlevel 1 (echo       Õ£÷π ß∞‹°£) else (echo       “—Õ£÷π°£)
+)
 
 echo.
-echo [2/3] ÂÅúÊ≠¢ Go ÁΩëÈ°µÊúçÂä° (okxweb.exe) ...
+echo [2/3] Õ£÷π Go Õ¯“≥∑˛ŒÒ okxweb.exe ...
 taskkill /F /IM okxweb.exe >nul 2>&1
-if errorlevel 1 (echo       Êú™Âú®ËøêË°å„ÄÇ) else (echo       Â∑≤ÂÅúÊ≠¢„ÄÇ)
+if errorlevel 1 (echo       Œ¥‘⁄‘À––°£) else (echo       “—Õ£÷π°£)
 
 echo.
-echo [3/3] ÂÅúÊ≠¢ MySQL (OKXMySQL) ...
-net stop OKXMySQL >nul 2>&1
-if errorlevel 1 (echo       Êú™Âú®ËøêË°å„ÄÇ) else (echo       Â∑≤ÂÅúÊ≠¢„ÄÇ)
+echo [3/3] Õ£÷π MySQL ∑˛ŒÒ OKXMySQL ...
+sc query OKXMySQL | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+if errorlevel 1 (
+    echo       Œ¥‘⁄‘À––°£
+) else (
+    net stop OKXMySQL >nul 2>&1
+    if errorlevel 1 (echo       Õ£÷π ß∞‹°£) else (echo       “—Õ£÷π°£)
+)
 
 echo.
 echo ==============================================================
-echo  ÂÖ®ÈÉ®ÂÅúÊ≠¢„ÄÇ
+echo  »´≤øÕ£÷π°£
 echo ==============================================================
 echo.
 pause
+endlocal

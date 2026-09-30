@@ -1,28 +1,38 @@
 @echo off
-chcp 65001 >nul
-setlocal EnableDelayedExpansion
+chcp 936 >nul 2>&1
+title OKX ÖÕ¶Ë - ±àÒë
+setlocal EnableExtensions
 
 rem ===========================================================================
-rem  OKX å…¨åˆçº¦é‡åŒ–ç»ˆç«¯ â€”â€” ç¼–è¯‘
-rem  äº§å‡º bin\okxweb.exeï¼ˆç½‘é¡µ+å¼•æ“ï¼‰ä¸ bin\okxdaemon.exeï¼ˆçº¯å¼•æ“ï¼‰
+rem  OKX È«ºÏÔ¼Á¿»¯ÖÕ¶Ë ¡ª¡ª ±àÒë
+rem  ²ú³ö bin\okxweb.exe£¨ÍøÒ³+ÒıÇæ£©
 rem ===========================================================================
 
+set "SYS=%SystemRoot%\System32"
 set "ROOT=%~dp0.."
 pushd "%ROOT%"
 set "ROOT=%CD%"
 popd
 cd /d "%ROOT%"
 
-rem ç”¨æœ¬åœ° Goï¼Œä¸å»è‡ªåŠ¨ä¸‹è½½ toolchainï¼ˆæœåŠ¡å™¨ä¸Šæ²¡æ¢¯å­ä¼šå¡ä½ï¼‰
+rem ÓÃ±¾µØ Go£¬²»È¥×Ô¶¯ÏÂÔØ toolchain£¨·şÎñÆ÷ÉÏÃ»Ìİ×Ó»á¿¨×¡£©
 set GOTOOLCHAIN=local
 set GOFLAGS=-mod=mod
 if "%GOPROXY%"=="" set GOPROXY=https://goproxy.cn,direct
 
 echo.
 echo ==============================================================
-echo  ç¼–è¯‘ OKX ç»ˆç«¯
+echo  ±àÒë OKX ÖÕ¶Ë
 echo ==============================================================
 echo.
+
+"%SYS%\where.exe" go >nul 2>&1
+if errorlevel 1 (
+    echo [´íÎó] PATH ÀïÕÒ²»µ½ go.exe£¬ÇëÏÈ×° Go »ò°ÑËü¼Ó½ø PATH¡£
+    echo.
+    pause
+    exit /b 1
+)
 
 echo [1/3] go build ./...
 go build ./...
@@ -34,18 +44,16 @@ go vet ./...
 if errorlevel 1 goto :fail
 
 echo.
-echo [3/3] äº§å‡ºå¯æ‰§è¡Œæ–‡ä»¶ ...
+echo [3/3] ²ú³ö¿ÉÖ´ĞĞÎÄ¼ş ...
 if not exist bin mkdir bin
-go build -trimpath -ldflags "-s -w" -o bin\okxweb.exe    ./cmd/okxweb
-if errorlevel 1 goto :fail
-go build -trimpath -ldflags "-s -w" -o bin\okxdaemon.exe ./cmd/okxdaemon
+go build -trimpath -ldflags "-s -w" -o bin\okxweb.exe ./cmd/okxweb
 if errorlevel 1 goto :fail
 
 echo.
-dir /b bin\*.exe
+dir /b bin\okxweb.exe
 echo.
 echo ==============================================================
-echo  ç¼–è¯‘å®Œæˆã€‚æ¥ç€ scripts\start_all.bat å¯åŠ¨ã€‚
+echo  ±àÒëÍê³É¡£½Ó×Å scripts\start_all.bat Æô¶¯¡£
 echo ==============================================================
 echo.
 pause
@@ -54,7 +62,7 @@ exit /b 0
 :fail
 echo.
 echo ==============================================================
-echo  [å¤±è´¥] ç¼–è¯‘ä¸é€šè¿‡ï¼Œä¸Šé¢çš„æŠ¥é”™å…ˆä¿®æ‰ã€‚
+echo  [Ê§°Ü] ±àÒë²»Í¨¹ı£¬ÉÏÃæµÄ±¨´íÏÈĞŞµô¡£
 echo ==============================================================
 echo.
 pause

@@ -1,84 +1,111 @@
 @echo off
-chcp 65001 >nul
-setlocal EnableDelayedExpansion
+chcp 936 >nul 2>&1
+title OKX ÖÕ¶Ë - Æô¶¯
+setlocal EnableExtensions
 
 rem ===========================================================================
-rem  OKX å…¨åˆçº¦é‡åŒ–ç»ˆç«¯ â€”â€” ä¸€é”®å¯åŠ¨
+rem  OKX È«ºÏÔ¼Á¿»¯ÖÕ¶Ë ¡ª¡ª Ò»¼üÆô¶¯
 rem  ---------------------------------------------------------------------------
-rem  ä¾æ¬¡æ‹‰èµ·ï¼šMySQL æœåŠ¡ -> Go ç½‘é¡µæœåŠ¡(127.0.0.1:8090) -> Apache(0.0.0.0:80)
-rem  ä¸‰ä¸ªç»„ä»¶éƒ½æ˜¯åå°å¸¸é©»ï¼Œå…³æ‰è¿™ä¸ªçª—å£ä¸ä¼šæŠŠå®ƒä»¬å¸¦èµ°ã€‚
-rem  ç”¨æ³•ï¼šåŒå‡»æœ¬æ–‡ä»¶ï¼Œæˆ–å‘½ä»¤è¡Œ scripts\start_all.bat
+rem  Ë³ĞòÀ­Æğ£ºMySQL ·şÎñ -> Go ÍøÒ³·şÎñ(127.0.0.1:8090) -> Apache(0.0.0.0:80)
+rem  Èı¸ö×é¼ş¶¼ÊÇºóÌ¨³£×¤£¬¹ØµôÕâ¸ö´°¿Ú²»»á°ÑËüÃÇ´ø×ß¡£
+rem  ÓÃ·¨£ºË«»÷±¾ÎÄ¼ş£¬»òÃüÁîĞĞ scripts\start_all.bat
+rem
+rem  ×¢Òâ£ºfindstr Ò»ÂÉ×ß System32 ¾ø¶ÔÂ·¾¶£¬±ÜÃâ×°ÁË Git/Cygwin Ê±±»Í¬Ãû
+rem        GNU ¹¤¾ß¶¥µô£»µÈ´ıÓÃ ping ¶ø²»ÊÇ timeout£¬ÖØ¶¨Ïò stdin Ê±Ò²²»»á±¨´í¡£
 rem ===========================================================================
 
-rem ä»¥è„šæœ¬æ‰€åœ¨ç›®å½•çš„ä¸Šä¸€çº§ä¸ºé¡¹ç›®æ ¹ï¼Œé¿å…ç›˜ç¬¦/ç”¨æˆ·ç›®å½•å†™æ­»
+set "SYS=%SystemRoot%\System32"
 set "ROOT=%~dp0.."
 pushd "%ROOT%"
 set "ROOT=%CD%"
 popd
+cd /d "%ROOT%"
 
 echo.
 echo ==============================================================
-echo  OKX å…¨åˆçº¦é‡åŒ–ç»ˆç«¯ Â· å¯åŠ¨
-echo  é¡¹ç›®ç›®å½•ï¼š%ROOT%
+echo  OKX È«ºÏÔ¼Á¿»¯ÖÕ¶Ë ¡¤ Æô¶¯
+echo  ÏîÄ¿Ä¿Â¼£º%ROOT%
 echo ==============================================================
 echo.
 
 rem ---- 1. MySQL ------------------------------------------------------------
-echo [1/4] æ£€æŸ¥ MySQL æœåŠ¡ (OKXMySQL) ...
-net start OKXMySQL >nul 2>&1
+echo [1/4] ¼ì²é MySQL ·şÎñ OKXMySQL ...
+sc query OKXMySQL >nul 2>&1
 if errorlevel 1 (
-    echo       å·²å¤„äºè¿è¡ŒçŠ¶æ€ï¼Œè·³è¿‡ã€‚
+    echo       [´íÎó] ·şÎñÃ»×¢²á¡£ÏÈÅÜ scripts\install_services.bat
 ) else (
-    echo       å·²å¯åŠ¨ã€‚
-)
-rem ç­‰æœåŠ¡çœŸçš„èƒ½è¿ä¸Šå†å¾€ä¸‹èµ°
-"%ROOT%\mysql\bin\mysqladmin.exe" -uokx -pOkxQuant2026 -h127.0.0.1 ping >nul 2>&1
-if errorlevel 1 (
-    echo       [è­¦å‘Š] è¿ä¸ä¸Š MySQL(127.0.0.1:3306)ã€‚è¯·å…ˆè·‘ scripts\install_services.bat
-) else (
-    echo       è¿æ¥æµ‹è¯•é€šè¿‡ã€‚
-)
-
-rem ---- 2. Go ç½‘é¡µæœåŠ¡ ------------------------------------------------------
-echo.
-echo [2/4] å¯åŠ¨ Go ç½‘é¡µæœåŠ¡ (127.0.0.1:8090) ...
-tasklist /FI "IMAGENAME eq okxweb.exe" 2>nul | find /I "okxweb.exe" >nul
-if not errorlevel 1 (
-    echo       å·²åœ¨è¿è¡Œï¼Œè·³è¿‡ã€‚
-) else (
-    if not exist "%ROOT%\bin\okxweb.exe" (
-        echo       [é”™è¯¯] æ‰¾ä¸åˆ° bin\okxweb.exe
-        echo              å…ˆç¼–è¯‘ï¼šgo build -o bin\okxweb.exe ./cmd\okxweb
+    sc query OKXMySQL | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+    if errorlevel 1 (
+        net start OKXMySQL >nul 2>&1
+        if errorlevel 1 (
+            echo       [´íÎó] Æô¶¯Ê§°Ü£¬¿´ mysql\data\*.err
+        ) else (
+            echo       ÒÑÆô¶¯¡£
+        )
     ) else (
-        rem -days 30 ä¿è¯å›è¡¥è‡³å°‘ä¸€ä¸ªæœˆï¼›-workers 6 é€‚é… 2 æ ¸æœºå™¨
-        start "OKX Web" /min "%ROOT%\bin\okxweb.exe" -addr 127.0.0.1:8090 -days 30 -workers 6
-        echo       å·²å¯åŠ¨ï¼ˆæœ€å°åŒ–çª—å£ï¼Œæ—¥å¿—åŒæ—¶å†™ logs\ï¼‰ã€‚
+        echo       ÒÑÔÚÔËĞĞ¡£
+    )
+    rem µÈÕæµÄÄÜÁ¬ÉÏÔÙÍùÏÂ×ß
+    "%ROOT%\mysql\bin\mysqladmin.exe" -uokx -pOkxQuant2026 -h127.0.0.1 --connect-timeout=5 ping >nul 2>&1
+    if errorlevel 1 (
+        echo       [¾¯¸æ] Á¬²»ÉÏ 127.0.0.1:3306
+    ) else (
+        echo       Á¬½Ó²âÊÔÍ¨¹ı¡£
     )
 )
+echo.
+
+rem ---- 2. Go ÍøÒ³·şÎñ ------------------------------------------------------
+echo [2/4] Æô¶¯ Go ÍøÒ³·şÎñ 127.0.0.1:8090 ...
+tasklist /FI "IMAGENAME eq okxweb.exe" /NH 2>nul | "%SYS%\findstr.exe" /I /C:"okxweb.exe" >nul
+if not errorlevel 1 (
+    echo       ÒÑÔÚÔËĞĞ£¬Ìø¹ı¡£
+) else (
+    if not exist "%ROOT%\bin\okxweb.exe" (
+        echo       [´íÎó] ÕÒ²»µ½ bin\okxweb.exe£¬ÏÈ±àÒë£º
+        echo              scripts\build.bat
+    ) else (
+        rem -days 30 ±£Ö¤»Ø²¹ÖÁÉÙÒ»¸öÔÂ£»-workers 6 ÊÊÅä 2 ºË»úÆ÷
+        start "OKX Web 8090" /min "%ROOT%\bin\okxweb.exe" -addr 127.0.0.1:8090 -days 30 -workers 6
+        echo       ÒÑÆô¶¯£¨×îĞ¡»¯´°¿Ú£¬ÈÕÖ¾Ğ´ÔÚ logs\£©¡£
+    )
+)
+echo.
 
 rem ---- 3. Apache ----------------------------------------------------------
-echo.
-echo [3/4] æ£€æŸ¥ Apache æœåŠ¡ (OKXApache) ...
-net start OKXApache >nul 2>&1
+echo [3/4] ¼ì²é Apache ·şÎñ OKXApache ...
+sc query OKXApache >nul 2>&1
 if errorlevel 1 (
-    echo       å·²å¤„äºè¿è¡ŒçŠ¶æ€ï¼Œè·³è¿‡ã€‚
+    echo       [´íÎó] ·şÎñÃ»×¢²á¡£ÏÈÅÜ scripts\install_services.bat
 ) else (
-    echo       å·²å¯åŠ¨ã€‚
+    sc query OKXApache | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+    if errorlevel 1 (
+        net start OKXApache >nul 2>&1
+        if errorlevel 1 (
+            echo       [´íÎó] Æô¶¯Ê§°Ü£¬¿´ apache\logs\error.log
+        ) else (
+            echo       ÒÑÆô¶¯¡£
+        )
+    ) else (
+        echo       ÒÑÔÚÔËĞĞ¡£
+    )
 )
-
-rem ---- 4. éªŒè¯ ------------------------------------------------------------
 echo.
-echo [4/4] ç­‰å¾…æœåŠ¡å°±ç»ª ...
-timeout /t 8 /nobreak >nul
-powershell -NoProfile -Command "try{ $r=Invoke-WebRequest -Uri 'http://127.0.0.1/api/state' -UseBasicParsing -TimeoutSec 10; if($r.StatusCode -eq 200){ Write-Host '      Go æœåŠ¡ OK (200)' } else { Write-Host ('      Go æœåŠ¡å¼‚å¸¸ HTTP ' + $r.StatusCode) } } catch { Write-Host '      [è­¦å‘Š] Go æœåŠ¡è¿˜æ²¡èµ·æ¥ï¼Œå¤šç­‰ä¸€ä¼šå„¿å†åˆ·æ–°ç½‘é¡µ' }"
-powershell -NoProfile -Command "try{ $r=Invoke-WebRequest -Uri 'http://127.0.0.1/' -UseBasicParsing -TimeoutSec 10; if($r.StatusCode -eq 200){ Write-Host '      Apache 80 ç«¯å£ OK (200)' } else { Write-Host ('      Apache å¼‚å¸¸ HTTP ' + $r.StatusCode) } } catch { Write-Host '      [è­¦å‘Š] 80 ç«¯å£ä¸é€šï¼Œæ£€æŸ¥ Apache æ˜¯å¦å¯åŠ¨' }"
+
+rem ---- 4. ÑéÖ¤ ------------------------------------------------------------
+echo [4/4] µÈ´ı·şÎñ¾ÍĞ÷ ...
+rem ÓÃ ping ´úÌæ timeout£ºping ²»³Ô stdin£¬±»ÖØ¶¨ÏòÊ±Ò²²»»á±¨´í
+"%SYS%\ping.exe" -n 9 127.0.0.1 >nul 2>&1
+powershell -NoProfile -Command "try{$r=Invoke-WebRequest -Uri 'http://127.0.0.1:8090/api/state' -UseBasicParsing -TimeoutSec 10; Write-Host ('      Go ·şÎñ OK  HTTP ' + $r.StatusCode)}catch{Write-Host '      [¾¯¸æ] Go ·şÎñ»¹Ã»ÆğÀ´£¬ÉÔµÈÔÙË¢ĞÂÍøÒ³'}"
+powershell -NoProfile -Command "try{$r=Invoke-WebRequest -Uri 'http://127.0.0.1/' -UseBasicParsing -TimeoutSec 10; Write-Host ('      Apache OK   HTTP ' + $r.StatusCode)}catch{Write-Host '      [¾¯¸æ] 80 ¶Ë¿Ú²»Í¨£¬¼ì²é Apache ·şÎñ'}"
 
 echo.
 echo ==============================================================
-echo  å®Œæˆã€‚æµè§ˆå™¨æ‰“å¼€ï¼šhttp://localhost/
+echo  Íê³É¡£ä¯ÀÀÆ÷´ò¿ª£ºhttp://localhost/
 echo  --------------------------------------------------------------
-echo  æŸ¥çœ‹æœåŠ¡ï¼šnet start ^| findstr /I "OKX"
-echo  åœæ­¢æœåŠ¡ï¼šscripts\stop_all.bat
+echo  ²é¿´·şÎñ£ºnet start ^| findstr /I OKX
+echo  Í£Ö¹·şÎñ£ºscripts\stop_all.bat
 echo ==============================================================
 echo.
 pause
+endlocal

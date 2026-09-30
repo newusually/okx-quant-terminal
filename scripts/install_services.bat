@@ -1,26 +1,34 @@
 @echo off
-chcp 65001 >nul
-setlocal EnableDelayedExpansion
+chcp 936 >nul 2>&1
+title OKX ÖÕ¶Ë - °²×°·şÎñ
+setlocal EnableExtensions
 
 rem ===========================================================================
-rem  OKX å…¨åˆçº¦é‡åŒ–ç»ˆç«¯ â€”â€” ä¸€æ¬¡æ€§çš„æœåŠ¡æ³¨å†Œ / ç¯å¢ƒå®‰è£…
+rem  OKX È«ºÏÔ¼Á¿»¯ÖÕ¶Ë ¡ª¡ª Ò»´ÎĞÔµÄ·şÎñ×¢²á / »·¾³°²×°
 rem  ---------------------------------------------------------------------------
-rem  åšä¸‰ä»¶äº‹ï¼ˆéƒ½å·²åšè¿‡çš„è¯å¯ä»¥é‡å¤è·‘ï¼Œå¹‚ç­‰ï¼‰ï¼š
-rem    1. æŠŠ MySQL æ³¨å†Œæˆ Windows æœåŠ¡ OKXMySQLï¼ˆè‡ªåŠ¨å¯åŠ¨ï¼‰
-rem    2. æŠŠ Apache æ³¨å†Œæˆ Windows æœåŠ¡ OKXApacheï¼ˆè‡ªåŠ¨å¯åŠ¨ï¼‰
-rem    3. è£… VC++ 2026 è¿è¡Œåº“ï¼ˆApache / MySQL éƒ½ä¾èµ–ï¼‰
-rem  éœ€è¦ç®¡ç†å‘˜æƒé™è¿è¡Œã€‚
+rem  ×öÎå¼şÊÂ£¨ÖØ¸´ÅÜÒ²°²È«£¬ÃİµÈ£©£º
+rem    1. ¼ì²é VC++ ÔËĞĞ¿â
+rem    2. ³õÊ¼»¯ MySQL Êı¾İÄ¿Â¼£¨½öÔÚÈ±Ê§Ê±£©
+rem    3. °Ñ MySQL ×¢²á³É Windows ·şÎñ OKXMySQL£¨×Ô¶¯Æô¶¯£©
+rem    4. ½¨¿â okx + ÕËºÅ okx
+rem    5. °Ñ Apache ×¢²á³É Windows ·şÎñ OKXApache£¨×Ô¶¯Æô¶¯£©
+rem  ĞèÒª¹ÜÀíÔ±È¨ÏŞÔËĞĞ¡£
+rem
+rem  ×¢Òâ£ºfindstr / timeout / where Ò»ÂÉ×ß System32 ¾ø¶ÔÂ·¾¶£¬
+rem        ±ÜÃâ×°ÁË Git/Cygwin Ê±±»Í¬Ãû GNU ¹¤¾ß¶¥µô¡£
 rem ===========================================================================
 
+set "SYS=%SystemRoot%\System32"
 set "ROOT=%~dp0.."
 pushd "%ROOT%"
 set "ROOT=%CD%"
 popd
+cd /d "%ROOT%"
 
 net session >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo [é”™è¯¯] è¯·å³é”®"ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ"æœ¬è„šæœ¬ã€‚
+    echo [´íÎó] ĞèÒª¹ÜÀíÔ±È¨ÏŞ¡£ÇëÓÒ¼ü±¾ÎÄ¼ş£¬Ñ¡"ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ"¡£
     echo.
     pause
     exit /b 1
@@ -28,89 +36,114 @@ if errorlevel 1 (
 
 echo.
 echo ==============================================================
-echo  OKX ç»ˆç«¯ Â· å®‰è£…æœåŠ¡
-echo  é¡¹ç›®ç›®å½•ï¼š%ROOT%
+echo  OKX ÖÕ¶Ë ¡¤ °²×°·şÎñ
+echo  ÏîÄ¿Ä¿Â¼£º%ROOT%
 echo ==============================================================
 echo.
 
-rem ---- 1. VC è¿è¡Œåº“ --------------------------------------------------------
-echo [1/5] æ£€æŸ¥ VC++ 2026 è¿è¡Œåº“ ...
+rem ---- 1. VC ÔËĞĞ¿â --------------------------------------------------------
+echo [1/5] ¼ì²é VC++ ÔËĞĞ¿â ...
 if exist "%ROOT%\runtime\vcruntime140.dll" (
-    echo       å·²å°±ç»ªï¼ˆruntime\ ä¸‹å·²æœ‰è¿è¡Œåº“ï¼‰ã€‚
+    echo       ÒÑ¾ÍĞ÷£¨runtime\ ÏÂÒÑÓĞÔËĞĞ¿â£©¡£
 ) else (
-    echo       æœªæ‰¾åˆ° runtime\vcruntime140.dll
-    echo       è¯·å…ˆå®‰è£… VS2026 ç‰ˆè¿è¡Œåº“ï¼šhttps://aka.ms/vs/18/release/vc_redist.x64.exe
+    echo       Î´ÕÒµ½ runtime\vcruntime140.dll
+    echo       ÇëÏÈ×° VS2026 °æÔËĞĞ¿â£º
+    echo       https://aka.ms/vs/18/release/vc_redist.x64.exe
 )
-
-rem ---- 2. MySQL æ•°æ®ç›®å½•åˆå§‹åŒ– ---------------------------------------------
 echo.
-echo [2/5] æ£€æŸ¥ MySQL æ•°æ®ç›®å½• ...
+
+rem ---- 2. MySQL Êı¾İÄ¿Â¼³õÊ¼»¯ ---------------------------------------------
+echo [2/5] ¼ì²é MySQL Êı¾İÄ¿Â¼ ...
 if exist "%ROOT%\mysql\data\mysql" (
-    echo       å·²åˆå§‹åŒ–ï¼Œè·³è¿‡ã€‚
+    echo       ÒÑ³õÊ¼»¯£¬Ìø¹ı¡£
 ) else (
-    echo       æ­£åœ¨åˆå§‹åŒ–ï¼ˆ--initialize-insecureï¼‰...
+    echo       ÕıÔÚ³õÊ¼»¯£¨--initialize-insecure£©...
     if not exist "%ROOT%\mysql\data" mkdir "%ROOT%\mysql\data"
     "%ROOT%\mysql\bin\mysqld.exe" --defaults-file="%ROOT%\conf\my.ini" --initialize-insecure --console
     if errorlevel 1 (
-        echo       [é”™è¯¯] åˆå§‹åŒ–å¤±è´¥ï¼Œæ£€æŸ¥ conf\my.ini é‡Œçš„è·¯å¾„ã€‚
+        echo       [´íÎó] ³õÊ¼»¯Ê§°Ü£¬¼ì²é conf\my.ini ÀïµÄÂ·¾¶¡£
     ) else (
-        echo       åˆå§‹åŒ–å®Œæˆã€‚root ç©ºå¯†ç ï¼Œç¬¬ä¸€æ¬¡ç™»å½•åè¯·æ”¹å¯†ç ï¼š
-        echo         mysql -uroot -h127.0.0.1
-        echo         ALTER USER 'root'@'localhost' IDENTIFIED BY 'æ–°å¯†ç ';
+        echo       ³õÊ¼»¯Íê³É¡£root ³õÊ¼Îª¿ÕÃÜÂë£¬Ê×´ÎµÇÂ¼ºó½¨Òé¸ÄÃÜÂë¡£
     )
 )
-
-rem ---- 3. æ³¨å†Œ MySQL æœåŠ¡ --------------------------------------------------
 echo.
-echo [3/5] æ³¨å†Œ MySQL æœåŠ¡ (OKXMySQL) ...
+
+rem ---- 3. ×¢²á MySQL ·şÎñ --------------------------------------------------
+echo [3/5] ×¢²á MySQL ·şÎñ OKXMySQL ...
 sc query OKXMySQL >nul 2>&1
-if not errorlevel 1 (
-    echo       å·²å­˜åœ¨ï¼Œåªåšå¯åŠ¨ç±»å‹æ ¡æ­£ã€‚
-    sc config OKXMySQL start= auto >nul
-) else (
-    "%ROOT%\mysql\bin\mysqld.exe" --install OKXMySQL --defaults-file="%ROOT%\conf\my.ini"
-    sc config OKXMySQL start= auto >nul
-)
-net start OKXMySQL >nul 2>&1
-echo       å®Œæˆï¼Œå¹¶å·²å°è¯•å¯åŠ¨ã€‚
-
-rem ---- 4. å»ºåº“ / å»ºè´¦å· ----------------------------------------------------
-echo.
-echo [4/5] å»ºåº“ okx + è´¦å· okx ...
-"%ROOT%\mysql\bin\mysql.exe" -uroot -h127.0.0.1 --default-character-set=utf8mb4 -e "CREATE DATABASE IF NOT EXISTS okx DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; CREATE USER IF NOT EXISTS 'okx'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; CREATE USER IF NOT EXISTS 'okx'@'localhost' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'127.0.0.1'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'localhost'; FLUSH PRIVILEGES;" 2>nul
 if errorlevel 1 (
-    echo       [æç¤º] root å·²è®¾å¯†ç ï¼Œè·³è¿‡è‡ªåŠ¨å»ºåº“ã€‚æ‰‹å·¥æ‰§è¡Œï¼š
-    echo         scripts\sql\init_db.sql
+    echo       ·şÎñ²»´æÔÚ£¬ÕıÔÚ×¢²á ...
+    "%ROOT%\mysql\bin\mysqld.exe" --install OKXMySQL --defaults-file="%ROOT%\conf\my.ini"
+    if errorlevel 1 (
+        echo       [´íÎó] ×¢²áÊ§°Ü¡£
+    ) else (
+        echo       ×¢²á³É¹¦¡£
+    )
 ) else (
-    echo       å®Œæˆã€‚
+    echo       ·şÎñÒÑ´æÔÚ£¬Ìø¹ı×¢²á¡£
 )
-
-rem ---- 5. æ³¨å†Œ Apache ------------------------------------------------------
+sc config OKXMySQL start= auto >nul 2>&1
+sc query OKXMySQL | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+if errorlevel 1 (
+    net start OKXMySQL >nul 2>&1
+    if errorlevel 1 (
+        echo       [¾¯¸æ] Æô¶¯Ê§°Ü£¬¼ì²é mysql\data\*.err ÈÕÖ¾¡£
+    ) else (
+        echo       ÒÑÆô¶¯¡£
+    )
+) else (
+    echo       ÒÑÔÚÔËĞĞ¡£
+)
 echo.
-echo [5/5] æ³¨å†Œ Apache æœåŠ¡ (OKXApache) ...
+
+rem ---- 4. ½¨¿â / ½¨ÕËºÅ ----------------------------------------------------
+echo [4/5] ½¨¿â okx + ÕËºÅ okx ...
+"%ROOT%\mysql\bin\mysql.exe" -uroot -h127.0.0.1 --default-character-set=utf8mb4 -e "CREATE DATABASE IF NOT EXISTS okx DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; CREATE USER IF NOT EXISTS 'okx'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; CREATE USER IF NOT EXISTS 'okx'@'localhost' IDENTIFIED WITH mysql_native_password BY 'OkxQuant2026'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'127.0.0.1'; GRANT ALL PRIVILEGES ON okx.* TO 'okx'@'localhost'; FLUSH PRIVILEGES;" >nul 2>&1
+if errorlevel 1 (
+    echo       [ÌáÊ¾] root ¿ÉÄÜÒÑÉèÃÜÂë£¬×Ô¶¯½¨¿â±»¾Ü¡£ÊÖ¹¤Ö´ĞĞÒ»´Î£º
+    echo         mysql -uroot -p -h127.0.0.1 --default-character-set=utf8mb4 ^< scripts\sql\init_db.sql
+) else (
+    echo       Íê³É¡£
+)
+echo.
+
+rem ---- 5. ×¢²á Apache ------------------------------------------------------
+echo [5/5] ×¢²á Apache ·şÎñ OKXApache ...
 if not exist "%ROOT%\apache\bin\httpd.exe" (
-    echo       [é”™è¯¯] æ‰¾ä¸åˆ° apache\bin\httpd.exe
+    echo       [´íÎó] ÕÒ²»µ½ apache\bin\httpd.exe
 ) else (
     "%ROOT%\apache\bin\httpd.exe" -t
     if errorlevel 1 (
-        echo       [é”™è¯¯] httpd.conf è¯­æ³•æœ‰è¯¯ï¼Œå…ˆä¿®å¥½å†æ³¨å†Œã€‚
+        echo       [´íÎó] httpd.conf Óï·¨ÓĞÎó£¬ÏÈĞŞºÃÔÙ×¢²á¡£
     ) else (
         sc query OKXApache >nul 2>&1
-        if not errorlevel 1 (
-            echo       å·²å­˜åœ¨ï¼Œåªåšå¯åŠ¨ç±»å‹æ ¡æ­£ã€‚
-            sc config OKXApache start= auto >nul
-        ) else (
+        if errorlevel 1 (
+            echo       ·şÎñ²»´æÔÚ£¬ÕıÔÚ×¢²á ...
             "%ROOT%\apache\bin\httpd.exe" -k install -n OKXApache
-            sc config OKXApache start= auto >nul
+            echo       ×¢²á³É¹¦¡£
+        ) else (
+            echo       ·şÎñÒÑ´æÔÚ£¬Ìø¹ı×¢²á¡£
         )
-        net start OKXApache >nul 2>&1
-        echo       å®Œæˆï¼Œå¹¶å·²å°è¯•å¯åŠ¨ã€‚
+        sc config OKXApache start= auto >nul 2>&1
+        sc query OKXApache | "%SYS%\findstr.exe" /I /C:"RUNNING" >nul
+        if errorlevel 1 (
+            net start OKXApache >nul 2>&1
+            if errorlevel 1 (
+                echo       [¾¯¸æ] Æô¶¯Ê§°Ü£¬¼ì²é apache\logs\error.log¡£
+            ) else (
+                echo       ÒÑÆô¶¯¡£
+            )
+        ) else (
+            echo       ÒÑÔÚÔËĞĞ¡£
+        )
     )
 )
 
 echo.
 echo ==============================================================
-echo  å®‰è£…ç»“æŸã€‚æ¥ç€è·‘ scripts\start_all.bat æŠŠä¸‰ä¸ªæœåŠ¡ä¸€èµ·æ‹‰èµ·æ¥ã€‚
+echo  °²×°½áÊø¡£
+echo  ½Ó×ÅÅÜ scripts\start_all.bat °Ñ·şÎñÒ»ÆğÀ­ÆğÀ´¡£
 echo ==============================================================
 echo.
 pause
+endlocal

@@ -4,6 +4,13 @@
 * text=auto
 
 ###############################################################################
+# Windows 批处理：必须是 CRLF + GBK(cp936)，否则中文 cmd 解析会错位
+#   —— 克隆/检出时强制 CRLF，不要让它变回 LF
+###############################################################################
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+###############################################################################
 # Set default behavior for command prompt diff.
 #
 # This is need for earlier builds of msysgit that does not have it on by

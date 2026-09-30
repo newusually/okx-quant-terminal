@@ -122,3 +122,27 @@ go run ./cmd/anncheck              # 公告接口连通性
 * `mysql/` `apache/` `runtime/` `bin/` `logs/` 均为本地产物，不入库。
 * OKX 密钥只勾选 **读取 + 交易**，永远不要勾提现。
 * 首次跑请保持 `configs/okx_strategy.json` 的 `dry_run: true`，只算信号不下单。
+
+## 十、批处理脚本（scripts\*.bat）
+
+| 文件 | 作用 | 权限 |
+| --- | --- | --- |
+| `scripts\install_services.bat` | 一次性安装：VC 运行库检查 → MySQL 初始化 → 注册 `OKXMySQL` / `OKXApache` 服务 | **需管理员** |
+| `scripts\build.bat` | 编译出 `bin\okxweb.exe` | 普通 |
+| `scripts\start_all.bat` | 一键启动 MySQL + okxweb(8090) + Apache(80)，并做连通性自检 | 普通 |
+| `scripts\stop_all.bat` | 一键停止，顺序 Apache → okxweb → MySQL | 普通 |
+
+**编码约定（重要）**：`.bat` 一律保存为 **ANSI / GBK(cp936) + CRLF**，第二行 `chcp 936`。
+文件名全 ASCII，中文只出现在 `echo` 文本里。
+
+原因：cmd.exe 是按**字节偏移**重读批处理文件的。若存成 UTF-8 又在文件里 `chcp 65001`，
+代码页切换会让偏移错位，中文字节会把后面的 ASCII 吃掉，典型症状是
+`'lse' 不是内部或外部命令`（`else` 被啃掉）、`'026'`（`2026`）、`命令语法不正确`。
+存 GBK 时控制台代码页不变，偏移恒定，中文还能正常显示。
+
+`.gitattributes` 已写死 `*.bat text eol=crlf`，防止克隆后变回 LF。
+
+**脚本里为什么用 `%SystemRoot%\System32\findstr.exe` 的绝对路径**：装了 Git / Cygwin / MSYS
+的机器，PATH 里会有同名的 GNU `find`、`timeout`，会把命令解析错（`find: '-/I': No such file`）。
+等待用 `ping -n 9` 而非 `timeout`，因为 `timeout` 在 stdin 被重定向时会直接报错退出。
+
