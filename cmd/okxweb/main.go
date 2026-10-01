@@ -10,7 +10,8 @@ package main
 //
 // 干三件事：
 //   1. 连上本机 MySQL 并把表建好（不需要装 Python，也不需要 CGO）
-//   2. 从 OKX 回补至少一个月的 K 线（1m/3m/5m/15m/1H/4H）到 MySQL，并持续增量更新
+//   2. 从 OKX 回补至少一个月的 K 线（5m/15m/1H/4H）到 MySQL，并持续增量更新
+//      （1m/3m 已于 2026-10-01 下线：这两个周期占 kline 表 69% 的行，磁盘扛不住）
 //   3. 起一个网页服务，用 AJAX + TradingView 图表把行情、持仓、盈亏、历史都展示出来
 //
 // 端口约定：
@@ -53,14 +54,14 @@ import (
 var (
 	addr    = flag.String("addr", "127.0.0.1:8090", "网页监听地址（Apache 反代到这里）")
 	proxy   = flag.String("proxy", "", "HTTP/SOCKS5 代理，如 http://127.0.0.1:7890；留空直连")
-	days    = flag.Int("days", 30, "K 线回补天数（至少一个月）")
+	days    = flag.Int("days", 365, "K 线回补天数（与 kline_retain_days 对齐，默认 1 年）")
 	focus   = flag.String("focus", "", "启动即回补的合约，逗号分隔；留空 = 按成交额取 TopN")
 	focusN  = flag.Int("focusn", 8, "focus 留空时取成交额前 N 名")
 	workers = flag.Int("workers", 10, "回补并发数（受 OKX 限频约束，10 已接近上限）")
-	bars    = flag.String("bars", "1m,3m,5m,15m,1H,4H", "要回补的周期，逗号分隔")
+	bars    = flag.String("bars", "15m", "要回补的周期，逗号分隔（全库只保留 15m：4H/1H/5m、更早的 1m/3m 都已下线）")
 	rtSec   = flag.Int("rt", 5, "实时行情落库间隔（秒）")
 	scope   = flag.String("backfill-scope", "plan",
-		"回补范围：plan（默认，全部live×15m/1H/4H + 可交易×5m/3m/1m）| tradeable | live（约3.6GB，看磁盘）| focus | none")
+		"回补范围：plan（默认，全部live×15m/1H/4H + 可交易×5m）| tradeable | live（约3.6GB，看磁盘）| focus | none")
 	minFree = flag.Int("min-free-mb", 800, "剩余磁盘低于此值就暂停回补（0=不检查）")
 
 	mHost  = flag.String("mysql-host", "127.0.0.1", "MySQL 主机")
@@ -79,6 +80,30 @@ var (
 	exitSec  = flag.Int("exit-sec", 3, "止盈巡检间隔（秒）—— 实时盯浮盈，够线就平")
 	entrySec = flag.Int("entry-sec", 60, "买入信号扫描间隔（秒）—— 全市场扫买入信号")
 	liveBar  = flag.String("live-bar", "", "自动交易用哪个周期判买卖（留空 = 读配置里的 bar）")
+
+	// ---- 一次性数据清理（记录表 30 天 / 日志 30 天红线）----
+	//   bin\okxweb.exe -cleanup-dry   只看超期数据有多少，一行不删
+	//   bin\okxweb.exe -cleanup       真删（常驻服务里每月 1 号也会自动跑）
+	cleanupNow  = flag.Bool("cleanup", false, "立即执行一次记录表/日志清理（30 天红线），然后退出")
+	cleanupDry  = flag.Bool("cleanup-dry", false, "预演：只统计超期数据量，不删除任何东西")
+
+	// ---- 月度 / 年度维护任务（2026-10-01 新增）----
+	// 归档、磁盘守卫、清日志、清回收站会动真格，所以默认走预演。
+	//   bin\okxweb.exe -maint-dry     月度任务预演（只报告不删）
+	//   bin\okxweb.exe -maint         月度任务真跑（含归档 + 清回收站）
+	//   bin\okxweb.exe -maint-yearly  年度 K 线清理（红线 kline_retain_days=365）
+	maintNow    = flag.Bool("maint", false, "立即执行一次月度维护（归档上月 + 记录表清理 + 日志清理 + 磁盘守卫 + 清回收站），然后退出")
+	maintDry    = flag.Bool("maint-dry", false, "预演月度维护：只报告会做什么，不删任何东西")
+	maintYearly = flag.Bool("maint-yearly", false, "立即执行一次年度清理（删除早于 kline_retain_days 的 K 线），然后退出")
+	// ★ 年度清理是 DROP PARTITION，真删不可逆，所以必须给一个预演开关。
+	//   少了它，任何「先预演、再确认」的批处理都会把预演那一步变成真删。
+	maintYearlyDry = flag.Bool("maint-yearly-dry", false, "预演年度清理：只报告会 DROP 哪些分区，不删任何东西")
+
+	// ---- 月度归档导出 ----
+	//   bin\okxweb.exe -archive 2026-09          导出到默认 archive/ 目录
+	//   bin\okxweb.exe -archive 2026-09 -archive-dir D:\bak
+	archiveYM  = flag.String("archive", "", "导出指定月份（YYYY-MM）的 15m K 线到归档目录，然后退出")
+	archiveDir = flag.String("archive-dir", "", "归档目录（留空 = 读配置 archive_dir，默认项目根 archive/）")
 
 	// ---- Windows 服务 ----
 	installSvc   = flag.Bool("install", false, "注册为 Windows 服务 OKXWeb（需管理员，幂等）")
@@ -116,6 +141,74 @@ func main() {
 			fmt.Printf("✘ 卸载服务失败：%v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// ---- 一次性数据清理：跑完就退出 ----
+	//
+	// 常驻服务里维护任务是自动的（启动后 90 秒起，每 30 分钟巡检一次，
+	// 按 meta 表记的「上次跑的月份/年份」决定要不要补跑），这几个开关是给
+	// 手工核对用的：先 -cleanup-dry / -maint-dry 看看会删多少，再真跑。
+	if *cleanupNow || *cleanupDry {
+		rep, err := service.RunRetentionCleanup(*cleanupDry)
+		fmt.Print(service.RetentionText(rep))
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
+			os.Exit(1)
+		}
+		if *cleanupDry {
+			fmt.Println("（预演模式：什么都没删。去掉 -cleanup-dry 才会真删）")
+		}
+		return
+	}
+
+	// ---- 月度维护：归档 + 记录表清理 + 日志清理 + 磁盘守卫 + 清回收站 ----
+	if *maintNow || *maintDry {
+		rep, err := service.RunMonthlyMaintenance(*maintDry)
+		fmt.Print(service.MaintenanceText(rep))
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
+			os.Exit(1)
+		}
+		if *maintDry {
+			fmt.Println("（预演模式：什么都没删。去掉 -maint-dry 才会真跑）")
+		}
+		return
+	}
+
+	// ---- 年度清理：删掉早于 KlineRetainDays 的 K 线 ----
+	if *maintYearly || *maintYearlyDry {
+		rep, err := service.RunYearlyMaintenance(*maintYearlyDry)
+		fmt.Print(service.MaintenanceText(rep))
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
+			os.Exit(1)
+		}
+		if *maintYearlyDry {
+			fmt.Println("（预演模式：什么都没删。去掉 -maint-yearly-dry 才会真删）")
+		}
+		return
+	}
+
+	// ---- 月度归档导出：把某个月的 15m K 线导成 gzip 分片 ----
+	if *archiveYM != "" {
+		dir := *archiveDir
+		if dir == "" {
+			dir = service.ArchiveDir()
+		}
+		man, err := service.ExportMonth(*archiveYM, dir)
+		if err != nil {
+			fmt.Printf("✘ 归档 %s 失败：%v\n", *archiveYM, err)
+			os.Exit(1)
+		}
+		fmt.Print(service.ArchiveText(man))
+		p, werr := service.WriteManifest(dir, man)
+		if werr != nil {
+			fmt.Printf("✘ 清单写入失败：%v\n", werr)
+			os.Exit(1)
+		}
+		fmt.Printf("清单：%s\n", p)
+		fmt.Printf("目录：%s\n", dir)
 		return
 	}
 
@@ -471,6 +564,31 @@ func runApp(ctx context.Context) error {
 	// 合成进 trade_event 流水 —— 历史面板/交易明细就能看到最近 3 天的全部成交。
 	// 无条件启动：跟自动交易开不开没关系，网页展示需要它。
 	service.StartOKXFillsSync(ctx)
+
+	// ---- 4.75 OKX 已平仓仓位历史同步（历史仓位面板的数据源）----
+	//
+	// 上面那个 fills 同步只写 trade_event（逐笔流水），而「历史仓位」面板读的是
+	// trade 表（一个仓位一行）。本地 trade 原来只记程序自己下的单 —— 实测
+	// OKX 账户上有 100+ 个已平仓仓位、8000+ 笔成交，本地却只有 8 行。
+	// 这里每 10 分钟把 /api/v5/account/positions-history（最近 3 个月）拉回来
+	// upsert 进 trade 表，历史面板才真的「有东西看」。
+	service.StartOKXPositionsSync(ctx)
+
+	// ---- 4.8 自动维护程序（月度任务 + 年度任务）----
+	//
+	// 两条独立红线：
+	//   记录表（trade/trade_event/signals/equity/runlog）30 天 → 月度任务里清
+	//   K 线 15m 保留 365 天                                  → 年度任务里清
+	//
+	// 月度任务包含：归档上月 K 线 → 记录表清理 → 日志清理（30 天，含
+	// apache/logs 与 mysql 的 error/slow log）→ 磁盘守卫（C 盘 < 10GB 就把
+	// K 线收缩到当月）→ 清空回收站。
+	//
+	// 启动后 90 秒起，每 30 分钟巡检一次，用 meta 表记的「上次跑的月份/年份」
+	// 决定要不要补跑 —— 停机期间错过的任务重启后会补上，跑过的不会重复。
+	// 手工核对：`bin\okxweb.exe -maint-dry`（预演）/ `-maint`（真跑）/
+	//           `-maint-yearly`（年度清理）/ `-cleanup-dry` / `-cleanup`。
+	service.StartMaintenance(ctx)
 
 	// ---- 4.8 性能自检 ----
 	//

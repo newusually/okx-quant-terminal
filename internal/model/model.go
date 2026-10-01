@@ -13,6 +13,66 @@ package model
 import "encoding/json"
 
 // ---------------------------------------------------------------------------
+// 周期白名单（全项目唯一权威定义）
+// ---------------------------------------------------------------------------
+
+// EnabledBars 当前业务在用的 K 线周期。
+//
+// ★ 2026-10-01：全库只保留 15m ★
+// 用户口径：「把 4H / 1H / 5m 全部删除，只保留 15 分钟的信号和买卖点」。
+//
+// 为什么放在 model 层：repo（回补、清理）和 service（行情、信号、前端下拉）
+// 都要用这份名单，而依赖方向是 handler → service → repo ——
+// repo 不能反向 import service。放这里两边都能引用，避免各写一份日后走岔。
+//
+// 改周期时只改这一行，下面三个地方会自动跟着变：
+//   1. service.SupportedBars        （前端下拉 / /api/kline 白名单）
+//   2. repo.CleanupKlines           （会把不在名单里的周期整段删掉）
+//   3. backfill 的 pick             （只回补名单里的周期）
+var EnabledBars = []string{"15m"}
+
+// BarEnabled 该周期是否在当前白名单里（大小写、空白都不敏感）
+func BarEnabled(bar string) bool {
+	for _, b := range EnabledBars {
+		if equalFoldTrim(b, bar) {
+			return true
+		}
+	}
+	return false
+}
+
+// equalFoldTrim 忽略大小写与首尾空白的相等判断（不引 strings，保持本文件零依赖）
+func equalFoldTrim(a, b string) bool {
+	trim := func(s string) string {
+		i, j := 0, len(s)
+		for i < j && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+			i++
+		}
+		for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r') {
+			j--
+		}
+		return s[i:j]
+	}
+	x, y := trim(a), trim(b)
+	if len(x) != len(y) {
+		return false
+	}
+	for i := 0; i < len(x); i++ {
+		c1, c2 := x[i], y[i]
+		if 'A' <= c1 && c1 <= 'Z' {
+			c1 += 'a' - 'A'
+		}
+		if 'A' <= c2 && c2 <= 'Z' {
+			c2 += 'a' - 'A'
+		}
+		if c1 != c2 {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
 // 行情
 // ---------------------------------------------------------------------------
 

@@ -132,8 +132,20 @@ func (f *DataFeed) FetchTickers() ([]model.Ticker, error) {
 // K 线
 // ---------------------------------------------------------------------------
 
-// SupportedBars 前端下拉用的周期（顺序即按钮顺序）
-var SupportedBars = []string{"1m", "3m", "5m", "15m", "1H", "4H"}
+// SupportedBars 前端下拉用的周期（顺序即按钮顺序）。
+//
+// ★ 权威定义在 model.EnabledBars —— 这里只是转发一份给前端/接口层用 ★
+//
+// ★ 全库只保留 15m（2026-10-01 用户口径）★
+//   「把 4H / 1H / 5m 全部删除，只保留 15 分钟的信号和买卖点」
+//
+// 演进过程：
+//   最初 6 个周期（1m/3m/5m/15m/1H/4H）→ 一天长几十万行，磁盘扛不住；
+//   先砍 1m/3m（占全表 69%）→ 还是 4 个周期、594 万行；
+//   现在只留 15m → 137 万行、库从 521MB 降到 132MB。
+//
+// 摘掉之后 /api/kline、回补、信号回算三条路径会同时拒绝其它周期。
+var SupportedBars = model.EnabledBars
 
 // BarDuration 周期 → 时长
 func BarDuration(bar string) time.Duration {

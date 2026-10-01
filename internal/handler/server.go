@@ -10,8 +10,8 @@ package handler
 //   GET  /api/kline         K 线（?inst=&bar=&days=&limit=）
 //   GET  /api/mark          K 线 + 均线/布林（一次性给图表用）
 //   GET  /api/positions     当前持仓（含实时盈亏）
-//   GET  /api/history       历史仓位（?days=3 默认最近 3 天；持仓中的不受天数限制）
-//   GET  /api/events        交易记录详情：逐笔开仓/加仓/平仓流水（?days=3）
+//   GET  /api/history       历史仓位（?days=30 默认最近 30 天；持仓中的不受天数限制）
+//   GET  /api/events        交易记录详情：逐笔开仓/加仓/平仓流水（?days=30）
 //   GET  /api/signals       信号流水
 //   GET  /api/pnl           权益/浮盈曲线
 //   GET  /api/backfill      回补进度 + 覆盖情况

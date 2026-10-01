@@ -16,6 +16,11 @@ package service
 //	⑤ 低点必须落在最后一根之前（先跌 → 后涨，顺序不能反）
 //	⑥ 距上次加仓至少 min_gap_bars 根（同一根 K 线只加一次）
 //
+// ★ 「加满 max_times 就自动平仓」这条出场规则已于 2026-10-01 彻底删除
+//   （用户：「平仓取消掉一个条件，就是加仓次数，这个不需要」）。
+//   现在加满之后只是不再补仓 —— 仓位继续等 +1% 止盈 / 6 小时超时 / 布林上轨，
+//   三条出场通道里没有任何一条跟加仓次数有关。
+//
 // 满足之后按「原保证金 ÷ 3」下单；买不起最小 1 张时沿用 entry.margin_policy
 // 的口径（min_one 放大到刚好 1 张，但绝不超过 max_margin_usdt）。
 //
@@ -46,15 +51,13 @@ type AddonDecision struct {
 	AllMargin float64 // 合并后累计加仓保证金
 	Ts        int64   // 触发用的那根 K 线时间
 	Reason    string
-
-	// Exhausted 加仓条件又成立了，但次数已经加满 —— 这时候不再补仓，
-	// 而是由上层直接平仓出局（「加仓最多三次，超过自动平仓」）。
-	Exhausted bool
 }
 
 // runAddons 对所有在持仓检查加仓条件，满足就补仓。
 //
-// 返回 (加仓成功笔数, 因加满而平掉的仓位 ID 集合)。
+// 返回 (加仓成功笔数, 本轮平掉的仓位 ID 集合)。
+// 注意第二个返回值现在**恒为空** —— 「加满自动平仓」这条规则已删除，
+// 保留签名是为了不动调用方（trader.go）的结构。
 //
 // 传入的 openPos 会被就地更新（张数 / 均价 / 保证金 / 加仓计数），
 // 这样同一轮后面的开仓闸门（总保证金、持仓数）看到的就是最新数据。
@@ -96,17 +99,6 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 		dec, err := checkAddon(cfg, cli, *p, px, bar, durMs)
 		if err != nil {
 			logx.Logf("WARN", "%s 加仓判定失败：%v", p.InstID, err)
-			continue
-		}
-
-		// ★ 加仓加满了，而且加仓信号又出现 → 不再补仓，直接平掉出局。
-		//   这是「不设止损」前提下唯一的亏损离场通道，别把它漏了。
-		if dec.Exhausted {
-			if err := closeOne(cfg, cli, store, *p, px, dec.Reason); err != nil {
-				logx.Logf("ERROR", "%s 加满自动平仓失败，下一轮重试：%v", p.InstID, err)
-				continue
-			}
-			closedIDs[p.ID] = true
 			continue
 		}
 		if !dec.Add {
@@ -173,9 +165,8 @@ func checkAddon(cfg *conf.Config, cli *OKXClient, p repo.OpenPos,
 	if a == nil || !a.Enabled {
 		return AddonDecision{}, nil
 	}
-	// ★ 注意这里**故意不**在次数加满时直接返回空：
-	//   加满了还要继续往下判，因为「加满之后信号再来一次」是要平仓的，
-	//   提前 return 会把这条兜底规则整条吃掉。
+	// 次数加满的判定放在下面第 ⑥ 步（要先确认「加仓信号确实又成立了」，
+	// 否则一个根本没触发的仓位也会被当成「加满」而白跑一遍分支）。
 	if p.EntryPx <= 0 {
 		return AddonDecision{}, nil
 	}
@@ -272,21 +263,12 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 
 	// ⑥ 次数：加满了。
 	//
-	// 走到这里说明「先跌 0.5% → 重新转涨」这套加仓信号**又成立了一次**，
-	// 但三次额度已经用完，说明摊薄均价这一招没能把这笔救回来。
-	// 再往下加就是无底洞，所以这里不再补仓，改为交给上层直接市价平掉。
+	// 「先跌 0.5% → 重新转涨」这套加仓信号又成立了一次，但 3 次额度已经用完。
 	//
-	// （注意：这是「加满之后再触发信号」才平，不是一加满就立刻砍 ——
-	//   否则第三笔加仓刚成交就马上被平掉，白白付两次手续费。）
+	// ★ 2026-10-01 起：加满之后**只是不再补仓**，不再自动平仓。
+	//   用户明确要求取消「加仓次数」这条出场条件 —— 出场只剩三条：
+	//   +1% 止盈 / 6 小时超时 / 布林上轨，没有任何一条看加仓次数。
 	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
-		if a.CloseWhenFull {
-			return AddonDecision{
-				Exhausted: true,
-				Ts:        last.Ts,
-				Reason: fmt.Sprintf("加仓已满 %d 次，信号再次出现仍未回转（现价 %.6f / 均价 %.6f）→ 自动平仓",
-					a.MaxTimes, markPx, p.EntryPx),
-			}
-		}
 		return AddonDecision{}
 	}
 

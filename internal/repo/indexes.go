@@ -71,6 +71,13 @@ var indexPlan = []idxDef{
 	{Table: "trade", Name: "ix_trade_inst_open_ts", Cols: []string{"inst_id", "open_ts"},
 		Note: `SELECT inst_id, MAX(open_ts) FROM trade GROUP BY inst_id`},
 
+	// OKX 历史仓位同步（okxpositions.go）的幂等查找：
+	//   SELECT id FROM trade WHERE pos_id=? AND close_ts=?
+	// **必须带上 close_ts**：OKX 的 posId 在 (合约,方向) 维度上是复用的，
+	// 一个 posId 底下会有几十上百笔独立交易，只按 pos_id 建索引区分不开。
+	{Table: "trade", Name: "ix_trade_pos_ts", Cols: []string{"pos_id", "close_ts"},
+		Note: `SELECT id FROM trade WHERE pos_id=? AND close_ts=?（历史仓位同步去重）`},
+
 	// ------------------------------------------------------------ trade_event
 	// 「最近 N 天买入 / 加仓 / 平仓各多少笔」这类按动作的统计。
 	// 已有 ix_event_ts 只能按时间扫全量再过滤 kind。

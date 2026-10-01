@@ -34,7 +34,7 @@ type StrategyExit struct {
 	TakeProfitPct float64 `json:"take_profit_pct"`
 	BollUpperExit bool    `json:"boll_upper_exit"`
 	// MaxHoldMinutes 超时平仓（分钟）。>0 时优先于 MaxHoldBars。
-	// 用户口径：开仓满 240 分钟（4 小时）还没止盈就自动市价平掉。
+	// 用户口径：开仓满 360 分钟（6 小时）还没止盈就自动市价平掉。
 	MaxHoldMinutes int     `json:"max_hold_minutes"`
 	MaxHoldBars    int     `json:"max_hold_bars"`
 	StopLossPct    float64 `json:"stop_loss_pct"`
@@ -42,14 +42,13 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径：加仓最多 3 次，超过自动平仓。
+//	用户口径：加仓最多 3 次（只限制继续补仓，与出场无关）。
 type StrategyAddon struct {
-	Enabled       bool    `json:"enabled"`
-	Ratio         float64 `json:"ratio"`
-	DropPct       float64 `json:"drop_pct"`
-	RiseBar       string  `json:"rise_bar"`
-	MaxTimes      int     `json:"max_times"`
-	CloseWhenFull bool    `json:"close_when_full"`
+	Enabled  bool    `json:"enabled"`
+	Ratio    float64 `json:"ratio"`
+	DropPct  float64 `json:"drop_pct"`
+	RiseBar  string  `json:"rise_bar"`
+	MaxTimes int     `json:"max_times"`
 }
 
 // StrategyConfig 只取前端要展示的字段
@@ -58,6 +57,7 @@ type StrategyConfig struct {
 	DryRun            bool     `json:"dry_run"`
 	Bar               string   `json:"bar"`
 	BarsEnabled       []string `json:"bars_enabled"`
+	SignalBars        []string `json:"signal_bars"` // 信号回算/图上展示的周期（1m/3m 已下线）
 	ScoreThreshold    int      `json:"score_threshold"`
 	MinQuoteVolume24h float64  `json:"min_quote_volume_24h"`
 	TopNByVolume      int      `json:"top_n_by_volume"`
@@ -94,16 +94,17 @@ type StrategyLive struct {
 func LoadStrategy(path string) (*StrategyConfig, error) {
 	def := &StrategyConfig{
 		Enabled: true, DryRun: true, Bar: "15m",
-		BarsEnabled: []string{"15m"}, ScoreThreshold: 6,
+		BarsEnabled: []string{"15m"}, SignalBars: []string{"15m"},
+		ScoreThreshold: 6,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		ExcludeStockETF: true, ExcludeNewListingDays: 30, ExcludeDelisting: true,
-		MaxOrderMarginUSDT: 0.5,
+		MaxOrderMarginUSDT: 1.0,
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
-			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 8,
-			CooldownBars: 6, DailyMaxEntries: 30, MarginPolicy: "min_one", MaxMarginUSDT: 0.5},
-		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 240},
+			MarginUSDT: 1.0, Leverage: 20, MaxConcurrentPositions: 8,
+			CooldownBars: 6, DailyMaxEntries: 30, MarginPolicy: "min_one", MaxMarginUSDT: 1.5},
+		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 360},
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
-			RiseBar: "15m", MaxTimes: 3, CloseWhenFull: true},
+			RiseBar: "15m", MaxTimes: 3},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,
 	}

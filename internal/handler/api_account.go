@@ -213,7 +213,10 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 // 这里只取「当前页」，但 sumPnl / winRate 是用聚合 SQL 对整个窗口算的
 // —— 否则胜率会随着翻页变化，那是明显的错。
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, error) {
-	days := atoiDefault(r.URL.Query().Get("days"), 3)
+	// ★ 默认窗口 3 天 → 30 天（2026-10-01）。
+	//   用户口径：「只保留最近 30 天的数据」，那展示窗口就该和保留窗口对齐，
+	//   否则明明留着 30 天却只看得到 3 天，看起来就像「数据丢了 / 分页少了」。
+	days := atoiDefault(r.URL.Query().Get("days"), 30)
 	var since int64
 	if days > 0 {
 		since = time.Now().AddDate(0, 0, -days).UnixMilli()
@@ -315,7 +318,8 @@ func pagesOf(total int64, size int) int {
 //
 // kind 参数可以只看某一类动作（open / addon / close），表头统计始终覆盖全部。
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) (any, error) {
-	days := atoiDefault(r.URL.Query().Get("days"), 3)
+	// 默认窗口同样对齐「保留 30 天」的口径（原为 3 天）。
+	days := atoiDefault(r.URL.Query().Get("days"), 30)
 	since := int64(0)
 	if days > 0 {
 		since = time.Now().AddDate(0, 0, -days).UnixMilli()
@@ -443,14 +447,15 @@ type pnlPoint struct {
 //
 // 参数：
 //
-//	days  只看最近多少天（默认 7，前端画「最近一周」；传 0 = 不限）
+//	days  只看最近多少天（默认 30，和「只保留 30 天」的保留窗口一致；
+//	      早期默认 7 天，但既然数据就留 30 天，多给点更有参考价值。传 0 = 不限）
 //	limit 最多取多少行原始快照（默认 20000）
 //	max   抽稀后最多返回多少个点（默认 1500）
 //
 // 为什么要抽稀：引擎每 3 秒写一条权益快照，一周就是 20 万条 ——
 // 直接塞给前端画图，浏览器会卡死。这里按等间隔抽，首尾必留。
 func (s *Server) handlePnl(w http.ResponseWriter, r *http.Request) (any, error) {
-	days := atoiDefault(r.URL.Query().Get("days"), 7)
+	days := atoiDefault(r.URL.Query().Get("days"), 30)
 	if r.URL.Query().Get("days") == "0" {
 		days = 0
 	}

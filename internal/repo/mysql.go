@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -236,6 +237,7 @@ var schemaStmts = []string{
 		pnl_pct  DOUBLE   DEFAULT 0,
 		reason   VARCHAR(255) DEFAULT '',
 		ord_id   VARCHAR(64)  DEFAULT '',
+		pos_id   VARCHAR(64)  DEFAULT '',
 		status   VARCHAR(16)  DEFAULT 'open',
 		score    INT      DEFAULT 0,
 		bar      VARCHAR(4)   DEFAULT '',
@@ -412,6 +414,12 @@ var schemaStmts = []string{
 type DB struct {
 	sql *sql.DB
 	cfg MySQLConfig
+
+	// tblCache / tblMu：表是否存在的查询缓存。
+	// retention.go 的清理清单会在每次运行时逐表判断存在性，
+	// 每次都去查 information_schema 是没必要的（一进程内表不会凭空出现/消失）。
+	tblMu    sync.Mutex
+	tblCache map[string]bool
 }
 
 // OpenMySQL 连库 + 建表
@@ -473,6 +481,10 @@ func (d *DB) migrate() error {
 		{"trade", "addon_count", "INT DEFAULT 0"},
 		{"trade", "addon_margin", "DOUBLE DEFAULT 0"},
 		{"trade", "last_addon_ts", "BIGINT DEFAULT 0"},
+		// pos_id：OKX 的仓位 ID。历史仓位同步（okxpositions.go）靠它做幂等 ——
+		// 同一个仓位反复同步只会 UPDATE，不会插出重复行。
+		// 引擎自己下的单拿不到 posId，先留空，等同步时按「合约 + 开仓时间」认领。
+		{"trade", "pos_id", "VARCHAR(64) DEFAULT '' AFTER ord_id"},
 	}
 	for _, m := range migs {
 		if err := d.ensureColumn(m.table, m.col, m.def); err != nil {

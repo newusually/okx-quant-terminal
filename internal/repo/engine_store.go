@@ -468,33 +468,34 @@ func (s *Store) Counters(dayStartMs int64) (*Counters, error) {
 	return c, nil
 }
 
-// Cleanup 滚动清理（kline 只保留最近 N 天、runlog 7 天、equity 90 天、ai_call 30 天）
+// Cleanup 滚动清理 —— **只做便宜的那一半**。
+//
+// 调用方是 trader 的「每 20 轮一次」（≈ 20 分钟），所以这里绝不能跑贵的活。
+//
+// ★ 为什么把 CleanupKlines 从这里摘掉 ★
+// CleanupKlines 是「每个 (合约,周期) 定位第 N 根 + 一条分区表 DELETE」，
+// 479 合约 × 4 周期 = 1900 多轮，在这个 2 核 2G 的机器上实测要 **99 秒**。
+// 挂在 20 分钟一次的路径上 ≈ 每 20 分钟把数据库和 CPU 按住两分钟不放 ——
+// 表现就是 K 线迟迟不更新、出场巡检 (live.exitPass) 从 3 秒涨到 26 秒。
+//
+// K 线裁剪现在只由 service.StartMaintenance 一家负责 —— 但那已经不是
+// 「每次顺手裁一遍」，而是 ①写入前 trimToWindow 保证不超窗口、
+// ②每年一次的年度任务按 DROP PARTITION 整段扔掉超 365 天的分区。
+// 两条路径都不在交易主链上。
+//
+// PurgeExpired 留着是因为它便宜：每张表一条 `DELETE ... LIMIT 2000`，
+// 没超期数据时走索引立刻返回，不会伤到交易循环。
 func (s *Store) Cleanup() error {
 	db, err := s.open()
 	if err != nil {
 		return err
 	}
-	// 「天」而不是「根数」：1m 一天 1440 根、4H 一天 6 根，
-	// 用同一个根数会得到「1m 只留 3 天、4H 留 27 年」这种畸形结果。
-	days := s.cfg.Store.KeepKlineDays
-	if days <= 0 {
-		days = 30 // 兜底：至少留一个月
-	}
-	if _, err := db.CleanupKlines(days); err != nil {
-		return err
-	}
-	now := time.Now().UnixMilli()
-	if _, err := db.sql.Exec(`DELETE FROM runlog WHERE ts < ?`, now-7*86400*1000); err != nil {
-		return err
-	}
-	if _, err := db.sql.Exec(`DELETE FROM equity WHERE ts < ?`, now-90*86400*1000); err != nil {
-		return err
-	}
-	if _, err := db.sql.Exec(`DELETE FROM ai_call WHERE ts < ?`, now-30*86400*1000); err != nil {
-		return err
-	}
-	return nil
+	_, err = db.PurgeExpired(RetainDays())
+	return err
 }
+
+// DB 暴露底层连接（service 层的清理程序 / 诊断工具有时需要直接下 SQL）
+func (s *Store) DB() (*DB, error) { return s.open() }
 
 // State 总览（给网页用）
 func (s *Store) State() (map[string]interface{}, error) {

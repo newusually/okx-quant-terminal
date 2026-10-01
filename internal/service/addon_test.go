@@ -134,6 +134,11 @@ func TestAddon_SkipWhenLastCandleBearish(t *testing.T) {
 	t.Log("✓ 场景C 跌够但未转涨 → 不加")
 }
 
+// TestAddon_SkipAtMaxTimes 加满之后只「不再补仓」，绝不平仓。
+//
+// ★ 2026-10-01 口径变更：用户要求取消「加仓次数」这条出场条件。
+//   加满 max_times 之后信号再次成立 → 什么也不做，仓位继续等
+//   +1% 止盈 / 6 小时超时 / 布林上轨。出场通道里没有一条看加仓次数。
 func TestAddon_SkipAtMaxTimes(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
@@ -149,14 +154,7 @@ func TestAddon_SkipAtMaxTimes(t *testing.T) {
 	if d.Add {
 		t.Fatalf("已达 max_times=3，不该再加仓")
 	}
-	// 默认 close_when_full=true：加满了、信号又成立 → 本轮应当转为「平仓」
-	if !d.Exhausted {
-		t.Fatalf("加满 3 次后信号再次成立，应当 Exhausted=true（触发自动平仓）")
-	}
-	if d.Reason == "" {
-		t.Fatalf("Exhausted 时必须给平仓原因")
-	}
-	t.Logf("✓ 场景D 加仓次数已满 → 不再加仓，转自动平仓：%s", d.Reason)
+	t.Log("✓ 场景D 加仓次数已满 → 不加仓、也不平仓（出场不再看加仓次数）")
 }
 
 // TestAddon_MaxTimesNotReachedStillAdds 确认「没加满就照常加」没被上面的规则误伤。
@@ -175,33 +173,10 @@ func TestAddon_MaxTimesNotReachedStillAdds(t *testing.T) {
 	if !d.Add {
 		t.Fatalf("只加过 2 次（上限 3），条件成立就该继续加")
 	}
-	if d.Exhausted {
-		t.Fatalf("没加满时不该走到平仓分支")
-	}
 	if d.Count != 3 {
 		t.Fatalf("合并后加仓次数应为 3，实际 %d", d.Count)
 	}
 	t.Log("✓ 场景D2 未加满 → 正常加仓，count=3")
-}
-
-// TestAddon_CloseWhenFullOff 「关掉加满就平」时应当只是不加，不动仓位。
-func TestAddon_CloseWhenFullOff(t *testing.T) {
-	cfg := mkAddonCfg()
-	cfg.Addon.Enabled = true
-	cfg.Addon.MaxTimes = 3
-	cfg.Addon.CloseWhenFull = false
-	p := basePos(1.6000)
-	p.AddonCount = 3
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950},
-	)
-	d := decideAddon(cfg, p, 1.5950, win, barMs, mkIns())
-	if d.Add || d.Exhausted {
-		t.Fatalf("close_when_full=false 时既不该加仓、也不该平仓")
-	}
-	t.Log("✓ 场景D3 close_when_full=false → 什么都不做")
 }
 
 func TestAddon_SkipWhenDisabled(t *testing.T) {

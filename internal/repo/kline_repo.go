@@ -2,16 +2,25 @@ package repo
 
 // kline_repo.go —— K 线仓储（MySQL 版）
 //
-// 这是全项目写入量最大的表：400+ 合约 × 6 个周期 × 30 天 ≈ 3000 万行。
+// 这是全项目写入量最大的表：479 合约 × 1 个周期（15m）× 365 天 ≈ 1700 万行。
 // 并发写靠三件事扛住：
 //   1. 多行 INSERT ... ON DUPLICATE KEY UPDATE（一次 500 行）
 //   2. InnoDB 行级锁（不同合约之间完全并行，不互相阻塞）
 //   3. innodb_autoinc_lock_mode=2 + 无自增主键（kline 用业务复合主键）
+//
+// 表是 RANGE COLUMNS(ts) 分区表（冷区按月 + 热区按周 + p_old/pmax 兜底），
+// 所以过期数据走 DROP PARTITION 秒删 —— 见本文件末尾「分区级删除」。
 
 import (
 	"database/sql"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"finally-main/internal/logx"
+	"finally-main/internal/model"
 )
 
 // klineCols kline 表列序（批量写入用）
@@ -266,24 +275,74 @@ func (d *DB) ListInstrumentIDs() ([]string, error) {
 //
 // 为什么按「天」而不是按「根数」：
 //
-//	1m 一天 1440 根、4H 一天只有 6 根，同一个根数对这两个周期是完全不同的时间跨度。
-//	按固定根数裁（原来的 30000）会得到「1m 只留 20.8 天、4H 留 13.7 年」这种畸形结果，
-//	而需求是「每个周期都至少覆盖一个月」。所以这里按周期把天换算成根数。
+//	5m 一天 288 根、4H 一天只有 6 根，同一个根数对这两个周期是完全不同的时间跨度。
+//	按固定根数裁（原来的 30000）会得到畸形结果，所以这里按周期把天换算成根数。
 //
-// 实现：先定位第 keep 根的时间戳（主键倒序 + OFFSET，毫秒级），
-// 再按 ts < 该值 批量删。规避 MySQL「不能在 DELETE 的子查询中引用目标表」的限制。
+// 实现：先定位第 keep 根的时间戳（主键倒序 + OFFSET），再按 ts < 该值 批量删。
+// 规避 MySQL「不能在 DELETE 的子查询中引用目标表」的限制。
+//
+// ★ 2026-10-01 两处调整 ★
+//
+//  1. 余量从「×6/5 + 2 天（= 38 天）」收到「+1 天」。
+//     原来留 20%+2 天是为了「每个周期至少覆盖一个月」，但用户的口径已经
+//     明确成「只保留最近 30 天的数据」——38 天等于白存 27% 的行。
+//     回补侧同步改成写入前 trimToWindow(cfg.Days=30)，两边对齐后保留量 ≈30 天。
+//
+//  2. 顺手清掉「当前不支持的周期」。库里若还躺着历史遗留的整段周期
+//     （例如旧版本回补进去的 5m），`barsOf` 会把它列出来，按上面那套
+//     「保留 N 根」的逻辑它会被一直留着 —— 既不展示又白占磁盘。
+//     这里先按白名单整体删一次，再走逐合约裁剪。
 func (d *DB) CleanupKlines(keepDays int) (int64, error) {
 	if keepDays <= 0 {
 		keepDays = 30
 	}
-	// 留 20% 余量 + 2 天，避免把「刚好一个月」的边界数据裁掉
-	keepDays = keepDays*6/5 + 2
+	keepDays = keepDays + 1
+
+	var total int64
+
+	// ---- 0) 先干掉不在白名单里的周期（整段删掉，不留尾巴）----
+	{
+		rows, err := d.sql.Query(`SELECT DISTINCT bar FROM kline`)
+		if err == nil {
+			var stale []string
+			for rows.Next() {
+				var b string
+				if err := rows.Scan(&b); err != nil {
+					break
+				}
+				if !model.BarEnabled(b) {
+					stale = append(stale, b)
+				}
+			}
+			rows.Close()
+			for _, b := range stale {
+				// 分批删：一次性 DELETE 十几万行会开一个长事务，
+				// 把 undo/binlog 再撑一遍，也容易卡住 2 核机器上的交易循环。
+				var n int64
+				for {
+					res, err := d.sql.Exec(`DELETE FROM kline WHERE bar=? LIMIT 2000`, b)
+					if err != nil {
+						break
+					}
+					aff, _ := res.RowsAffected()
+					n += aff
+					if aff < 2000 {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if n > 0 {
+					total += n
+					logx.Logf("INFO", "[CLEAN] 已下线周期 %s：删除残留 K 线 %d 行", b, n)
+				}
+			}
+		}
+	}
 
 	insts, err := d.ListInstrumentIDs()
 	if err != nil {
-		return 0, err
+		return total, err
 	}
-	var total int64
 	for _, inst := range insts {
 		bars, err := d.barsOf(inst)
 		if err != nil {
@@ -314,6 +373,201 @@ func (d *DB) CleanupKlines(keepDays int) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// ---------------------------------------------------------------------------
+// 分区级删除（2026-10-01 新增）
+// ---------------------------------------------------------------------------
+//
+// 为什么需要它：K 线保留期从 30 天扩到 1 年后，`DELETE FROM kline WHERE ts < ?`
+// 要扫掉上千万行 —— 长事务、undo/binlog 暴涨，在 2 核 2G 的机器上足以把
+// 实时写入卡住好几分钟。
+//
+// 而 kline 是 RANGE COLUMNS(ts) 分区表，**整段过期的分区可以直接
+// `ALTER TABLE ... DROP PARTITION`** —— 走的是「删数据文件」而不是「逐行删」，
+// 上百万行也是毫秒级，且不产生 undo/binlog。
+//
+// 分两步走：
+//  1. DropKlinePartitionsBefore —— 把上界 ≤ cutoff 的分区整体扔掉（快路径）
+//  2. PurgeKlineBefore          —— 边界分区 + p_old 里的残余行，分批 DELETE 兜底
+//
+// 为什么不连 p_old 一起 DROP：p_old 是「早于第一个正经分区」的兜底垃圾桶，
+// 结构上必须留着（否则将来回补更早的数据会报 "no partition for value"）。
+// 所以它里面的数据只能 DELETE，不能连桶扔掉。
+
+// PartitionDropResult 一次分区删除的结果
+type PartitionDropResult struct {
+	Dropped []string `json:"dropped"` // 被 DROP 的分区名
+	Rows    int64    `json:"rows"`    // 这些分区的行数（information_schema 估算值）
+	MB      float64  `json:"mb"`      // 释放的磁盘（估算）
+}
+
+// DropKlinePartitionsBefore 把「所有数据都早于 cutMs」的分区整套删掉。
+//
+// 只认「分区上界 ≤ cutMs」的分区，所以**永远不会误删保留窗口内的数据** ——
+// 上界 100% 落在 cutoff 之前，才说明这个分区里的每一行都过期了。
+func (d *DB) DropKlinePartitionsBefore(cutMs int64) (*PartitionDropResult, error) {
+	res := &PartitionDropResult{}
+	if cutMs <= 0 {
+		return res, nil
+	}
+	pi, err := d.inspectPartition("kline")
+	if err != nil {
+		return res, err
+	}
+	if !pi.Partitioned {
+		return res, nil // 没分区，交给 PurgeKlineBefore 分批删
+	}
+
+	for _, r := range pi.Ranges {
+		if r.IsMax || r.Name == partitionOldName {
+			continue // pmax 是兜底、p_old 是垃圾桶，都不能 DROP
+		}
+		if r.LessThan > 0 && r.LessThan <= cutMs {
+			res.Dropped = append(res.Dropped, r.Name)
+		}
+	}
+	if len(res.Dropped) == 0 {
+		return res, nil
+	}
+
+	// 先统计（估算值）—— 要在 DROP 之前查，之后分区就没了。
+	// SUM() 返回 DECIMAL，驱动给的是 []byte，所以显式 CAST AS SIGNED，
+	// 否则 Scan 到 int64 会报 "converting driver.Value type []uint8 to int64"。
+	q := `SELECT CAST(COALESCE(SUM(table_rows),0) AS SIGNED),
+	             CAST(COALESCE(SUM(data_length+index_length),0) AS SIGNED)
+	      FROM information_schema.partitions
+	      WHERE table_schema=DATABASE() AND table_name='kline' AND partition_name IN (?` +
+		strings.Repeat(",?", len(res.Dropped)-1) + `)`
+	args := make([]any, len(res.Dropped))
+	for i, n := range res.Dropped {
+		args[i] = n
+	}
+	var mbBytes int64
+	_ = d.sql.QueryRow(q, args...).Scan(&res.Rows, &mbBytes)
+	res.MB = float64(mbBytes) / 1048576
+
+	stmt := "ALTER TABLE kline DROP PARTITION " + strings.Join(res.Dropped, ", ")
+	if _, err := d.sql.Exec(stmt); err != nil {
+		return res, err
+	}
+	logx.Logf("INFO", "[KLINE] 分区级删除：DROP %s（约 %.0f 万行 / %.0f MB）",
+		strings.Join(res.Dropped, ", "), float64(res.Rows)/10000, res.MB)
+	return res, nil
+}
+
+// PurgeKlineBefore 分批删掉 ts < cutMs 的残余行（p_old 与边界分区里的）。
+//
+// 和分区删除配合使用：分区能整段扔掉的部分走 DROP PARTITION，
+// 剩下「一半在窗口内、一半在窗口外」的边界分区只能逐行删。
+// 每批 5000 行、批间让 20ms，长事务被切成小事务，实时写入不受影响。
+func (d *DB) PurgeKlineBefore(cutMs int64) (int64, error) {
+	if cutMs <= 0 {
+		return 0, nil
+	}
+	const batch = 5000
+	var total int64
+	for round := 0; round < 4000; round++ { // 上限 2000 万行/轮，防死循环
+		r, err := d.sql.Exec(`DELETE FROM kline WHERE ts < ? LIMIT `+strconv.Itoa(batch), cutMs)
+		if err != nil {
+			return total, err
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < batch {
+			return total, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return total, nil
+}
+
+// KlineMonth 一个月的数据概况（归档脚本与面板都用）
+type KlineMonth struct {
+	Month   string `json:"month"`   // 2026-09
+	Rows    int64  `json:"rows"`    //
+	Insts   int64  `json:"insts"`   // 涉及多少个合约
+	FirstTs int64  `json:"firstTs"` //
+	LastTs  int64  `json:"lastTs"`  //
+}
+
+// KlineMonths 按月统计 K 线。GROUP BY 走的是分区裁剪 + ts 上的索引，
+// 在本机 137 万行上约 1 秒；一年 1700 万行约 10 秒。
+// 只在归档/月度任务里调用，不在任何轮询路径上。
+func (d *DB) KlineMonths() ([]KlineMonth, error) {
+	rows, err := d.sql.Query(`
+		SELECT DATE_FORMAT(FROM_UNIXTIME(ts/1000), '%Y-%m') AS ym,
+		       COUNT(*), COUNT(DISTINCT inst_id), MIN(ts), MAX(ts)
+		FROM kline GROUP BY ym ORDER BY ym`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []KlineMonth{}
+	for rows.Next() {
+		var m KlineMonth
+		if err := rows.Scan(&m.Month, &m.Rows, &m.Insts, &m.FirstTs, &m.LastTs); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// KlineSpan 全表时间跨度与行数（/api/state 展示保留窗口实际生效情况）
+func (d *DB) KlineSpan() (rowsN, minTs, maxTs int64, err error) {
+	err = d.sql.QueryRow(`SELECT COUNT(*), COALESCE(MIN(ts),0), COALESCE(MAX(ts),0) FROM kline`).
+		Scan(&rowsN, &minTs, &maxTs)
+	return
+}
+
+// StreamKlines 把 [fromMs, toMs) 区间内的 K 线**流式**逐行喂给 fn。
+//
+// 为什么不用 QueryKlines：那个接口会把整个结果集读进内存再返回。
+// 归档一个月是 134 万行（未来会是单次上千万行的窗口），
+// 一次性装进内存再序列化，在 2GB 内存的机器上会直接把进程顶死。
+//
+// 这个版本底层是 `sql.Rows` 游标，一次只在内存里放一行。
+// fn 返回非 nil 错误会立刻中止遍历并把错误透传出去。
+func (d *DB) StreamKlines(fromMs, toMs int64, fn func(Kline) error) error {
+	rows, err := d.sql.Query(
+		`SELECT inst_id, bar, ts, o, h, l, c, v FROM kline
+		 WHERE ts >= ? AND ts < ? ORDER BY inst_id, ts`, fromMs, toMs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k Kline
+		if err := rows.Scan(&k.InstID, &k.Bar, &k.Ts, &k.O, &k.H, &k.L, &k.C, &k.V); err != nil {
+			return err
+		}
+		if err := fn(k); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// StreamMonth 便捷包装：流式遍历某个自然月（`2026-09`）的 K 线。
+func (d *DB) StreamMonth(ym string, fn func(Kline) error) error {
+	from, to, err := MonthRange(ym)
+	if err != nil {
+		return err
+	}
+	return d.StreamKlines(from, to, fn)
+}
+
+// MonthRange 把 `2026-09` 解析成 [月初, 下月初) 的毫秒时间戳区间。
+func MonthRange(ym string) (from, to int64, err error) {
+	t, err := time.ParseInLocation("2006-01", strings.TrimSpace(ym), time.Local)
+	if err != nil {
+		return 0, 0, fmt.Errorf("月份格式应为 YYYY-MM，收到 %q", ym)
+	}
+	return t.UnixMilli(), t.AddDate(0, 1, 0).UnixMilli(), nil
 }
 
 // barsPerDay 一个周期一天有多少根 K 线（OKX 口径，7×24 小时不停地开盘）

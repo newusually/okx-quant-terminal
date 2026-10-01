@@ -8,7 +8,7 @@ const state = {
   curInst: '',
   curBar: '15m',
   days: 30,
-  bars: ['1m', '3m', '5m', '15m', '1H', '4H'],
+  bars: ['15m'],   // 全库只保留 15m：4H/1H/5m（以及更早的 1m/3m）已彻底下线
   marginText: '',
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
   universe: null,       // 准入统计 {total,kept,dropped,byReason}
@@ -128,7 +128,7 @@ function renderPager(key, total, onGo) {
 }
 
 // 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
-const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3, '1H': 3600e3, '4H': 14400e3 };
+const BAR_MS = { '15m': 900e3 };
 
 // 币安配色：涨绿跌红
 const C_UP = '#0ecb81', C_DOWN = '#f6465d';
@@ -653,8 +653,10 @@ function renderServiceInfo(st) {
   const sa = (st.strategy && st.strategy.addon) || {};
   const addonTxt = sa.enabled === false
     ? '关闭'
-    : `最多 ${sa.max_times || '--'} 次${sa.close_when_full ? '（满则平仓）' : ''}`;
-  // 超时平仓：240 → "4 小时"。整数小时就说小时，否则说分钟，和后台的
+    // ★ 2026-10-01 起「加满自动平仓」已删除 —— 加仓次数只限制还能补几次，
+    //   不再是出场条件，所以这里不再显示「满则平仓」。
+    : `最多 ${sa.max_times || '--'} 次（只限制补仓，不影响出场）`;
+  // 超时平仓：360 → "6 小时"。整数小时就说小时，否则说分钟，和后台的
   // HoldText() 口径一致（以前后台写「60 分钟」、网页写「1 小时」，两边对不上）。
   const holdTxt = sx.max_hold_minutes > 0
     ? (sx.max_hold_minutes % 60 === 0 && sx.max_hold_minutes >= 60
@@ -665,11 +667,23 @@ function renderServiceInfo(st) {
     ['每笔保证金', state.marginText || '--'],
     ['策略周期', (st.strategy && st.strategy.bar) || '--'],
     ['扫描周期', ((st.strategy && st.strategy.bars_enabled) || []).join(' / ') || '--'],
+    ['信号周期', ((st.strategy && st.strategy.signal_bars) || []).join(' / ') || '--'],
+    // 出场条件三条一起列出来，一眼能看出「没有任何一条跟加仓次数有关」
+    ['出场条件', `止盈 ${(sx.take_profit_pct != null ? sx.take_profit_pct : '--')}% · 超时 ${holdTxt}` +
+      (sx.boll_upper_exit ? ' · 布林上轨' : '')],
     ['止盈', (sx.take_profit_pct != null ? sx.take_profit_pct : '--') + '%'],
     ['止损', sx.stop_loss_pct > 0 ? sx.stop_loss_pct + '%' : '不设'],
     ['超时平仓', holdTxt],
+    ['布林上轨平仓', sx.boll_upper_exit ? '开' : '关'],
     ['加仓', addonTxt],
     ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8'],
+    // 三条独立红线（2026-10-01 起）：
+    //   记录表 30 天 → 月度任务里清；K 线 365 天 → 年度任务里清；日志 30 天 → 月度任务里清
+    ['记录保留', String(st.retainDays || 30) + ' 天（月度清理）'],
+    ['K线保留', String(st.klineRetainDays || 365) + ' 天（年度清理）'],
+    ['日志保留', String(st.logRetainDays || 30) + ' 天（月度清理）'],
+    ['磁盘守卫', (st.archiveMinFreeGB || 10) + ' GB 以下只留当月 · 当前可用 ' +
+      (st.freeDiskGB != null ? st.freeDiskGB.toFixed(1) : '--') + ' GB'],
     ['回补天数', String(st.backfillDays) + ' 天'],
     ['队列', String(st.queueLen)],
     ['在线时长', Math.floor((st.uptimeSec || 0) / 60) + ' 分'],
@@ -1202,7 +1216,7 @@ async function loadKline(reset) {
 }
 
 // 各周期的轮询间隔：短周期勤一点，长周期没必要
-const REFRESH_MS = { '1m': 4000, '3m': 5000, '5m': 6000, '15m': 8000, '1H': 15000, '4H': 30000 };
+const REFRESH_MS = { '15m': 8000 };
 
 function scheduleKlineRefresh() {
   if (klineTimer) clearTimeout(klineTimer);
@@ -1303,13 +1317,22 @@ async function loadPositions() {
   $('stPos').textContent = rows.length;
 }
 
+// ★ 历史窗口：30 天（2026-10-01 由 3 天改为 30 天）。
+//
+// 为什么改：本地 trade 表原来只记「程序自己下的单」，一共 8 条，
+// 用户看历史面板就 8 行、还以为分页被切了。现在两件事一起做：
+//   ① 后端每 10 分钟从 OKX /api/v5/account/positions-history 同步真实平仓仓位
+//      （3 个月窗口，实测 100+ 个仓位 / 8000+ 笔成交）；
+//   ② 前端窗口从 3 天放宽到 30 天，和「只保留最近 30 天」的保留策略对齐。
+// 分页照旧走服务端，page/size 由 #pagerHistory 控制，能一直往后翻。
+const HIST_DAYS = 30;
+
 async function loadHistory() {
-  // 最近 3 天（用户口径：「历史持仓要最近 3 天的，只显示当下不行」）。
   // 持仓中的仓位不受天数限制 —— 开了 5 天还没平，它仍然是当前持仓。
   //
   // 分页在服务端：只把当前这一页拉下来（默认 20 条），不再整批传。
   const st = pgState('history');
-  const j = await api(`/api/history?days=3&size=${st.size}&page=${st.page}`);
+  const j = await api(`/api/history?days=${HIST_DAYS}&size=${st.size}&page=${st.page}`);
   state.historyRows = j.list || [];
   renderHistory(j);
 }
@@ -1322,7 +1345,7 @@ function renderHistory(meta) {
 
   const tb = $('tbHistory');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="12" class="empty">最近 3 天暂无交易记录 —— 引擎出信号开仓后会立刻出现在这里</td></tr>';
+    tb.innerHTML = '<tr><td colspan="12" class="empty">最近 30 天暂无交易记录 —— 引擎出信号开仓后会自动出现在这里；OKX 上的历史仓位每 10 分钟同步一次</td></tr>';
     renderPager('history', total, loadHistory);
     return;
   }
@@ -1368,10 +1391,10 @@ function renderHistory(meta) {
 
 async function loadEvents() {
   // 服务端分页：一次只取当前页，表头统计（笔数/已实现盈亏）由后端对
-  // 整个 3 天窗口聚合，不受当前页影响。
+  // 整个 30 天窗口聚合，不受当前页影响。
   const st = pgState('events');
   const kind = state.evKind || '';
-  const j = await api(`/api/events?days=3&size=${st.size}&page=${st.page}` +
+  const j = await api(`/api/events?days=${HIST_DAYS}&size=${st.size}&page=${st.page}` +
     (kind ? `&kind=${encodeURIComponent(kind)}` : ''));
   state.eventRows = j.list || [];
   renderEvents(j);
@@ -1389,14 +1412,14 @@ function renderEvents(meta) {
 
   const m = $('eventsMeta');
   if (m) {
-    m.innerHTML = `最近 3 天 · 共 <b>${openN + addonN + closeN}</b> 笔：` +
+    m.innerHTML = `最近 ${HIST_DAYS} 天 · 共 <b>${openN + addonN + closeN}</b> 笔：` +
       `买入 <b>${openN}</b> · 加仓 <b style="color:#3b82f6">${addonN}</b> · 平仓 <b>${closeN}</b>` +
       ` · 已实现盈亏 <b class="${pnlSum >= 0 ? 'up' : 'down'}">${fmtNum(pnlSum, 4)} U</b>`;
   }
 
   const tb = $('tbEvents');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="10" class="empty">最近 3 天暂无交易明细</td></tr>';
+    tb.innerHTML = '<tr><td colspan="10" class="empty">最近 30 天暂无交易明细</td></tr>';
     renderPager('events', total, loadEvents);
     return;
   }
@@ -1509,9 +1532,10 @@ function renderBackfill() {
 }
 
 async function loadPnl() {
-  // 只看最近一周（引擎每 3 秒写一条快照，一周原始点约 20 万个，
-  // 后端会抽稀到 1500 点再返回，不然浏览器画不动）
-  const j = await api('/api/pnl?days=7');
+  // 最近 30 天（和「只保留最近 30 天」的保留窗口一致；引擎每 3 秒写一条快照，
+  // 30 天原始点约 86 万个，后端先按天窗口过滤再抽稀到 1500 点，
+  // 不然浏览器画不动）
+  const j = await api(`/api/pnl?days=${HIST_DAYS}`);
   const rows = j.list || [];
   state.pnlData = rows;
   const empty = $('pnlEmpty');
@@ -1523,7 +1547,7 @@ async function loadPnl() {
   }
   empty.classList.add('hidden');
   state.pnlLine.setData(rows.map((p) => ({ time: Math.floor(p.ts / 1000), value: p.totalEq || 0 })));
-  // 权益快照是从引擎上线那一刻才开始累积的，还没满一周就如实写出来，
+  // 权益快照是从引擎上线那一刻才开始累积的，还没满 30 天就如实写出来，
   // 免得用户以为曲线画错了或者数据丢了。
   const meta = $('pnlMeta');
   if (meta) {
@@ -1532,7 +1556,7 @@ async function loadPnl() {
     const spanH = (t1 - t0) / 3600000;
     const spanTxt = spanH >= 48 ? (spanH / 24).toFixed(1) + ' 天' : spanH.toFixed(1) + ' 小时';
     meta.textContent =
-      `最近一周 · ${rows.length} 个采样点（${fmtShort(t0)} → ${fmtShort(t1)}，跨度 ${spanTxt}）` +
+      `最近 ${HIST_DAYS} 天 · ${rows.length} 个采样点（${fmtShort(t0)} → ${fmtShort(t1)}，跨度 ${spanTxt}）` +
       (j.rawCount > rows.length ? ` · 原始 ${j.rawCount} 点已抽稀` : '');
   }
   // 只在第一次铺满视野：之后每 10 秒轮询不再 fitContent，

@@ -48,9 +48,8 @@ type ExitCfg struct {
 	MaxHoldBars int `json:"max_hold_bars"`
 
 	// MaxHoldMinutes 超时平仓（按「分钟」算）。>0 时优先于 MaxHoldBars。
-	// 默认 240 —— 也就是「开仓满 4 小时还没到止盈线就自动平掉」，
+	// 默认 360 —— 也就是「开仓满 6 小时还没到止盈线就自动平掉」，
 	// 免得仓位在里面耗着占额度。实时巡检每 3 秒判一次，到点立刻市价出。
-	// 这是「不设止损」口径下第二条主动离场通道（第一条是布林上轨）。
 	MaxHoldMinutes int `json:"max_hold_minutes"`
 
 	StopLossPct float64 `json:"stop_loss_pct"`
@@ -81,14 +80,10 @@ type AddonCfg struct {
 	LookbackBars int `json:"lookback_bars"`
 
 	// MaxTimes 每个仓位最多加几次。默认 3。
-	MaxTimes int `json:"max_times"`
-
-	// CloseWhenFull 加满 MaxTimes 之后，加仓信号再次出现时是否直接平仓。
 	//
-	// true（默认）= 「加仓最多三次，超过自动平仓」：说明摊薄均价没救回来，
-	//                再补就是无底洞，直接市价出局。
-	// false        = 加满就不再加，仓位继续挂着等止盈 / 超时平仓。
-	CloseWhenFull bool `json:"close_when_full"`
+	// ★ 注意：这只限制「还能不能继续补仓」，**不是**出场条件。
+	//   2026-10-01 起「加满就自动平仓」那条规则已删除（用户要求取消）。
+	MaxTimes int `json:"max_times"`
 
 	// MinGapBars 两次加仓之间至少隔多少根 RiseBar。默认 1。
 	MinGapBars int `json:"min_gap_bars"`
@@ -152,14 +147,63 @@ type StoreCfg struct {
 	MaxIdleConns int `json:"max_idle_conns"`
 	BatchSize    int `json:"batch_size"` // 批量写入分片大小
 
-	// KeepKlineDays 每个 (合约,周期) 只保留最近这么多天的 K 线。
+	// KeepKlineDays 旧字段（K 线保留天数），已被 KlineRetainDays 取代。
 	//
+	// 只在老配置里出现时做兜底：KlineRetainDays 没写就沿用它。
 	// 用「天」而不是「根数」：1m 一天 1440 根、4H 一天 6 根，
-	// 同一个根数对两个周期是完全不同的时间跨度。留 0 表示按 30 天兜底。
+	// 同一个根数对两个周期是完全不同的时间跨度。
 	KeepKlineDays int `json:"keep_kline_days"`
 
 	// KeepKlineBars 旧字段（按根数），已废弃，只在老配置里出现时做换算兜底。
 	KeepKlineBars int `json:"keep_kline_bars,omitempty"`
+
+	// KlineRetainDays **K 线**保留窗口（天），默认 365。
+	//
+	// ★ 2026-10-01 用户口径：「15 分钟一年数据保留」★
+	//   K 线从 30 天扩到 1 年，因为它是唯一值得长期留存的东西 ——
+	//   回测、筹码分布、指标校验都要一年以上的 15m 历史。
+	//
+	// 与 RetainDays（记录表 30 天）**分开**：日线级的历史行情要留，
+	// 但每 3 秒一条的权益曲线没必要跟着留一年（那是 1000 万行/年）。
+	KlineRetainDays int `json:"kline_retain_days"`
+
+	// RetainDays **记录表**保留窗口（天），默认 30。
+	//
+	// 覆盖：历史仓位(trade) / 交易记录(trade_event) / 交易信号(signals) /
+	//       权益曲线(equity) / 运行日志表(runlog) / AI 调用(ai_call)
+	//
+	// 注意：这些表的清理**只跟年度任务走**（用户口径：「一年才运行一次
+	// 清除任务就行」），30 天只是「删到哪一代」的红线，不是「多久删一次」。
+	RetainDays int `json:"retain_days"`
+
+	// LogRetainDays 日志文件保留窗口（天），默认 30。
+	//
+	// 用户口径：「每个月要清除所有超过一个月的日志记录，包括数据库、
+	// 客户端、网页等日志」。覆盖 logs/*.log（应用 + MySQL error/slow）
+	// 与 apache/logs/*.log —— 两处都会扫。
+	LogRetainDays int `json:"log_retain_days"`
+
+	// ArchiveDir 月度归档目录（相对项目根）。K 线按月导出成 gzip 分片放这里，
+	// 再作为一个**独立 git 仓库**推到 GitHub 数据仓。
+	ArchiveDir string `json:"archive_dir"`
+
+	// ArchiveMinFreeGB 磁盘守卫阈值（GB），默认 10。
+	//
+	// 用户口径：「每个月月底 C 盘剩余总量小于 10G 余额就删除掉多余的
+	// 之前几个月的数据，只保留当月数据就行」。
+	ArchiveMinFreeGB int `json:"archive_min_free_gb"`
+
+	// DisableRecycleClean 关掉回收站清理。
+	//
+	// 默认 false（即**开启**，符合用户口径「清理回收站的垃圾文件，
+	// 自动运行」）。之所以给一个反向开关：清空回收站是**不可逆**的，
+	// 万一里面还躺着用户想恢复的东西，能立刻停下来。
+	// 设为 true 后月度任务会跳过回收站这一步并打日志说明。
+	//
+	// 实现说明：okxweb 以服务身份跑在 Session 0 / LocalSystem，
+	// SHEmptyRecycleBin 清的是 SYSTEM 自己的回收站、清不到用户那份，
+	// 所以实际是直接删 C:\$Recycle.Bin\<SID>\ 下的文件（见 recycle_windows.go）。
+	DisableRecycleClean bool `json:"disable_recycle_clean"`
 
 	LogDir   string `json:"log_dir"`
 	LogMaxMB int    `json:"log_max_mb"`
@@ -321,7 +365,7 @@ func defaultConfig() *Config {
 		OrderVia:          "go",
 		Bar:               "15m",
 		BarsEnabled:       []string{"15m"},
-		SignalBars:        []string{"1m", "3m", "5m", "15m", "1H", "4H"},
+		SignalBars:        []string{"15m"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -330,7 +374,7 @@ func defaultConfig() *Config {
 		ExcludeStockETF:       true,
 		ExcludeNewListingDays: 30,
 		ExcludeDelisting:      true,
-		MaxOrderMarginUSDT:    0.5,
+		MaxOrderMarginUSDT:    1.0,
 		Workers:               4,
 		CandleLimit:           300,
 		HistoryPages:          2,
@@ -340,26 +384,30 @@ func defaultConfig() *Config {
 		RequestTimeoutSec:     20,
 		Entry: &EntryCfg{
 			TdMode: "isolated", PosSide: "net", OrdType: "market",
-			MarginUSDT: 0.1, Leverage: 20,
+			MarginUSDT: 1.0, Leverage: 20,
 			MaxConcurrentPositions: 8, CooldownBars: 6, DailyMaxEntries: 30,
-			// 目标每笔 0.1 U；合约准入要求「最小一手保证金 ≤ 0.5 U」。
-			// 0.1U 买不起 1 张的合约会放大到刚好买 1 张来下单，绝不超过 MaxMarginUSDT。
-			MarginPolicy: "min_one", MaxMarginUSDT: 0.5,
+			// ★ 2026-10-01 起单笔口径 0.1U → 1U（用户：「改成 1 美金每次交易」）。
+			// 目标每笔 1 U 保证金；合约准入要求「最小一手保证金 ≤ 1 U」。
+			// 1U 买不起 1 张的合约会放大到刚好买 1 张来下单，绝不超过 MaxMarginUSDT。
+			MarginPolicy: "min_one", MaxMarginUSDT: 1.5,
 		},
 		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
-			MaxHoldBars: 0, MaxHoldMinutes: 240, StopLossPct: 0},
+			MaxHoldBars: 0, MaxHoldMinutes: 360, StopLossPct: 0},
 		// 加仓：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3（不超过 max_margin_usdt）
+		//
+		// ★ 「加满就自动平仓」已删除（用户要求取消加仓次数这条出场条件）。
+		//   MaxTimes 只限制还能补几次，加满后仓位继续等止盈 / 超时 / 布林上轨。
 		Addon: &AddonCfg{
 			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: "15m",
-			LookbackBars: 24, MaxTimes: 3, CloseWhenFull: true, MinGapBars: 1,
+			LookbackBars: 24, MaxTimes: 3, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
 		Risk: &RiskCfg{
 			// 小资金口径（账户就几毛到几 U）：
-			//   百分比类的保护要按笔算，不能用「5U 可用余额」「30% 总保证金」这种大账户默认值，
-			//   否则 0.1U 的账户一笔都开不出来。
+			//   百分比类的保护要按笔算，不能用「5U 可用余额」「30% 总保证金」这种大账户默认值。
+			//   ★ 单笔已是 1U，可用余额门槛同步抬到 1U，否则会在保证金不足时白试下单。
 			AccountEquityStop: 0, DailyLossStopPct: 50, MaxTotalMarginPct: 100,
-			MinAvailableUSDT: 0.1, ConsecutiveLossPause: 5, PauseOnAPIError: 10,
+			MinAvailableUSDT: 1.0, ConsecutiveLossPause: 5, PauseOnAPIError: 10,
 		},
 		AI: &AICfg{
 			Enabled: true, Provider: "openai_compatible",
@@ -376,7 +424,10 @@ func defaultConfig() *Config {
 			Host: "127.0.0.1", Port: 3306,
 			User: "okx", Password: "OkxQuant2026", Database: "okx",
 			MaxOpenConns: 64, MaxIdleConns: 32, BatchSize: 500,
-			KeepKlineDays: 30, LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
+			// K 线留 1 年（用户口径），记录表 30 天，日志 30 天 —— 三者独立。
+			KeepKlineDays: 30, KlineRetainDays: 365, RetainDays: 30, LogRetainDays: 30,
+			ArchiveDir: "archive", ArchiveMinFreeGB: 10,
+			LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
 		},
 		path: "configs/okx_strategy.json",
 		dir:  "configs",
@@ -592,12 +643,12 @@ func fillDefaults(c *Config) {
 	if c.Exit == nil {
 		c.Exit = d.Exit
 	} else if c.Exit.MaxHoldMinutes <= 0 && c.Exit.MaxHoldBars <= 0 {
-		// 两个都没填 → 用默认的「4 小时超时」
+		// 两个都没填 → 用默认的「6 小时超时」
 		c.Exit.MaxHoldMinutes = d.Exit.MaxHoldMinutes
 	}
 
 	// 加仓上限归一化：默认 3 次。0 或负数一律回到默认值，
-	// 否则「加满就平」这条兜底规则会因为 MaxTimes=0 而永远触发。
+	// 否则「最多加几次」这条限制会因为 MaxTimes=0 而永远不生效。
 	if c.Addon != nil && c.Addon.MaxTimes <= 0 {
 		c.Addon.MaxTimes = d.Addon.MaxTimes
 	}
@@ -697,6 +748,29 @@ func fillDefaults(c *Config) {
 			if s.KeepKlineDays <= 0 {
 				s.KeepKlineDays = ds.KeepKlineDays
 			}
+		}
+		// KlineRetainDays 优先；没写就沿用老的 keep_kline_days，
+		// 再没有才用默认 365。这样老配置文件升级上来不会突然砍到 30 天。
+		if s.KlineRetainDays <= 0 {
+			if s.KeepKlineDays > 0 {
+				s.KlineRetainDays = s.KeepKlineDays
+			} else {
+				s.KlineRetainDays = ds.KlineRetainDays
+			}
+		}
+		if s.RetainDays <= 0 {
+			// 留空 / 写 0 → 按 30 天兜底（记录表口径）
+			s.RetainDays = ds.RetainDays
+		}
+		if s.LogRetainDays <= 0 {
+			// 留空 / 写 0 → 按 30 天兜底（日志口径：「超过一个月的日志」）
+			s.LogRetainDays = ds.LogRetainDays
+		}
+		if s.ArchiveDir == "" {
+			s.ArchiveDir = ds.ArchiveDir
+		}
+		if s.ArchiveMinFreeGB <= 0 {
+			s.ArchiveMinFreeGB = ds.ArchiveMinFreeGB
 		}
 		if s.LogDir == "" {
 			s.LogDir = ds.LogDir

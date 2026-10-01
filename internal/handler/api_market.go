@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"finally-main/internal/model"
+	"finally-main/internal/repo"
 	"finally-main/internal/service"
 )
 
@@ -69,7 +70,19 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		"uptimeSec":    int(time.Since(s.startAt).Seconds()),
 		"queueLen":     s.bf.QueueLen(),
 		"backfillDays": s.bf.Config().Days,
-		"version":      "okx-web/1.1 (pure go · live)",
+		// 三条独立的数据保留红线（2026-10-01 起）：
+		//   retainDays     记录表（trade/trade_event/signals/equity/runlog）→ 月度任务里清
+		//   klineRetainDays K 线 15m                                          → 年度任务里清
+		//   logRetainDays  日志文件（logs/ + apache/logs/）                   → 月度任务里清
+		// 前端「服务信息」直接读这三个值。
+		"retainDays":      repo.RetainDays(),
+		"klineRetainDays": repo.KlineRetainDays(),
+		"logRetainDays":   repo.LogRetainDays(),
+		// 磁盘守卫：C 盘可用低于这个 GB 数时，月度任务把 K 线收缩到「只留当月」
+		"archiveMinFreeGB": repo.ArchiveMinFreeGB(),
+		"archiveDir":       service.ArchiveDir(),
+		"freeDiskGB":       float64(service.FreeDiskMB(`C:\`)) / 1024,
+		"version":          "okx-web/1.3 (pure go · live · 月度/年度维护)",
 	}, nil
 }
 

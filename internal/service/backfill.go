@@ -55,7 +55,10 @@ type BackfillConfig struct {
 // DefaultBackfillConfig 默认配置
 func DefaultBackfillConfig() BackfillConfig {
 	return BackfillConfig{
-		Days:          30,
+		// 默认回补 1 年，和 K 线保留窗口（kline_retain_days=365）对齐。
+		// 第一次跑要拉 479 合约 × 117 页 ≈ 5.6 万次 history-candles 调用，
+		// 全局令牌桶压到 9 次/秒，实测约 2 小时跑完；期间不影响实时行情。
+		Days:          365,
 		Bars:          append([]string{}, SupportedBars...),
 		FocusN:        8,
 		OnlyTradeable: true,
@@ -264,11 +267,14 @@ func (m *BackfillManager) buildPlan() []BackfillTask {
 	//	  这段近期的 K 线都还没铺。
 	//	第二遍 Full：再逐个往前翻满 Days 天（已铺够的走轻量路径秒过）。
 	//
-	// 周期顺序：5m/15m/1H 排最前 —— 用户要的就是这几个周期的信号。
-	// 3m/1m 排最后：这两条已经不要信号了，而且 1m 一个月 4.3 万根/合约、
-	// 全部合约要二十多万次请求（五六个小时），排在前面会把要用的周期一直堵着。
+	// 周期顺序：5m 排最前 —— 它是唯一还需要 30 天历史的短周期。
+	//
+	// ★ 全库只回补 15m（2026-10-01 用户口径）：
+	//   「把 4H / 1H / 5m 全部删除，只保留 15 分钟的信号和买卖点」。
+	//   更早砍掉的 1m/3m 占过全表 69% 的行，且 1m 全量回补要二十多万次请求
+	//   （五六个小时），把要用的周期全堵在后面。
 	pick := func(dst []BackfillTask) []BackfillTask {
-		dst = appendAll(dst, all, "5m", "15m", "1H", "4H", "3m", "1m")
+		dst = appendAll(dst, all, "15m")
 		return dst
 	}
 
@@ -506,6 +512,56 @@ func (m *BackfillManager) BackfillOne(instID, bar string) error {
 	return m.backfillOne(instID, bar)
 }
 
+// trimToWindow 丢掉早于 K 线保留窗口的 K 线。
+//
+// ★ 为什么必须裁 ★
+// OKX 的 history-candles / candles 单次最多只给 **300 根**，而 300 根对不同
+// 周期是完全不同的时间跨度：
+//
+//	15m 300 根 = 3.1 天   ← 现在只有这一个周期
+//	（历史教训）1H 300 根 = 12.5 天，4H 300 根 = 50 天
+//
+// 原来把 300 根原样写库，4H 每个合约就凭空多存 20 天，
+// 然后 CleanupKlines 每轮再把它裁掉 —— 实测每次删 31,181 行、耗时 99 秒，
+// 而且删完几分钟又被下一轮回补写回来，形成「写进去 → 删掉 → 再写进去」
+// 的永久 churn，白烧 CPU 和磁盘（这台机器只有 2 核 2G）。
+//
+// ★ 窗口取谁：repo.KlineRetainDays()（默认 365 天），不是 cfg.Days ★
+//
+//	cfg.Days（-days 启动参数）  = 「回补往回拉多远」
+//	KlineRetainDays()           = 「库里留多久」
+//
+// 两者以前是同一个值所以看不出来；现在保留期是 1 年，而回补可能分阶段
+// 放开（比如先只拉 3 个月让图先能用），再混用就会把「还没拉到的历史」
+// 当成「超窗口的垃圾」丢掉 —— 结果永远补不满一年。
+// 写入端只认保留窗口，回补端自己控制拉多远。
+func (m *BackfillManager) trimToWindow(rows []model.Kline) []model.Kline {
+	if len(rows) == 0 {
+		return rows
+	}
+	days := repo.KlineRetainDays()
+	if days <= 0 {
+		return rows
+	}
+	cutoff := time.Now().AddDate(0, 0, -days).UnixMilli()
+	keep := 0
+	for _, k := range rows {
+		if k.Ts >= cutoff {
+			keep++
+		}
+	}
+	if keep == len(rows) {
+		return rows // 全在窗口内，原样返回（不复制）
+	}
+	out := make([]model.Kline, 0, keep)
+	for _, k := range rows {
+		if k.Ts >= cutoff {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // backfillLight 只把最新一段拉回来（一次请求、300 根），不翻历史页。
 //
 // 队列第一遍用它：几分钟内让全部合约 × 全部周期都有近期 K 线，
@@ -516,6 +572,7 @@ func (m *BackfillManager) backfillLight(instID, bar string) error {
 		m.setProgress(instID, bar, "error", "拉最新 K 线失败："+err.Error())
 		return err
 	}
+	latest = m.trimToWindow(latest)
 	if len(latest) == 0 {
 		return nil
 	}
@@ -540,7 +597,7 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 	if cov, cerr := m.db.Coverage(instID, bar); cerr == nil &&
 		cov.Count > 0 && cov.Days >= float64(m.cfg.Days)-0.5 {
 		if latest, err := m.feed.FetchCandles(instID, bar, 100); err == nil && len(latest) > 0 {
-			if _, uerr := m.db.UpsertKlines(latest); uerr != nil {
+			if _, uerr := m.db.UpsertKlines(m.trimToWindow(latest)); uerr != nil {
 				return uerr
 			}
 			m.markKnown(instID, bar, latest[len(latest)-1].Ts)
@@ -551,14 +608,14 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 
 	m.setProgress(instID, bar, "running", "开始回补")
 
-	// 1) 最新一批
+	// 1) 最新一批（裁到窗口内再写，4H 的 300 根 = 50 天，不裁会和白名单打架）
 	latest, err := m.feed.FetchCandles(instID, bar, 300)
 	if err != nil {
 		m.setProgress(instID, bar, "error", "拉最新 K 线失败："+err.Error())
 		return err
 	}
 	if len(latest) > 0 {
-		if _, err := m.db.UpsertKlines(latest); err != nil {
+		if _, err := m.db.UpsertKlines(m.trimToWindow(latest)); err != nil {
 			m.setProgress(instID, bar, "error", "写库失败："+err.Error())
 			return err
 		}
@@ -614,7 +671,7 @@ func (m *BackfillManager) backfillOne(instID, bar string) error {
 		if len(cut) == 0 {
 			break
 		}
-		if _, err := m.db.UpsertKlines(cut); err != nil {
+		if _, err := m.db.UpsertKlines(m.trimToWindow(cut)); err != nil {
 			m.setProgress(instID, bar, "error", "写库失败："+err.Error())
 			return err
 		}
@@ -776,15 +833,12 @@ func (m *BackfillManager) realtimeLoop() {
 				m.refreshLatestKlines()
 				done()
 			}
-			// 每 6 小时把库里最老的数据裁一次；保留量按 cfg.Days 天算，
-			// 保证每轮回补完之后每个周期都还覆盖至少一个月。
-			if seconds%(3600*6) == 0 && seconds > 0 {
-				done := perf.Track("db.cleanupKlines")
-				if n, err := m.db.CleanupKlines(m.cfg.Days); err == nil && n > 0 {
-					m.logf("滚动清理：删除 %d 根过老 K 线（保留最近 %d 天）", n, m.cfg.Days)
-				}
-				done()
-			}
+			// K 线滚动裁剪**不在这里**做了：CleanupKlines 要 30~100 秒
+			// （479 合约逐个在分区表上定位第 N 根再 DELETE），
+			// 挂在回补循环上会把实时落库和行情刷新一起拖住。
+			// 现在统一由 service.StartMaintenance 的年度任务负责
+			// （DROP PARTITION 整段扔掉超 365 天的分区）；回补侧也在写入前
+			// trimToWindow，两边不会再打架。
 		}
 	}
 }

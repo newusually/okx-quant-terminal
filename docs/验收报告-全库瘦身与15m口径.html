@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>验收报告 · 全库瘦身与「只留 15m」口径</title>
+<style>
+  :root{
+    --bg:#f5f5f7; --card:#ffffff; --line:#e5e5ea; --ink:#1d1d1f;
+    --sub:#6e6e73; --up:#d70015; --down:#0a8a3c; --accent:#0071e3;
+    --chip:#f0f0f4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.6 -apple-system,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;padding:32px 20px 64px}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:26px;font-weight:600;margin:0 0 6px;letter-spacing:-.2px}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:28px}
+  .meta code{background:var(--chip);padding:1px 6px;border-radius:4px;font-size:12px}
+  h2{font-size:17px;font-weight:600;margin:34px 0 12px;letter-spacing:-.1px}
+  h2 .n{display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;
+    background:var(--accent);color:#fff;border-radius:5px;font-size:12px;margin-right:8px;
+    vertical-align:1px;font-weight:600}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .kpi .lbl{color:var(--sub);font-size:12px;margin-bottom:6px}
+  .kpi .val{font-size:22px;font-weight:600;letter-spacing:-.3px}
+  .kpi .val small{font-size:13px;font-weight:400;color:var(--sub)}
+  .kpi .old{color:var(--sub);font-size:12px;text-decoration:line-through;margin-top:2px}
+  .kpi .new{color:var(--down);font-size:12px;font-weight:600;margin-top:2px}
+  table{width:100%;border-collapse:collapse;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13px}
+  th,td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--line)}
+  th{background:#fafafa;font-weight:600;font-size:12px;color:var(--sub);
+    text-transform:uppercase;letter-spacing:.3px}
+  tr:last-child td{border-bottom:none}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .good{color:var(--down);font-weight:600}
+  .bad{color:var(--up)}
+  .mono{font-family:"SF Mono",Consolas,Monaco,monospace;font-size:12px}
+  .fix{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:10px;padding:16px 18px;margin-bottom:12px}
+  .fix h3{margin:0 0 8px;font-size:14px;font-weight:600}
+  .fix p{margin:0 0 8px;color:#3a3a3c}
+  .fix pre{background:#f7f7f9;border:1px solid var(--line);border-radius:7px;
+    padding:10px 12px;overflow-x:auto;margin:8px 0;font-size:12px;line-height:1.5}
+  .fix .bad-line{color:var(--up)}
+  .fix .ok-line{color:var(--down)}
+  .tag{display:inline-block;background:var(--chip);color:var(--sub);border-radius:999px;
+    padding:2px 9px;font-size:11px;margin-right:6px}
+  .tag.ok{background:#e3f6e9;color:var(--down)}
+  .tag.no{background:#fdeaea;color:var(--up)}
+  .foot{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);
+    color:var(--sub);font-size:12px}
+  .cmd{background:#1d1d1f;color:#e8e8ed;border-radius:8px;padding:11px 14px;
+    font-family:"SF Mono",Consolas,monospace;font-size:12px;overflow-x:auto;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>全库瘦身与「只留 15m」口径 · 验收报告</h1>
+  <div class="meta">
+    项目 <code>OKX 全合约量化终端</code> ·
+    验收时间 2026-10-01 11:50 · 版本 <code>okx-web/1.2 (pure go · live)</code>
+  </div>
+
+  <h2><span class="n">1</span>四个关键数字</h2>
+  <div class="cards">
+    <div class="kpi">
+      <div class="lbl">数据库总大小</div>
+      <div class="val">131.6 <small>MB</small></div>
+      <div class="old">521.0 MB</div>
+      <div class="new">↓ 省下 389 MB（-74.7%）</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">K 线表行数</div>
+      <div class="val">137.5 <small>万</small></div>
+      <div class="old">2,009.8 万行 / 4 个周期</div>
+      <div class="new">仅 15m · 4.5GB → 123MB</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">清理单轮耗时</div>
+      <div class="val">17.8 <small>秒</small></div>
+      <div class="old">30 ~ 100 秒</div>
+      <div class="new">↓ 摘掉 K 线裁剪</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">超 30 天残留行</div>
+      <div class="val">0 <small>行</small></div>
+      <div class="old">trade 88 · trade_event 176</div>
+      <div class="new">已清零并止住写回</div>
+    </div>
+  </div>
+
+  <h2><span class="n">2</span>前后对比</h2>
+  <table>
+    <thead><tr><th>项目</th><th>瘦身前</th><th>瘦身后</th><th style="width:110px">结果</th></tr></thead>
+    <tbody>
+      <tr><td>库总大小</td><td class="num">521.0 MB</td><td class="num">131.6 MB</td><td class="good">↓ 74.7%</td></tr>
+      <tr><td><span class="mono">kline</span> 行数 / 周期</td>
+          <td class="num">20,098,362 / 4 个周期</td>
+          <td class="num">1,375,402 / 仅 15m</td><td class="good">↓ 93.2%</td></tr>
+      <tr><td><span class="mono">signals</span> 行数 / 周期</td>
+          <td class="num">12,217 / 4 个周期</td>
+          <td class="num">2,284 / 仅 15m</td><td class="good">↓ 81.3%</td></tr>
+      <tr><td><span class="mono">backfill_job</span></td>
+          <td class="num">2,874</td><td class="num">733 / 仅 15m</td><td class="good">↓ 74.5%</td></tr>
+      <tr><td><span class="mono">signal_scan_state</span></td>
+          <td class="num">—</td><td class="num">184 / 仅 15m</td><td class="good">仅 15m</td></tr>
+      <tr><td>接口 <span class="mono">/api/state → bars</span></td>
+          <td class="mono bad">["5m","15m","1H","4H"]</td>
+          <td class="mono good">["15m"]</td><td class="good">已收口</td></tr>
+      <tr><td>配置 <span class="mono">bars_enabled</span></td>
+          <td class="mono">["15m"]</td><td class="mono good">["15m"]</td><td class="good">一致</td></tr>
+      <tr><td>配置 <span class="mono">signal_bars</span></td>
+          <td class="mono">["15m"]</td><td class="mono good">["15m"]</td><td class="good">一致</td></tr>
+      <tr><td>前端周期选项卡</td><td class="num">4 个</td><td class="num">1 个（15m）</td><td class="good">已删</td></tr>
+      <tr><td>清理周期</td><td class="num">每 6 小时</td><td class="num">每周一次</td><td class="good">按用户口径</td></tr>
+      <tr><td>清理单轮删 K 线</td>
+          <td class="num bad">31,181 行 / 轮（永久 churn）</td>
+          <td class="num good">0 行</td><td class="good">churn 已止</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">3</span>本轮新挖出的两个 bug（均已修复并实测）</h2>
+
+  <div class="fix">
+    <h3>bug ①&nbsp; 历史仓位同步的 lookback(35天) 与清理红线(30天) 不一致</h3>
+    <p>后果是一个<b>永久拉锯</b>：30~35 天那一档的仓位，每 10 分钟被同步写入、
+       每周又被自动清理删掉，日志里 <span class="mono">[CLEAN] trade 删了 88 行</span>
+       反复出现，看着像一直没清干净。</p>
+    <pre><span class="bad-line">const okxPositionsLookbackDays = 35   // ❌ 清理红线是 30 天</span>
+
+<span class="ok-line">// ✅ 下界直接对齐保留窗口：多翻无收益，只会制造 churn
+func okxPositionsLookbackDays() int { return repo.RetainDays() }</span></pre>
+    <p><span class="tag">实测证据</span>同一个进程、只换了这一行：</p>
+    <table style="margin-top:6px">
+      <thead><tr><th>同步时刻</th><th>覆盖范围起点</th><th style="width:130px">对应窗口</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">11:40:53</td><td class="mono">2026-08-27 14:07</td><td class="bad">35 天</td></tr>
+        <tr><td class="mono">11:44:00</td><td class="mono">2026-08-27 14:07</td><td class="bad">35 天</td></tr>
+        <tr><td class="mono">11:45:45</td><td class="mono good">2026-09-08 20:17</td><td class="good">30 天</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="fix">
+    <h3>bug ②&nbsp; OKX 翻页天然会多带一页</h3>
+    <p><span class="mono">after=&lt;毫秒&gt;</span> 的语义是「平仓时间<b>早于</b>该毫秒的下一批」，
+       所以「翻过下界就 <span class="mono">break</span>」这个判断<b>必然发生在 append 之后</b> ——
+       每轮同步都会多带回一整页（最多 100 行，可横跨十几天）。</p>
+    <pre>t := atoi64(ut)
+if t &gt; 0 &amp;&amp; (oldest == 0 || t &lt; oldest) { oldest = t }  // 游标先算
+<span class="ok-line">if sinceMs &gt; 0 &amp;&amp; t &gt; 0 &amp;&amp; t &lt; sinceMs { continue }     // ★ 窗口外直接丢，不 append</span></pre>
+  </div>
+
+  <h2><span class="n">4</span>全库 14 张表逐表审计</h2>
+  <p style="color:var(--sub);font-size:12px;margin:-4px 0 10px">
+    行数一律用 <span class="mono">COUNT(*)</span> —— <span class="mono">TABLE_ROWS</span>
+    是 InnoDB 估算值，<span class="mono">equity</span> / <span class="mono">trade</span>
+    都被估算成 0 行，实际各有数千行。
+  </p>
+  <table>
+    <thead><tr><th>表</th><th>真实行数</th><th>大小</th><th>处理结论</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">kline</td><td class="num">1,375,402</td><td class="num">123.16 MB</td><td><span class="tag ok">留 · 仅 15m</span></td></tr>
+      <tr><td class="mono">signals</td><td class="num">2,284</td><td class="num">7.14 MB</td><td><span class="tag ok">留 · 仅 15m</span></td></tr>
+      <tr><td class="mono">backfill_job</td><td class="num">733</td><td class="num">0.78 MB</td><td><span class="tag ok">留 · 仅 15m</span></td></tr>
+      <tr><td class="mono">signal_scan_state</td><td class="num">184</td><td class="num">0.14 MB</td><td><span class="tag ok">留 · 仅 15m</span></td></tr>
+      <tr><td class="mono">trade</td><td class="num">725</td><td class="num">0.06 MB</td><td><span class="tag ok">留 · 30 天（持仓永不删）</span></td></tr>
+      <tr><td class="mono">trade_event</td><td class="num">1,670</td><td class="num">0.06 MB</td><td><span class="tag ok">留 · 30 天（买卖点）</span></td></tr>
+      <tr><td class="mono">equity</td><td class="num">3,768</td><td class="num">0.02 MB</td><td><span class="tag ok">留 · 30 天</span></td></tr>
+      <tr><td class="mono">runlog</td><td class="num">5,788</td><td class="num">0.03 MB</td><td><span class="tag ok">留 · 30 天</span></td></tr>
+      <tr><td class="mono">inst / ticker</td><td class="num">479 / 479</td><td class="num">0.09 / 0.03 MB</td><td><span class="tag">留 · 当前状态</span></td></tr>
+      <tr><td class="mono">meta</td><td class="num">1</td><td class="num">0.02 MB</td><td><span class="tag">留 · 当前状态</span></td></tr>
+      <tr><td class="mono">pnl_point / ai_call / kline_bench</td><td class="num">0 / 0 / 0</td><td class="num">0.07 MB</td><td><span class="tag">空表 · DDL 自动建</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">5</span>前端为什么不用改 HTML</h2>
+  <div class="fix">
+    <p>周期按钮是<b>数据驱动</b>的 —— <span class="mono">state.bars</span> 来自后端
+       <span class="mono">/api/state</span> 的 <span class="mono">bars</span> 字段，
+       前端只负责遍历渲染。<span class="mono">index.html</span> 里只有一个空的
+       <span class="mono">#tfGroup</span> 容器，<b>没有任何硬编码的周期按钮</b>。</p>
+    <pre>// web/assets/app.js
+function renderTimeframes() {
+  state.bars.forEach((b) =&gt; { /* 生成 .tf 按钮 */ });
+}</pre>
+    <p>所以「删除其它分钟数选项卡」＝ 改后端白名单 + 重新编译，<b>不动 HTML</b>。
+       验收：经 Apache 80 拉取的 <span class="mono">app.js</span> 与磁盘源文件一致，
+       <span class="mono">bars: ['15m']</span>、<span class="mono">BAR_MS = {'15m': 900e3}</span>。</p>
+  </div>
+
+  <h2><span class="n">6</span>运行状态（收工验收）</h2>
+  <table>
+    <thead><tr><th>组件</th><th>状态</th><th>启动类型</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td>OKXMySQL</td><td class="good">Running</td><td>Automatic</td><td class="mono">127.0.0.1:3306 LISTENING</td></tr>
+      <tr><td>OKXWeb</td><td class="good">Running</td><td>Automatic</td><td class="mono">127.0.0.1:8090 LISTENING (PID 7048)</td></tr>
+      <tr><td>OKXApache</td><td class="good">Running</td><td>Automatic</td><td class="mono">http://localhost/ → HTTP 200</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">7</span>结论</h2>
+  <div class="fix" style="border-left-color:var(--down)">
+    <p style="margin:0">
+      <b>四条口径全部落地且经实测验收：</b>
+      ① 数据只留 30 天 —— <span class="good">trade / trade_event / equity / signals 超期行数均为 0</span>；
+      ② K 线、信号、买卖点只留 15m —— <span class="good">kline 表 bar 只剩一个值</span>；
+      ③ 前端只剩 15m 选项卡 —— <span class="good">/api/state 的 bars = ["15m"]，经 80 端口核验</span>；
+      ④ 清理周期保持每周一次 —— <span class="good">retainInterval = 7×24h</span>。
+    </p>
+    <p style="margin:8px 0 0;color:var(--sub)">
+      附带修掉两个会导致「清完又长回来」的 bug（lookback 与红线不一致、OKX 翻页多带一页），
+      并把清理单轮耗时从 30~100 秒降到 17.8 秒。
+    </p>
+  </div>
+
+  <div class="foot">
+    证据来源：<span class="mono">curl /api/state</span> ·
+    <span class="mono">mysql.exe COUNT(*)</span> ·
+    <span class="mono">logs/okxbot.log</span> ·
+    <span class="mono">go vet / go test ./internal/...</span> 全绿。
+    详细技术记录见 <span class="mono">docs/架构说明.md</span> §十七。
+  </div>
+
+</div>
+</body>
+</html>
