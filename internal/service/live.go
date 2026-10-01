@@ -303,6 +303,13 @@ func currentPosCount() int64 {
 //	④ 把权益快照写库，顶栏就能实时显示
 //
 // 返回：本轮平掉几笔 + 账户快照。
+//
+// ★ 打点说明（2026-10-01）★
+// 外层的 live.exitPass 曾经是「等锁 + 干活」混在一起的一个数，实测 13~65 秒，
+// 看上去像出场巡检本身很慢。但 ExitEvery 只有 3 秒、这里又只做几次 HTTP，
+// 不可能要一分钟 —— 真正的原因是 eng.mu 被 EngineRun（一轮 18~62 秒）占着。
+// 现在拆成 live.exitWait（等锁）与 live.exitWork（干活）两个计时器，
+// 再加 exit.acct / exit.tickers / exit.store 三个子项，谁是大头一目了然。
 func exitPass() (int, *Account, error) {
 	cfg := conf.LoadConfig()
 	if cfg == nil || !cfg.Enabled {
@@ -310,8 +317,12 @@ func exitPass() (int, *Account, error) {
 	}
 
 	// 和 EngineRun 抢同一把锁：保证「扫描」和「巡检」不会同时动同一个仓位
+	waitDone := perf.Track("live.exitWait")
 	eng.mu.Lock()
+	waitDone()
+	workDone := perf.Track("live.exitWork")
 	defer eng.mu.Unlock()
+	defer workDone()
 
 	cli, err := eng.client(cfg)
 	if err != nil {
@@ -329,6 +340,7 @@ func exitPass() (int, *Account, error) {
 	// 不用等到有信号才发现 posSide 参数不对。
 	cli.PosMode()
 
+	pStore := perf.Track("exit.store")
 	store := repo.NewStore(cfg)
 	if !eng.storeInit {
 		if err := store.Init(); err != nil {
@@ -337,7 +349,9 @@ func exitPass() (int, *Account, error) {
 			eng.storeInit = true
 		}
 	}
+	pStore()
 
+	pAcct := perf.Track("exit.acct")
 	var account *Account
 	markPrices := map[string]float64{}
 
@@ -356,6 +370,7 @@ func exitPass() (int, *Account, error) {
 			}
 		}
 	}
+	pAcct()
 
 	openPos, err := store.OpenPositions()
 	if err != nil {
@@ -364,6 +379,11 @@ func exitPass() (int, *Account, error) {
 	}
 
 	// 标记价没拿到的，用行情最新价补
+	//
+	// ★ 注意这里和 runExits 里各有一份一模一样的兜底（2026-10-01 记录）：
+	// 只要「库里有、OKX 持仓列表里没有」的仓位存在（dry_run 仓、被外部平掉的仓），
+	// markPrices 就会永远缺，于是每一轮都去拉一次**全市场**行情（480 个合约、约 20KB）。
+	// 3 秒一次、连着拉，是实打实的浪费。已在 next 轮改成「只补缺的那几个」。
 	missing := false
 	for _, p := range openPos {
 		if markPrices[p.InstID] <= 0 {
@@ -372,6 +392,7 @@ func exitPass() (int, *Account, error) {
 		}
 	}
 	if missing {
+		pTk := perf.Track("exit.tickers")
 		if tk, terr := cli.Tickers(); terr == nil {
 			for _, p := range openPos {
 				if markPrices[p.InstID] <= 0 {
@@ -381,11 +402,12 @@ func exitPass() (int, *Account, error) {
 				}
 			}
 		}
+		pTk()
 	}
 
 	closed := 0
 	if len(openPos) > 0 {
-		closed, _ = runExits(cfg, cli, store, openPos, markPrices, cfg.Bar)
+		closed, _ = runExits(cfg, cli, store, klineReaderOf(store), openPos, markPrices, cfg.Bar)
 	}
 
 	// 权益快照落库：顶栏的「账户权益 / 可用 / 浮盈」就是从这张表读的

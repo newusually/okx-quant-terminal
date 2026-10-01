@@ -101,6 +101,49 @@ func klinesToCandles(rows []model.Kline) []Candle {
 	return out
 }
 
+// klinesToCandlesAt 同上，但把 Confirm **按周期 + 当前时间算出来**。
+//
+// 为什么要多这一个：老路径里有一处**直接读 Confirm 字段**的逻辑 ——
+// addon.go 的 closedWindow 会跳过 `!c.Confirm` 的 K 线。若把 Confirm 恒留 false
+// 的 klinesToCandles 直接喂给它，closedWindow 会返回空窗口，
+// **加仓会永远不触发**，而且不报错、不崩，属于最阴的那类回归。
+//
+// 口径与 IndexOfLastClosed 的第 2 条分支逐字一致（c.Ts+dur <= now 即已收盘），
+// 所以「本地库」与「网络」两条路对「哪根算已收盘」的判断完全相同，
+// 换成读本地库不会改变任何一笔交易决策。
+func klinesToCandlesAt(rows []model.Kline, bar string, nowMs int64) []Candle {
+	dur := BarDurationMs(bar)
+	out := make([]Candle, len(rows))
+	for i, r := range rows {
+		out[i] = Candle{
+			Ts: r.Ts, O: r.O, H: r.H, L: r.L, C: r.C, V: r.V,
+			Confirm: dur > 0 && r.Ts+dur <= nowMs,
+		}
+	}
+	return out
+}
+
+// loadCandlesLocal 取一段 K 线，**优先本地库**，本地不够新/不够长才回退网络。
+//
+// 与 loadCandles 的唯一区别：本地这条路会把 Confirm 按时间补上
+// （给依赖 Confirm 字段的老逻辑用，见 klinesToCandlesAt）。
+// 网络那条路返回的本来就是 OKX 带 confirm 的真实值，两条路一致。
+func loadCandlesLocal(db KlineReader, cli *OKXClient, instID, bar string,
+	minCandles int, nowMs int64) ([]Candle, bool, error) {
+
+	if db != nil {
+		rows, err := db.QueryKlines(model.KlineQuery{InstID: instID, Bar: bar, Limit: minCandles})
+		if err == nil && localCandlesFresh(rows, bar, minCandles, nowMs) {
+			return klinesToCandlesAt(rows, bar, nowMs), true, nil
+		}
+	}
+	cands, err := cli.Candles(instID, bar, minCandles)
+	if err != nil {
+		return nil, false, err
+	}
+	return cands, false, nil
+}
+
 func loadCandles(db KlineReader, cli *OKXClient, instID, bar string, minCandles int, nowMs int64) ([]Candle, bool, error) {
 	if db != nil {
 		rows, err := db.QueryKlines(model.KlineQuery{InstID: instID, Bar: bar, Limit: minCandles})
@@ -295,20 +338,30 @@ func Scan(cfg *conf.Config, cli *OKXClient, bar string, kdb KlineReader) (*ScanR
 	return res, nil
 }
 
-// LatestSignal 只为某个合约算一次最新信号（出场判定用）
-func LatestSignal(cfg *conf.Config, cli *OKXClient, instID, bar string) (*Signal, []Candle, error) {
-	cands, err := cli.CandlesEnough(instID, bar, cfg.MinCandles)
+// LatestSignal 只为某个合约算一次最新信号（出场判定用）。
+//
+// ★ kdb 是本轮加的参数（2026-10-01）。之前这里固定走 cli.CandlesEnough ——
+// 每判定一个持仓就是 2 次 OKX HTTP，还要跟回补/扫描抢同一把 20 次/2 秒的限频闸门。
+// 实测一次调用平均 1.68 秒（最慢 18 秒），而把它换成读本地库只要约 6 毫秒
+// —— 数据本来就躺在库里（扫描器读 80 个合约总共才 458 毫秒）。
+//
+// kdb 传 nil = 完全退回改造前的纯网络行为，DB 出问题时行为不变、只是慢。
+// 第三个返回值 fromDB 只用于打点/日志（证明本地优先真的生效），不参与任何决策。
+func LatestSignal(cfg *conf.Config, cli *OKXClient, kdb KlineReader,
+	instID, bar string) (*Signal, []Candle, bool, error) {
+
+	cands, fromDB, err := loadCandles(kdb, cli, instID, bar, cfg.MinCandles, cli.nowMs())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fromDB, err
 	}
 	if len(cands) == 0 {
-		return nil, nil, nil
+		return nil, nil, fromDB, nil
 	}
 	idx := IndexOfLastClosed(cands, bar, cli.nowMs())
 	if idx < 0 {
-		return nil, cands, nil
+		return nil, cands, fromDB, nil
 	}
-	return ComputeSignal(instID, bar, cands, idx), cands, nil
+	return ComputeSignal(instID, bar, cands, idx), cands, fromDB, nil
 }
 
 // LastClosed 返回最后一根已收盘 K 线（没有则返回 nil）

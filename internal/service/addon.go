@@ -61,7 +61,7 @@ type AddonDecision struct {
 //
 // 传入的 openPos 会被就地更新（张数 / 均价 / 保证金 / 加仓计数），
 // 这样同一轮后面的开仓闸门（总保证金、持仓数）看到的就是最新数据。
-func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
+func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineReader,
 	openPos []repo.OpenPos, markPrices map[string]float64) (int, map[int64]bool) {
 
 	closedIDs := map[int64]bool{}
@@ -96,7 +96,7 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 			continue
 		}
 
-		dec, err := checkAddon(cfg, cli, *p, px, bar, durMs)
+		dec, err := checkAddon(cfg, cli, kdb, *p, px, bar, durMs)
 		if err != nil {
 			logx.Logf("WARN", "%s 加仓判定失败：%v", p.InstID, err)
 			continue
@@ -158,7 +158,17 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 }
 
 // checkAddon 单仓加仓判定：抓 K 线 + 合约信息，然后交给纯逻辑 decideAddon
-func checkAddon(cfg *conf.Config, cli *OKXClient, p repo.OpenPos,
+//
+// ★ K 线改读本地库（2026-10-01）。原来固定走 cli.Candles —— 每仓一次 OKX HTTP，
+// 跟回补/扫描抢同一把限频闸门，实测 eng.addons 一轮要 7.6 秒。
+//
+// ★ 这里**必须**用 loadCandlesLocal，不能图省事用 loadCandles：
+// decideAddon 的输入要过 closedWindow，而 closedWindow 直接读 Candle.Confirm 字段
+// （跳过 !Confirm 的）。klinesToCandles 把 Confirm 恒留 false 是给
+// IndexOfLastClosed 的「按时间推算」分支用的 —— 喂给 closedWindow 会得到空窗口，
+// **加仓会静默地永远不触发**。loadCandlesLocal 会把 Confirm 按周期+时间补上，
+// 与 OKX 的原生 confirm 语义一致。
+func checkAddon(cfg *conf.Config, cli *OKXClient, kdb KlineReader, p repo.OpenPos,
 	markPx float64, bar string, durMs int64) (AddonDecision, error) {
 
 	a := cfg.Addon
@@ -175,7 +185,7 @@ func checkAddon(cfg *conf.Config, cli *OKXClient, p repo.OpenPos,
 	if look < 4 {
 		look = 4
 	}
-	cands, err := cli.Candles(p.InstID, bar, look+10)
+	cands, _, err := loadCandlesLocal(kdb, cli, p.InstID, bar, look+10, cli.nowMs())
 	if err != nil {
 		return AddonDecision{}, err
 	}

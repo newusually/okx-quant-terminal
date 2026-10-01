@@ -20,6 +20,7 @@ import (
 
 	"finally-main/internal/conf"
 	"finally-main/internal/logx"
+	"finally-main/internal/perf"
 	"finally-main/internal/repo"
 )
 
@@ -35,6 +36,22 @@ type engineState struct {
 }
 
 var eng = &engineState{}
+
+// klineReaderOf 从 store 取「本地库读能力」。拿不到就返回 nil ——
+// 所有调用方都把 nil 当作「退回纯网络」，所以 DB 挂掉只是变慢，不会不出场。
+//
+// ★ 注意别踩 Go 的 typed-nil 陷阱：接口里塞一个 nil 指针，接口本身不等于 nil，
+// 后面的 `db != nil` 会判成 true 然后解引用炸掉。所以这里显式挡一层。
+func klineReaderOf(store *repo.Store) KlineReader {
+	if store == nil {
+		return nil
+	}
+	db, err := store.DB()
+	if err != nil || db == nil {
+		return nil
+	}
+	return db
+}
 
 func (e *engineState) client(cfg *conf.Config) (*OKXClient, error) {
 	key := cfg.OKX.BaseURL + "|" + cfg.OKX.Proxy + "|" +
@@ -83,16 +100,27 @@ func EngineRun(minute string) error {
 	start := time.Now()
 	eng.cycles++
 
+	// ★ 阶段打点（2026-10-01）：一轮 EngineRun 实测在 18~62 秒之间剧烈波动，
+	// 光看总时长没法判断该改哪一段。下面把每个阶段单独计时，
+	// perf 日志里就会出现 eng.account / eng.exits / eng.scan 等条目，
+	// 直接看谁是大头。打点本身开销是纳秒级，不影响交易。
+	ph := func(name string) func() { return perf.Track(name) }
+
+	pSetup := ph("eng.setup")
 	cli, err := eng.client(cfg)
 	if err != nil {
+		pSetup()
 		return err
 	}
 	if err := cli.EnsureReady(); err != nil {
 		eng.apiErrStreak++
 		eng.maybePauseOnErrors(cfg)
+		pSetup()
 		return err
 	}
+	pSetup()
 
+	pStore := ph("eng.store")
 	store := repo.NewStore(cfg)
 	if !eng.storeInit {
 		if err := store.Init(); err != nil {
@@ -115,8 +143,10 @@ func EngineRun(minute string) error {
 		logx.Logf("WARN", "读当日统计失败：%v", err)
 		ctr = &repo.Counters{LastEntryTs: map[string]int64{}}
 	}
+	pStore()
 
 	// 账户信息（配了 Key 才有）
+	pAcct := ph("eng.account")
 	var account *Account
 	markPrices := map[string]float64{}
 	if hasKeys(cfg) {
@@ -139,35 +169,39 @@ func EngineRun(minute string) error {
 			logx.Logf("WARN", "取持仓失败：%v", perr)
 		}
 	}
+	pAcct()
+
+	// 本地库读能力：出场巡检、加仓判定、入场扫描三处共用一份。
+	// 拿不到就传 nil —— 三处都会退回原来的纯网络行为，DB 挂了只是慢，不会不动。
+	kdb := klineReaderOf(store)
 
 	// ① 出场（每轮都查）
-	closed, closedIDs := runExits(cfg, cli, store, openPos, markPrices, bar)
+	pExits := ph("eng.exits")
+	closed, closedIDs := runExits(cfg, cli, store, kdb, openPos, markPrices, bar)
 	openPos = dropClosed(openPos, closedIDs)
+	pExits()
 
 	// ①.5 加仓（浮亏补仓）：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3
 	//      必须在出场之后（刚平的仓不加）、入场之前（总保证金按新值算）
 	//
 	//      加满 3 次之后信号再来 → 这一轮直接把仓位平掉（不设止损下唯一的离场通道），
 	//      返回的 closedIDs 要并回本轮平仓集合，后面的入场闸门才不会把额度算错。
-	added, addonClosed := runAddons(cfg, cli, store, openPos, markPrices)
+	pAddons := ph("eng.addons")
+	added, addonClosed := runAddons(cfg, cli, store, kdb, openPos, markPrices)
 	closed += len(addonClosed)
 	openPos = dropClosed(openPos, addonClosed)
 	closedIDs = mergeIDs(closedIDs, addonClosed)
+	pAddons()
 
 	// ② 入场
+	pScan := ph("eng.scan")
 	scanInfo := fmt.Sprintf("周期 %s 未启用扫描（bars_enabled 未包含）", bar)
 	if cfg.BarEnabled(bar) {
-		// 把本地库的读能力交给扫描器：库里已经有一百多万行 K 线，
-		// 没必要每轮再从 OKX 拉一遍（实测单合约网络 130ms vs 本地索引 1~5ms）。
-		// 拿不到 DB 句柄就传 nil —— 扫描器会退回原来的纯网络行为，不影响交易。
-		var kdb KlineReader
-		if db, derr := store.DB(); derr == nil {
-			kdb = db
-		}
 		res, serr := Scan(cfg, cli, bar, kdb)
 		if serr != nil {
 			eng.apiErrStreak++
 			eng.maybePauseOnErrors(cfg)
+			pScan()
 			return serr
 		}
 		eng.apiErrStreak = 0
@@ -188,17 +222,23 @@ func EngineRun(minute string) error {
 				logx.Logf("WARN", "写信号失败：%v", err)
 			}
 		}
+		pScan()
 
+		pEntries := ph("eng.entries")
 		opened, updates := runEntries(cfg, cli, store, res, ctr, openPos, account, bar)
 		if len(updates) > 0 {
 			if err := store.Ingest(repo.StorePayload{SignalUpdate: updates}); err != nil {
 				logx.Logf("WARN", "更新信号状态失败：%v", err)
 			}
 		}
+		pEntries()
 		scanInfo = fmt.Sprintf("全市场 %d / 候选 %d / 实算 %d / 信号 %d / 开仓 %d / K线本地 %d 网络 %d",
 			res.Universe, res.Candidates, res.Scanned, len(res.Signals), opened, res.FromDB, res.FromNet)
+	} else {
+		pScan()
 	}
 
+	pTail := ph("eng.tail")
 	if closed > 0 || added > 0 || cfg.BarEnabled(bar) {
 		logx.Logf("INFO", "[%s] %s；在持 %d 仓，本轮平仓 %d、加仓 %d，用时 %s",
 			bar, scanInfo, len(openPos), closed, added, time.Since(start).Round(time.Millisecond))
@@ -225,6 +265,7 @@ func EngineRun(minute string) error {
 			logx.Logf("WARN", "滚动清理失败：%v", err)
 		}
 	}
+	pTail()
 	return nil
 }
 
@@ -242,8 +283,10 @@ func (e *engineState) maybePauseOnErrors(cfg *conf.Config) {
 // 出场（对应文案 §7.3）
 // ---------------------------------------------------------------------------
 
-func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []repo.OpenPos,
-	markPrices map[string]float64, bar string) (int, map[int64]bool) {
+// runExits 出场巡检。kdb 非 nil 时布林上轨判定读本地库（见 LatestSignal 注释），
+// 传 nil 退回纯网络。两条路的口径逐位一致，只是快慢差两个数量级。
+func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineReader,
+	openPos []repo.OpenPos, markPrices map[string]float64, bar string) (int, map[int64]bool) {
 
 	closedIDs := map[int64]bool{}
 	if len(openPos) == 0 {
@@ -271,6 +314,10 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 
 	closed := 0
 	nowMs := time.Now().UnixMilli()
+	// 布林上轨判定要逐仓拉 K 线（LatestSignal → CandlesEnough → 每仓 2 次 OKX HTTP），
+	// 是 runExits 里唯一的网络大户，单独计时。
+	var bollCalls, bollFromDB int
+	pBoll := perf.Track("runExits.boll")
 	for _, p := range openPos {
 		px := markPrices[p.InstID]
 		if px <= 0 || p.EntryPx <= 0 {
@@ -302,7 +349,12 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 			}
 		}
 		if reason == "" && cfg.Exit.BollUpperExit {
-			if sig, _, err := LatestSignal(cfg, cli, p.InstID, p.Bar); err == nil && sig != nil &&
+			bollCalls++
+			sig, _, fromDB, err := LatestSignal(cfg, cli, kdb, p.InstID, p.Bar)
+			if fromDB {
+				bollFromDB++
+			}
+			if err == nil && sig != nil &&
 				!isNaN(sig.BollUp) && sig.Close > sig.BollUp {
 				reason = "布林上轨（均值回归出场）"
 			}
@@ -317,6 +369,11 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, openPos []rep
 		}
 		closed++
 		closedIDs[p.ID] = true
+	}
+	pBoll()
+	if bollCalls > 0 {
+		perf.Count("runExits.bollCalls", int64(bollCalls))
+		perf.Count("runExits.bollFromDB", int64(bollFromDB))
 	}
 	return closed, closedIDs
 }
