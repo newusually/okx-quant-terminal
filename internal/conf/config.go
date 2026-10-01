@@ -37,15 +37,16 @@ type EntryCfg struct {
 	MarginPolicy  string  `json:"margin_policy"`
 	MaxMarginUSDT float64 `json:"max_margin_usdt"`
 
-	// MinBarRisePct 触发信号的那根 K 线必须涨过这个百分比（收盘 vs 开盘），
-	// 否则即使共振达标也不下单。**买入与加仓共用同一个判据**
+	// MinBarRisePct 触发信号的那根 K 线的**带符号涨跌幅门槛**（% = (收−开)÷开×100），
+	// 共振达标但涨跌幅不过门槛也不下单。**买入与加仓共用同一个判据**
 	// （service.SignalQualified），所以它天然满足「加仓条件与买入一致」。
 	//
-	//	> 0  严格大于该值才通过（默认 0.5，即「必须大于 0.5% 涨幅」）
+	//	> 0  RisePct 严格大于该值才通过（「必须真涨」；涨恰好该值不算）
+	//	< 0  RisePct 严格小于该值才通过（「必须真跌」；默认 -0.7，即「必须跌超 0.7%」）
 	//	= 0  显式关闭这个条件（只看 score）
-	//	nil  没写这个键 → 用默认 0.5
+	//	nil  没写这个键 → 用默认 DefaultMinBarRisePct（当前 -0.7）
 	//
-	// ⚠ 语义是「严格大于」：涨 0.50% 不算，必须 > 0.5。
+	// ⚠ 两个方向都是**严格**比较：RisePct 恰好等于门槛值 → 拒绝。
 	//
 	// ★ 为什么用指针而不是 float64 ★
 	//   值类型下「没写」和「写了 0」都是 0，两者语义完全相反：
@@ -54,6 +55,7 @@ type EntryCfg struct {
 	//   二期在 MaxConcurrentPositions / DailyMaxEntries 上正是栽在
 	//   「0 被 `<= 0` 反压回默认值」这一步（用户写了 0 想取消限制，配置却静默失效）。
 	//   指针是唯一能不歧义表达三态的写法。读取一律走 Config.MinBarRisePct()。
+	//   ★ 六期起负数是有意义的（「必须真跌」），**不许**再把负数归一化回默认值。
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
 }
 
@@ -457,12 +459,12 @@ func defaultConfig() *Config {
 		Workers:               4,
 		CandleLimit:           300,
 		HistoryPages:          2,
-		// ★ 2026-10-02 五期：阈值 4 → **3**（用户口径「Score >= 3 且 RisePct > 0.5」）。
+		// ★ 2026-10-02 五期：阈值 4 → **3**（用户口径「Score >= 3 且 RisePct < -0.7」）。
 		//   判定处本就是 sig.Score >= threshold，Score 是 0~8 的整数，
 		//   所以写 3 就等于「≥ 3」，判定符号一个字都不用动。
 		//   （三期曾写 4 来表达「> 3」，那是当时「8 个共振中 4 个及以上」的口径。）
 		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
-		//     放到 3 命中量会明显大于 4，靠下面的「这根 K 线必须真涨」把关。
+		//     3 的把关交给下面的 min_bar_rise_pct（六期起：触发那根必须真跌 < -0.7%）。
 		ScoreThreshold:        3,
 		ScoreThresholdMap:     map[string]int{},
 		SignalTimeoutSec:      900,
@@ -480,18 +482,19 @@ func defaultConfig() *Config {
 			//   min_one 口径不变：买得起就按 0.1U 成交，买不起就放大到「刚好 1 张」，
 			//   硬顶 MaxMarginUSDT = 1U（与准入上限 max_order_margin_usdt 同值）。
 			MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
-			// ★ 2026-10-02 三期新增 / 五期改值：触发信号的那根 K 线必须**真涨**
-			//   超过这个百分比，买入与加仓共用同一判据（service.SignalQualified）。
-			//   五期按用户口径 1.1% → **0.5%**。
+			// ★ 2026-10-02 三期新增 / 六期改语义：触发信号的那根 K 线的涨跌幅门槛
+			//   （带符号，买入与加仓共用同一判据 service.SignalQualified）：
+			//     > 0 → 必须真涨超过它（三期 1.0 / 四期 1.1 / 五期 0.5 的用法）
+			//     < 0 → 必须真跌低于它（六期用户口径「RisePct < -0.7（严格小于）」）
 			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
-			MinBarRisePct: f64ptr(0.5),
+			MinBarRisePct: f64ptr(-0.7),
 		},
 		// ★ 2026-10-02 四期：止盈 **0.3%**、布林上轨关闭、超时收紧到 1 小时。
 		//   兜底默认值必须与 JSON 一致 —— 否则 JSON 读不到时布林上轨会静默复活
 		//   （与三期 exclude_stock_etf 的兜底同一个道理）。
 		Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false,
 			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
-		// 加仓：触发条件**与买入完全一致**（score ≥ 3 且触发那根涨幅 > 0.5%），金额 = 原持仓保证金 × 1/3
+		// 加仓：触发条件**与买入完全一致**（score ≥ 3 且触发那根涨跌幅过门槛，当前 -0.7% 必须真跌），金额 = 原持仓保证金 × 1/3
 		//
 		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
 		//   用户口径「加仓条件也是和买入条件一样」。
@@ -1005,22 +1008,23 @@ func StripJSONComments(b []byte) []byte {
 // 派生口径
 // ---------------------------------------------------------------------------
 
-// DefaultMinBarRisePct 「K 线必须真涨」条件的默认门槛（%）。
+// DefaultMinBarRisePct 「触发那根 K 线涨跌幅门槛」的默认值（%，带符号）。
 //
-// ★ 2026-10-02 五期：1.0 → **0.5**（用户口径「Score >= 3 且 RisePct > 0.5」）。
+// ★ 2026-10-02 六期：0.5（必须真涨）→ **-0.7（必须真跌）**
+//   （用户口径「Score >= 3 且 RisePct < -0.7（严格小于）」）。
 // 这个常量同时被 conf 与 service 两侧读（service.StrategyConfig.MinBarRisePct
 // 的兜底就用它），改一处两处都跟着变 —— 这正是它作为常量存在的意义。
-const DefaultMinBarRisePct = 0.5
+const DefaultMinBarRisePct = -0.7
 
 // f64ptr 取一个 float64 的指针（配置里的「三态」字段用）。
 func f64ptr(v float64) *float64 { return &v }
 
-// MinBarRisePct 触发信号的那根 K 线至少要涨多少（%）才允许下单。
+// MinBarRisePct 触发信号的那根 K 线的带符号涨跌幅门槛（%）。
 //
-//	Entry.MinBarRisePct == nil → 默认 DefaultMinBarRisePct（当前 0.5；键没写：条件仍然生效）
+//	Entry.MinBarRisePct == nil → 默认 DefaultMinBarRisePct（当前 -0.7；键没写：条件仍然生效）
 //	Entry.MinBarRisePct == 0   → 0（显式关闭：只看 score）
-//	Entry.MinBarRisePct > 0    → 原值（严格大于）
-//	Entry.MinBarRisePct < 0    → 视为写错，按默认值（负数没有物理含义）
+//	Entry.MinBarRisePct > 0    → 原值（RisePct 必须严格大于它 = 必须真涨）
+//	Entry.MinBarRisePct < 0    → 原值（RisePct 必须严格小于它 = 必须真跌，六期新语义）
 //
 // 买入扫描与加仓判定都必须走这个方法，不要各自解指针
 // ——「同一个量两条路算」是本项目反复踩的坑。
@@ -1028,11 +1032,9 @@ func (c *Config) MinBarRisePct() float64 {
 	if c == nil || c.Entry == nil || c.Entry.MinBarRisePct == nil {
 		return DefaultMinBarRisePct
 	}
-	v := *c.Entry.MinBarRisePct
-	if v < 0 {
-		return DefaultMinBarRisePct
-	}
-	return v
+	// 六期起负数承载「必须真跌」，原样返回 —— 千万别再加「v < 0 → 回默认」的分支，
+	// 那会把用户的 -0.7 静默吞掉（正是本项目的头号故障形态）。
+	return *c.Entry.MinBarRisePct
 }
 
 // OrderMarginCap 单笔保证金硬上限（USDT）。

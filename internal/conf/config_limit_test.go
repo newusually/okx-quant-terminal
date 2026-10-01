@@ -264,56 +264,58 @@ func TestEntryMarginDefaultsTo01USDT(t *testing.T) {
 	}
 }
 
-// TestMinBarRisePctThreeStates 「这根 K 线必须真涨」的三种状态必须泾渭分明。
+// TestMinBarRisePctThreeStates 「触发那根 K 线涨跌幅门槛」的状态必须泾渭分明。
 //
 //	min_bar_rise_pct 用**指针**，为的就是区分「没写」与「写了 0」：
-//	  没写   → 默认 0.5（漏配时条件仍在，不会静默放开全市场下单）
+//	  没写   → 默认 -0.7（六期：必须真跌；漏配时条件仍在，不会静默放开全市场下单）
 //	  写 0   → 真的关掉这个条件
-//	  写负数 → 视为写错，按默认 0.5
+//	  写正数 → 「必须真涨」原样生效（旧语义保留）
+//	  写负数 → 「必须真跌」原样生效（★ 六期新语义，绝不能被归一化回默认值）
 //
 // 为什么值得单独守：二期在 max_concurrent_positions / daily_max_entries 上
 // 正是栽在「用户写的 0 被 `<= 0` 反压回默认值」—— 配置看起来改了、其实没生效。
-// 若这里退化成值类型 + `<=0 兜底`，同一个坑会原样复现。
+// 六期用户写 -0.7 表达「必须真跌」，若有人加回「v < 0 → 回默认」的分支，
+// 整个方向语义会被静默吞掉 —— 这个测试会立刻红。
 func TestMinBarRisePctThreeStates(t *testing.T) {
-	// ① 没写（nil）→ 默认 0.5
+	// ① 没写（nil）→ 默认 -0.7
 	d := defaultConfig()
-	if d.MinBarRisePct() != 0.5 {
-		t.Fatalf("默认 min_bar_rise_pct 应为 0.5，实际 %v", d.MinBarRisePct())
+	if d.MinBarRisePct() != -0.7 {
+		t.Fatalf("默认 min_bar_rise_pct 应为 -0.7，实际 %v", d.MinBarRisePct())
 	}
 	// 默认常量本身也必须跟上（service 侧兜底读的就是它）
-	if DefaultMinBarRisePct != 0.5 {
-		t.Fatalf("DefaultMinBarRisePct 应为 0.5，实际 %v", DefaultMinBarRisePct)
+	if DefaultMinBarRisePct != -0.7 {
+		t.Fatalf("DefaultMinBarRisePct 应为 -0.7，实际 %v", DefaultMinBarRisePct)
 	}
 	c := &Config{}
 	fillDefaults(c)
-	if c.MinBarRisePct() != 0.5 {
-		t.Fatalf("键缺失时应为 0.5，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != -0.7 {
+		t.Fatalf("键缺失时应为 -0.7，实际 %v", c.MinBarRisePct())
 	}
-	// ② 显式写 0 → 关闭条件（绝不能被反压回 0.5）
+	// ② 显式写 0 → 关闭条件（绝不能被反压回 -0.7）
 	zero := 0.0
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &zero}}
 	fillDefaults(c)
 	if c.MinBarRisePct() != 0 {
 		t.Fatalf("min_bar_rise_pct=0（显式关闭）被改成了 %v，条件会静默复活", c.MinBarRisePct())
 	}
-	// ③ 显式写正数 → 原样生效
+	// ③ 显式写正数 → 原样生效（旧「必须真涨」语义保留）
 	v := 2.5
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &v}}
 	fillDefaults(c)
 	if c.MinBarRisePct() != 2.5 {
 		t.Fatalf("min_bar_rise_pct=2.5 应原样保留，实际 %v", c.MinBarRisePct())
 	}
-	// ④ 负数 = 写错 → 按默认 0.5（既不能变成「关闭」，也不能倒扣）
+	// ④ 显式写负数 → 原样生效（★ 六期「必须真跌」新语义，不许归一化回默认）
 	neg := -3.0
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &neg}}
 	fillDefaults(c)
-	if c.MinBarRisePct() != 0.5 {
-		t.Fatalf("负数应按默认 0.5 处理，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != -3.0 {
+		t.Fatalf("min_bar_rise_pct=-3.0（必须真跌）被改成了 %v，方向语义被吞", c.MinBarRisePct())
 	}
 	// ⑤ Entry 整块缺失也不能 panic，同样退回默认
 	c = &Config{Entry: nil}
-	if c.MinBarRisePct() != 0.5 {
-		t.Fatalf("Entry 为 nil 时应退回 0.5，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != -0.7 {
+		t.Fatalf("Entry 为 nil 时应退回 -0.7，实际 %v", c.MinBarRisePct())
 	}
 }
 

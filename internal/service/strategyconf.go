@@ -28,8 +28,8 @@ type StrategyEntry struct {
 	MarginPolicy           string  `json:"margin_policy"`
 	MaxMarginUSDT          float64 `json:"max_margin_usdt"`
 
-	// MinBarRisePct 触发信号的那根 K 线必须涨过这个百分比（三期新增）。
-	// 用指针区分「没写」（nil → 默认 1.0）与「写了 0」（= 关闭该条件），
+	// MinBarRisePct 触发信号的那根 K 线的带符号涨跌幅门槛（三期新增；六期起负值=必须真跌）。
+	// 用指针区分「没写」（nil → 默认 -0.7）与「写了 0」（= 关闭该条件），
 	// 语义与 conf.EntryCfg.MinBarRisePct 完全一样 —— 前端展示的值
 	// 必须与真正生效的值一致，否则改了口径在页面上看不出来。
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
@@ -54,7 +54,7 @@ type StrategyExit struct {
 // StrategyAddon 加仓参数（前端展示用）
 //
 //	用户口径（2026-10-01 二期 → 2026-10-02 五期）：加仓次数**不限**，
-//	触发条件与买入完全一致（Score ≥ 3 且触发那根 K 线涨幅 > 0.5%，共用 SignalQualified）。
+//	触发条件与买入完全一致（Score ≥ 3 且触发那根 K 线涨跌幅过带符号门槛，六期 -0.7 必须真跌，共用 SignalQualified）。
 type StrategyAddon struct {
 	Enabled  bool    `json:"enabled"`
 	Ratio    float64 `json:"ratio"`
@@ -92,11 +92,12 @@ type StrategyConfig struct {
 	Path string `json:"path"` // 配置文件路径（不在 JSON 里）
 }
 
-// MinBarRisePct 触发信号那根 K 线的最低涨幅（%）。
+// MinBarRisePct 触发信号那根 K 线的带符号涨跌幅门槛（%）。
 //
-//	指针 nil（键没写）→ 默认 1.0
+//	指针 nil（键没写）→ 默认 DefaultMinBarRisePct（当前 -0.7 = 必须真跌）
 //	0                → 关闭该条件（只看 score）
-//	负数             → 视为写错，按默认 1.0
+//	> 0              → RisePct 必须严格大于它（必须真涨）
+//	< 0              → RisePct 必须严格小于它（必须真跌，六期新语义）
 //
 // 与 conf.Config.MinBarRisePct() 是同一套三态语义。前端只是展示，
 // 但**展示的值必须等于真正生效的值** —— 否则改了 JSON 在页面上看不出变化，
@@ -105,11 +106,8 @@ func (c *StrategyConfig) MinBarRisePct() float64 {
 	if c == nil || c.Entry.MinBarRisePct == nil {
 		return conf.DefaultMinBarRisePct
 	}
-	v := *c.Entry.MinBarRisePct
-	if v < 0 {
-		return conf.DefaultMinBarRisePct
-	}
-	return v
+	// 六期起负数承载「必须真跌」，原样返回，不许归一化回默认值。
+	return *c.Entry.MinBarRisePct
 }
 
 // StrategyLive 实时引擎的两条心跳间隔（秒）
@@ -134,7 +132,7 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		//   兜底值必须一起改，否则配置读不到时选项卡里会冒出 1m。
 		BarsEnabled: []string{"3m", "5m", "15m"},
 		SignalBars:  []string{"3m", "5m", "15m"},
-		// ★ 2026-10-02 五期：阈值 4 → 3（用户口径「Score >= 3 且 RisePct > 0.5」）
+		// ★ 2026-10-02 五期：阈值 4 → 3（用户口径「Score >= 3 且 RisePct < -0.7」，涨幅方向六期补全）
 		ScoreThreshold: 3,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		// ★ 三期：品类过滤默认关闭（「取消美股 etf 不做的功能」）

@@ -300,11 +300,11 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 
 	// ③ 共振判据：**与买入扫描调同一个函数**（service.SignalQualified）。
 	//
-	//    2026-10-02 五期口径：Score ≥ 3（threshold = 3）
-	//    + 这根 K 线必须真涨过 min_bar_rise_pct（当前 0.5%）。
+	//    2026-10-02 六期口径：Score ≥ 3（threshold = 3）
+	//    + 这根 K 线涨跌幅过带符号门槛 min_bar_rise_pct（当前 -0.7% = 必须真跌）。
 	//
 	//    ★ 刻意不再在这里手写 `sig.Score < th`：买入那边已经改调同一个函数，
-	//      这里若继续自己判，两个条件（分数 + 涨幅）就会各自只在一半路径上生效，
+	//      这里若继续自己判，两个条件（分数 + 涨跌幅）就会各自只在一半路径上生效，
 	//      「加仓条件与买入一致」立刻变成假的 —— 而且不报错。
 	if !SignalQualified(sig, cfg.ThresholdFor(p.InstID), cfg.MinBarRisePct()) {
 		return AddonDecision{}
@@ -374,11 +374,13 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if a.MaxTimes > 0 {
 		timesTxt = fmt.Sprintf("上限 %d 次", a.MaxTimes)
 	}
-	// 原因文本里把两个条件都写出来（分数门槛 + 这根必须真涨），
+	// 原因文本里把两个条件都写出来（分数门槛 + 涨跌幅门槛方向随符号，六期起负值=必须真跌），
 	// 否则事后查「为什么加了这一笔」只看到一个数字，看不出三期多出来的那个条件。
 	riseTxt := ""
 	if mr := cfg.MinBarRisePct(); mr > 0 {
 		riseTxt = fmt.Sprintf("、触发那根涨 %.2f%% ＞ %.2f%%", sig.RisePct, mr)
+	} else if mr < 0 {
+		riseTxt = fmt.Sprintf("、触发那根涨 %.2f%% ＜ %.2f%%", sig.RisePct, mr)
 	}
 
 	return AddonDecision{

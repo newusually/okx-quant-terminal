@@ -712,10 +712,13 @@ function renderServiceInfo(st) {
     // ★ 五期口径：score_threshold 现在就是字面语义「Score ≥ 3」，不再需要括号注解
     //   （三期时它写的是 4、用来表达「> 3」，才要额外说明）。
     ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8'],
-    // 门槛「触发信号那根 K 线必须真涨」。0 = 该条件已关闭。五期阈值 0.5%。
-    ['K线涨幅要求', (st.minBarRisePct > 0
-      ? '> ' + fmtNum(st.minBarRisePct, 2) + '%（收盘 vs 开盘）'
-      : '已关闭')],
+    // 门槛「触发信号那根 K 线的涨跌幅」（带符号，六期起负值 = 必须真跌）。
+    // 0 = 该条件已关闭。当前 -0.7%。
+    ['K线涨跌幅要求', (st.minBarRisePct > 0
+      ? '> ' + fmtNum(st.minBarRisePct, 2) + '%（必须真涨，收盘 vs 开盘）'
+      : st.minBarRisePct < 0
+        ? '< ' + fmtNum(st.minBarRisePct, 2) + '%（必须真跌，收盘 vs 开盘）'
+        : '已关闭')],
     // 品类过滤（三期已取消）。显示出来，免得以后有人以为「美股/ETF 被排掉了」。
     ['品类过滤', st.excludeStockEtf ? '只做加密（美股/ETF/商品排除）' : '不限（只看最小一手 ≤ 上限）'],
     // 三条独立红线（2026-10-01 二期起）：

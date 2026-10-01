@@ -5,20 +5,22 @@ import (
 	"testing"
 )
 
-// 五期口径（2026-10-02）：
+// 六期口径（2026-10-02）：
 //
-//	「Score >= 3 且 RisePct > 0.5（严格大于）」—— 两个条件必须落在**同一根已收盘 K 线**上。
+//	「Score >= 3 且 RisePct < -0.7（严格小于）」—— 触发那根必须真跌超 0.7%，
+//	两个条件必须落在**同一根已收盘 K 线**上。
 //
-// SignalQualified 是买入扫描 / 加仓判定 / 信号入库**三处共用的唯一判据**，
-// 所以它的边界必须钉死 —— 一旦这里漂移，三处会一起漂，而且不报错。
+// min_bar_rise_pct 从六期起是**带符号门槛**：> 0 必须真涨、< 0 必须真跌、0 = 关闭。
+// 两个方向的边界都要钉死 —— SignalQualified 是买入扫描 / 加仓判定 / 信号入库
+// **三处共用的唯一判据**，一旦这里漂移，三处会一起漂，而且不报错。
 func TestSignalQualified(t *testing.T) {
 	mk := func(score int, ready bool, rise float64) *Signal {
 		return &Signal{Score: score, Ready: ready, RisePct: rise}
 	}
 
 	const (
-		th = 3   // 五期默认阈值（configs/okx_strategy.json 的 score_threshold）
-		mr = 0.5 // 五期默认涨幅门槛（entry.min_bar_rise_pct）
+		th = 3    // 六期默认阈值（configs/okx_strategy.json 的 score_threshold）
+		mr = -0.7 // 六期默认涨跌幅门槛（entry.min_bar_rise_pct，负值 = 必须真跌）
 	)
 
 	cases := []struct {
@@ -28,19 +30,22 @@ func TestSignalQualified(t *testing.T) {
 		minRise   float64
 		want      bool
 	}{
-		{"A 用户口径：score 3 且涨 2% → 通过", mk(3, true, 2.0), th, mr, true},
-		{"B score 2 不满足「>= 3」→ 拒绝", mk(2, true, 2.0), th, mr, false},
-		{"C score 满分但只涨 0.4% → 拒绝", mk(8, true, 0.4), th, mr, false},
-		{"D 涨幅恰好 0.5（口径是严格大于）→ 拒绝", mk(5, true, 0.5), th, mr, false},
-		{"E 涨幅 0.5001 → 通过", mk(5, true, 0.5001), th, mr, true},
-		{"F 分数刚好 3 但涨幅压线 0.5 → 拒绝（两个条件缺一不可）", mk(3, true, 0.5), th, mr, false},
-		{"G minRise=0 = 关闭涨幅条件 → 通过", mk(5, true, -3.0), th, 0, true},
-		{"H 暖机不足（Ready=false）→ 拒绝", mk(8, false, 5.0), th, mr, false},
-		{"I nil 信号 → 拒绝", nil, th, mr, false},
-		{"J 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, 5.0), 0, mr, false},
-		{"K RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), th, mr, false},
-		{"L 下跌的 K 线 → 拒绝", mk(8, true, -2.0), th, mr, false},
-		{"M minRise 为负 = 按未填处理，不启用", mk(5, true, 0.0), th, -1.0, true},
+		{"A 用户口径：score 3 且跌 2% → 通过", mk(3, true, -2.0), th, mr, true},
+		{"B score 2 不满足「>= 3」→ 拒绝", mk(2, true, -2.0), th, mr, false},
+		{"C score 满分但只跌 0.6% → 拒绝", mk(8, true, -0.6), th, mr, false},
+		{"D 跌幅恰好 -0.7（口径是严格小于）→ 拒绝", mk(5, true, -0.7), th, mr, false},
+		{"E 跌幅 -0.7001 → 通过", mk(5, true, -0.7001), th, mr, true},
+		{"F 分数刚好 3 但跌幅压线 -0.7 → 拒绝（两个条件缺一不可）", mk(3, true, -0.7), th, mr, false},
+		{"G 上涨的 K 线（+2%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 2.0), th, mr, false},
+		{"H 平盘（0%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 0), th, mr, false},
+		{"I minRise=0 = 关闭涨跌幅条件 → 通过", mk(5, true, 3.0), th, 0, true},
+		{"J 暖机不足（Ready=false）→ 拒绝", mk(8, false, -5.0), th, mr, false},
+		{"K nil 信号 → 拒绝", nil, th, mr, false},
+		{"L 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, -5.0), 0, mr, false},
+		{"M RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), th, mr, false},
+		{"N 正门槛（旧语义「必须真涨」）仍可用：+2% 过、-2% 拒", mk(5, true, 2.0), th, 0.5, true},
+		{"O 正门槛下下跌的 K 线 → 拒绝", mk(5, true, -2.0), th, 0.5, false},
+		{"P 正门槛下恰好压线 0.5 → 拒绝（严格大于）", mk(5, true, 0.5), th, 0.5, false},
 	}
 
 	for _, c := range cases {

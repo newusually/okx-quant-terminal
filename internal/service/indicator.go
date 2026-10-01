@@ -50,9 +50,11 @@ type Signal struct {
 	// RisePct 这一根 K 线自己的涨跌幅（%）= (收 − 开) ÷ 开 × 100。
 	//
 	// ★ 2026-10-02 三期新增（用户口径：「有信号的那个 K 线必须大于 1% 涨幅才行」；
-	//   五期门槛改为 0.5%）。放在 Signal 里而不是让调用方自己拿 candles[idx] 算，
+	//   五期门槛 0.5%；六期反转为「必须真跌 < -0.7%」——门槛值本身没变过语义，
+	//   变的是符号承载的方向，见 SignalQualified 的带符号门槛说明）。
+	//   放在 Signal 里而不是让调用方自己拿 candles[idx] 算，
 	//   是为了让买入扫描与加仓判定读到**同一个数** —— 两处各算一遍是本项目的老坑。
-	//   开盘价为 0（脏数据）时记 0：这样它一定过不了「> min_bar_rise_pct」的门槛，偏保守。
+	//   开盘价为 0（脏数据）时记 0：无论门槛是正是负，0 都过不了，偏保守。
 	RisePct float64
 
 	Pot     float64
@@ -70,9 +72,9 @@ type Signal struct {
 //
 // ★★ 这是「买入」与「加仓」共用的唯一判据 —— 两处都必须调它 ★★
 //
-// 用户口径（2026-10-02 五期）：
+// 用户口径（2026-10-02 六期）：
 //
-//	「Score >= 3 且 RisePct > 0.5（严格大于）」
+//	「Score >= 3 且 RisePct < -0.7（严格小于）」—— 触发那根 K 线必须真跌超 0.7%
 //
 // 三个条件同时成立才通过：
 //
@@ -80,8 +82,10 @@ type Signal struct {
 //	                      score 本身没有意义（比如冷启动只拉到几十根 K 线）
 //	② sig.Score >= 门槛   调用方传 cfg.ThresholdFor(instID)。判定是**非严格** `>=`，
 //	                      所以 threshold = 3 就是用户说的「Score >= 3」（Score 是 0~8 的整数）
-//	③ sig.RisePct > 涨幅  该根 K 线的实体涨跌幅要**严格大于** minRisePct（五期默认 0.5）。
-//	                      minRisePct <= 0 表示不启用这个条件（只看分数）
+//	③ minRisePct 是**带符号门槛**（六期起）：
+//	                      > 0 → RisePct 必须严格大于它（「必须真涨」，五期及以前的用法）
+//	                      < 0 → RisePct 必须严格小于它（「必须真跌」，六期：-0.7）
+//	                      = 0 → 关闭这个条件（只看分数）
 //
 // 为什么必须做成一个函数：加仓的口径是「与买入条件完全一致」。只要两处
 // 各写一遍判定，迟早会在边界上走岔 ——「>= 还是 >」「用 Close 还是 RisePct」
@@ -99,9 +103,13 @@ func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
 	if sig.Score < threshold {
 		return false
 	}
-	// 写成 !(a > b) 而不是 a <= b：RisePct 理论上是 NaN 时
+	// 带符号门槛（六期）：正数=必须真涨、负数=必须真跌、0=关闭。
+	// 写成 !(a > b) / !(a < b) 而不是反向比较：RisePct 理论上是 NaN 时
 	// 所有比较都是 false，前者会把 NaN 判成「不合格」（保守），后者会放行。
 	if minRisePct > 0 && !(sig.RisePct > minRisePct) {
+		return false
+	}
+	if minRisePct < 0 && !(sig.RisePct < minRisePct) {
 		return false
 	}
 	return true

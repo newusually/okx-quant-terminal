@@ -244,7 +244,7 @@ func engineRunBars(bars []string) error {
 	pExits()
 
 	// ①.5 加仓（摊薄均价）：条件与买入**完全一致** ——
-	//      该仓位自己周期上最后一根已收盘 K 线满足 SignalQualified（Score ≥ 阈值 且涨幅 > 0.5%）
+	//      该仓位自己周期上最后一根已收盘 K 线满足 SignalQualified（Score ≥ 阈值 且涨跌幅过门槛，六期：< -0.7% 必须真跌）
 	//      → 补原持仓保证金的 1/3（ratio）。次数不限（max_times = 0）。
 	//      必须在出场之后（刚平的仓不加）、入场之前（总保证金按新值算）。
 	//

@@ -69,8 +69,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		"marginText":   scfg.MarginText(),
 		// 准入上限：前端「服务信息」直接显示，方便确认 JSON 改了有没有生效
 		"maxOrderMarginUsdt": scfg.MaxOrderMarginUSDT,
-		// 品类过滤开关（三期已默认关闭）与「这根 K 线必须真涨」的门槛，
-		// 同样给前端显示 —— 口径改了看不见才是真的容易出问题。
+		// 品类过滤开关（三期已默认关闭）与「这根 K 线涨跌幅门槛」（六期起带符号，
+		// 负值 = 必须真跌），同样给前端显示 —— 口径改了看不见才是真的容易出问题。
 		"excludeStockEtf": scfg.ExcludeStockETF,
 		"minBarRisePct":   scfg.MinBarRisePct(),
 		"configPath":         s.strategy.Path(),
