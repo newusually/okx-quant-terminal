@@ -37,8 +37,8 @@ func (s *Server) snapshot(st repo.Stats) map[string]any {
 	eq, hasEq, _ := s.db.LatestEquity()
 
 	principal := eq.TotalEq - eq.Upl - st.PnlTotal
-	if s.strategy != nil && s.strategy.PrincipalUSDT > 0 {
-		principal = s.strategy.PrincipalUSDT
+	if cfg := s.cfg(); cfg.PrincipalUSDT > 0 {
+		principal = cfg.PrincipalUSDT
 	}
 	// 总盈亏 = 累计已实现 + 当前浮动盈亏（有持仓时每秒都在动）。
 	totalPnl := eq.Upl + st.PnlTotal
@@ -134,9 +134,10 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 
 	tp := 0.0
 	sl := 0.0
-	if s.strategy != nil {
-		tp = s.strategy.Exit.TakeProfitPct
-		sl = s.strategy.Exit.StopLossPct
+	{
+		cfg := s.cfg()
+		tp = cfg.Exit.TakeProfitPct
+		sl = cfg.Exit.StopLossPct
 	}
 
 	now := time.Now().UnixMilli()

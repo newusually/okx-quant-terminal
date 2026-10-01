@@ -57,16 +57,22 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 	//   等于同一次请求把 trade/signals 的聚合查询做了两遍。
 	account := s.snapshot(st)
 
+	// ★ 每请求现取一次配置（热读），改 JSON 后网页下次轮询就是新口径
+	scfg := s.cfg()
+
 	return map[string]any{
 		"ok":           true,
 		"stats":        st,
 		"account":      account,
 		"live":         service.LiveStatusSnapshot(),
-		"strategy":     s.strategy,
-		"marginText":   s.strategy.MarginText(),
-		"bars":         service.SupportedBars,
-		"dbPath":       s.db.Path(),
-		"tables":       counts,
+		"strategy":     scfg,
+		"marginText":   scfg.MarginText(),
+		// 准入上限：前端「服务信息」直接显示，方便确认 JSON 改了有没有生效
+		"maxOrderMarginUsdt": scfg.MaxOrderMarginUSDT,
+		"configPath":         s.strategy.Path(),
+		"bars":               service.SupportedBars,
+		"dbPath":             s.db.Path(),
+		"tables":             counts,
 		"uptimeSec":    int(time.Since(s.startAt).Seconds()),
 		"queueLen":     s.bf.QueueLen(),
 		"backfillDays": s.bf.Config().Days,
@@ -141,7 +147,7 @@ func (s *Server) handleInstruments(w http.ResponseWriter, r *http.Request) (any,
 		}
 	}
 
-	lev := s.strategy.Entry.Leverage
+	lev := s.cfg().Entry.Leverage
 	out := make([]item, 0, len(list))
 	for _, it := range list {
 		if scope == "tradeable" && it.Tradeable != 1 {

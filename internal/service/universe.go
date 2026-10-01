@@ -21,14 +21,15 @@ package service
 //           24h 成交额低于 MinQuoteVolume24h 的不进候选池（默认 100 万 USDT）。
 //           深度差的小币种滑点会吃掉本金，0.1U 的单子更经不起滑点。
 //
-//   规则 5  单笔保证金必须 ≤ 0.5U
+//   规则 5  单笔保证金必须 ≤ max_order_margin_usdt
 //           一笔的保证金 = 张数 × ctVal × ctMult × 价格 ÷ 杠杆
-//           最小张数由 minSz 决定，所以「0.5U 买得起」等价于
-//               minSz × ctVal × ctMult × price ÷ lever ≤ 0.5
+//           最小张数由 minSz 决定，所以「买得起」等价于
+//               minSz × ctVal × ctMult × price ÷ lever ≤ max_order_margin_usdt
 //           上限由 MarginPolicy 决定：
-//               min_one → 上限 = MaxMarginUSDT（默认 0.5）。0.1U 买不起 1 张的，
-//                         放大到刚好买 1 张来下单；超过 0.5U 的直接排除。
-//               fixed   → 上限 = MarginUSDT。严格 0.1U，买不起就不买。
+//               min_one → 上限 = MaxMarginUSDT。目标 1U 买不起 1 张的，
+//                         放大到刚好买 1 张来下单；超过上限的直接排除。
+//               fixed   → 上限 = MarginUSDT。严格按目标值，买不起就不买。
+//           当前口径（2026-10-01）：目标 1U/笔、上限 1.5U。
 //           不满足的合约（例如 BTC-USDT-SWAP 单张就 830 U）直接不进候选池。
 
 import (
@@ -74,7 +75,11 @@ type UniversePolicy struct {
 	ExtraExclude []string
 }
 
-// DefaultUniversePolicy 默认策略：0.1U/笔、20 倍、不买美股ETF、不买新上线、不买要下线
+// DefaultUniversePolicy 库内兜底策略。
+//
+// ★ 这不是「要求」—— 真正生效的口径来自 configs/okx_strategy.json
+//   （`max_order_margin_usdt` / `entry.*` / `min_quote_volume_24h` 等），
+//   改完热生效。这个函数只在调用方没给策略时兜底，当前生产路径不使用它。
 func DefaultUniversePolicy() UniversePolicy {
 	return UniversePolicy{
 		ExcludeStockETF:       true,

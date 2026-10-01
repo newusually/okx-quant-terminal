@@ -621,6 +621,8 @@ function renderInstInfo() {
   const it = state.insts.find((x) => x.instId === state.curInst);
   const t = state.tickers[state.curInst] || {};
   if (!it) { $('instInfo').innerHTML = '<div class="k muted">未选择合约</div>'; return; }
+  // 当前生效的准入上限（来自 /api/state，后端热读 configs/okx_strategy.json）
+  const st_ = state.lastState || {};
   const catName = { '1': '加密', '3': '美股/ETF', '4': '商品' }[it.instCategory] || it.instCategory || '--';
   const rows = [
     ['合约', it.instId],
@@ -641,6 +643,13 @@ function renderInstInfo() {
     ['品种分类', catName],
     ['准入结论', it.tradeable ? '✔ 可交易' : '✘ ' + (it.excludeLabel || it.excludeReason || '已排除')],
     ['最小一手保证金', it.marginUsdt ? fmtNum(it.marginUsdt, 4) + ' U' : '--'],
+    // 把「这只币」和「准入上限」摆在一起，一眼看出是不是卡在资金这一关上
+    ['准入上限', st_ && st_.maxOrderMarginUsdt != null
+      ? '≤ ' + fmtNum(st_.maxOrderMarginUsdt, 2) + ' U'
+        + (it.marginUsdt > 0
+          ? (it.marginUsdt <= st_.maxOrderMarginUsdt + 1e-9 ? '（满足）' : '（超出，买不起）')
+          : '')
+      : '--'],
     ['下单口径', (state.marginText || '--') + (it.marginUsdt > state.entryMargin ? '（放大到 1 张）' : '')],
   ];
   $('instInfo').innerHTML = rows
@@ -665,6 +674,12 @@ function renderServiceInfo(st) {
     : (sx.max_hold_bars > 0 ? sx.max_hold_bars + ' 根' : '关闭');
   const info = [
     ['每笔保证金', state.marginText || '--'],
+    // 准入上限：symbolList 里「最小一手保证金 ≤ 这个值」才可买入。
+    // 后端热读 configs/okx_strategy.json 的 max_order_margin_usdt，
+    // 改完 JSON 保存，这里下次轮询就会变 —— 不用重启服务。
+    ['可买入上限', (st.maxOrderMarginUsdt != null
+      ? '最小一手 ≤ ' + fmtNum(st.maxOrderMarginUsdt, 2) + 'U'
+      : '--') + '（改 JSON 即时生效）'],
     ['策略周期', (st.strategy && st.strategy.bar) || '--'],
     ['扫描周期', ((st.strategy && st.strategy.bars_enabled) || []).join(' / ') || '--'],
     ['信号周期', ((st.strategy && st.strategy.signal_bars) || []).join(' / ') || '--'],

@@ -97,7 +97,7 @@ docs/           文档（项目详情 / 架构说明 / 策略说明）
 | 2 | 不买刚上线的 | 上市 < 30 天 | `new_listing` |
 | 3 | 不买要下线的 | OKX 公告中心下线名单（24h 缓存） | `delisting` |
 | 4 | 24h 成交额下限 | ≥ 100 万 USDT | `low_volume` |
-| 5 | 最小一手买得起 | `minSz×ctVal×ctMult×价÷杠杆 ≤ 1U` | `notional` |
+| 5 | 最小一手买得起 | `minSz×ctVal×ctMult×价÷杠杆 ≤ 1.5U` | `notional` |
 
 实测：**479 → 171 个可交易**（排除 186 美股/ETF、98 成交额不足、10 新上线、8 商品、5 买不起、1 状态异常）。
 单笔口径上调到 1U 后准入上限同步放宽到 1U/张，可交易数量会随之增加。
@@ -127,7 +127,14 @@ docs/           文档（项目详情 / 架构说明 / 策略说明）
   （走签名路径会 401）。标题含 `postpone/delay/resume/cancel` 视为撤销更早的下线公告。
 * **加仓纯函数**：`service.decideAddon()` 不碰网络，7 个场景有单测覆盖
   （`go test ./internal/service/ -run TestAddon -v`）。
-* **配置热加载**：`configs/okx_strategy.json` 支持 `//` 与 `/* */` 注释，改完保存即生效，不用重启。
+* **配置热加载（热插拔）**：`configs/okx_strategy.json` 支持 `//` 与 `/* */` 注释，
+  **改完保存即刻生效，不用重启服务**。这是所有交易口径的唯一真源 ——
+  Go 里的数字只是「文件缺失/解析失败」的兜底，不构成要求。
+  例：把 `max_order_margin_usdt` 从 `1.5` 改成 `0.4` 保存，约 2 秒后
+  symbolList（可买入合约）当场从 176 个变成 167 个。
+  实现见 `internal/service/strategy_store.go`，实测数据见架构说明 §二十。
+* **改完怎么确认生效**：网页「服务信息」的**可买入上限** / 接口 `/api/state` 的
+  `maxOrderMarginUsdt` / 日志 `[CFG] ★准入上限U 1.5 → 0.4`。
 
 ## 八、验收命令
 

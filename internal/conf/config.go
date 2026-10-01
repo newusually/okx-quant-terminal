@@ -382,6 +382,10 @@ func defaultConfig() *Config {
 		MinQuoteVolume24h: 1000000,
 		ExcludeInst:       []string{},
 		// 合约准入：不买美股/ETF/商品；不买 30 天内新上线；不买要下线的
+		//
+		// ★ 下面这些数字全是**兜底值**，只在 configs/okx_strategy.json
+		//   缺失或解析失败时才会被用到。真正生效的口径一律来自那个 JSON
+		//   （改完即刻生效，热插拔，不用重启服务、更不用改代码）。
 		ExcludeStockETF:       true,
 		ExcludeNewListingDays: 30,
 		ExcludeDelisting:      true,
@@ -398,7 +402,8 @@ func defaultConfig() *Config {
 			MarginUSDT: 1.0, Leverage: 20,
 			MaxConcurrentPositions: 8, CooldownBars: 6, DailyMaxEntries: 30,
 			// ★ 2026-10-01 起单笔口径 0.1U → 1U（用户：「改成 1 美金每次交易」）。
-			// 目标每笔 1 U 保证金；合约准入要求「最小一手保证金 ≤ 1 U」。
+			// 目标每笔 1 U 保证金；合约准入要求「最小一手保证金 ≤ max_order_margin_usdt」，
+			// 后者在 configs/okx_strategy.json 里配（当前 1.5U），改完热生效。
 			// 1U 买不起 1 张的合约会放大到刚好买 1 张来下单，绝不超过 MaxMarginUSDT。
 			MarginPolicy: "min_one", MaxMarginUSDT: 1.5,
 		},

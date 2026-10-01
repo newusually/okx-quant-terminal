@@ -415,14 +415,22 @@ func runApp(ctx context.Context) error {
 		fmt.Printf("     · %-14s %8d 行\n", t, counts[t])
 	}
 
-	// ---- 2. 策略配置（给前端显示 0.1U/笔 这些参数）----
+	// ---- 2. 策略配置（热插拔：改 configs/okx_strategy.json 即刻生效）----
+	//
+	// ★ 口径只有一处真源：configs/okx_strategy.json。
+	//   Go 里的默认值只是「文件缺失 / 解析失败」的兜底，不构成任何要求。
+	//   strategyStore.Get() 每次都会比对文件，改了自动重读 —— 不用重启服务。
 	cfgPath := service.StrategyConfigPath(root)
-	strategy, serr := service.LoadStrategy(cfgPath)
-	if serr != nil {
-		fmt.Printf("[CFG] 读取 %s 失败（用默认值）：%v\n", cfgPath, serr)
+	cfgLog := func(format string, args ...any) {
+		fmt.Printf("%s [CFG] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+		logx.Logf("INFO", "[CFG] "+format, args...)
 	}
+	strategyStore := service.NewStrategyStore(cfgPath, cfgLog)
+	strategy := strategyStore.Get()
 	fmt.Printf("[CFG] 策略参数：%s，止盈 %.2f%%，共振阈值 %d/8，dry_run=%v\n",
 		strategy.MarginText(), strategy.Exit.TakeProfitPct, strategy.ScoreThreshold, strategy.DryRun)
+	fmt.Printf("[CFG] 准入上限：最小一手保证金 ≤ %.2fU 才进 symbolList（改 JSON 即时生效，无需重启）\n",
+		strategy.MaxOrderMarginUSDT)
 
 	// ---- 3. 数据服务（业务层）----
 	feed := service.NewDataFeed(*proxy)
@@ -469,9 +477,10 @@ func runApp(ctx context.Context) error {
 	}
 
 	// ---- 2.5 合约准入过滤（哪些能买）----
-	//   不买美股/ETF/商品 + 不买刚上线 + 不买要下线 + 0.1U 必须买得起
+	//   不买美股/ETF/商品 + 不买刚上线 + 不买要下线 + 最小一手保证金 ≤ 准入上限
+	//   （上限来自 configs/okx_strategy.json 的 max_order_margin_usdt）
 	service.SetAnnounceCacheDB(db)
-	applyUniverseFilter(db, bf, strategy, *days)
+	applyUniverseFilter(db, bf, strategyStore, *days)
 
 	if *initOnly {
 		fmt.Println("[DB] -init-only：建库建表 + 准入过滤完成，退出")
@@ -484,9 +493,18 @@ func runApp(ctx context.Context) error {
 		}
 
 		// ---- 3.5 准入过滤不是一次性的 ----
-		//   新币上线会老过 30 天、成交额会塌、公告会新出下线通知，
-		//   所以每 30 分钟重跑一次，把结论刷新回 inst.tradeable。
-		//   （公告黑名单自身有 24h 缓存，重跑不会打爆 OKX 接口。）
+		//   (a) 外部原因：新币上线会老过 30 天、成交额会塌、公告会新出下线通知，
+		//       所以每 30 分钟兜底重跑一次，把结论刷新回 inst.tradeable。
+		//       （公告黑名单自身有 24h 缓存，重跑不会打爆 OKX 接口。）
+		//   (b) ★ 配置热插拔 ★：configs/okx_strategy.json 一被改动，
+		//       立刻重算一遍准入 —— 这样改 max_order_margin_usdt 就能
+		//       当场改掉 symbolList，不用重启 OKXWeb。
+		//       用内容 sha256 判定（不是 mtime），编辑器「另存为」不会误触发。
+		go strategyStore.Watch(ctx, 2*time.Second, func(st *service.StrategyConfig) {
+			fmt.Printf("[CFG] 检测到策略配置变更 → 立刻重算合约准入（symbolList）\n")
+			applyUniverseFilter(db, bf, strategyStore, *days)
+		})
+
 		go func() {
 			t := time.NewTicker(30 * time.Minute)
 			defer t.Stop()
@@ -495,14 +513,14 @@ func runApp(ctx context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					applyUniverseFilter(db, bf, strategy, *days)
+					applyUniverseFilter(db, bf, strategyStore, *days)
 				}
 			}
 		}()
 	}
 
 	// ---- 4. 网页服务（接口层）----
-	srv := handler.NewServer(db, feed, bf, strategy, handler.AssetsDir(root), root,
+	srv := handler.NewServer(db, feed, bf, strategyStore, handler.AssetsDir(root), root,
 		func(format string, args ...any) {
 			fmt.Printf("%s [WEB]  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		})
@@ -533,7 +551,7 @@ func runApp(ctx context.Context) error {
 		fmt.Println("[TRADE] -no-trade：自动交易已关闭（只跑数据 + 网页）")
 		liveBarVal := *liveBar
 		if liveBarVal == "" {
-			liveBarVal = strategy.Bar
+			liveBarVal = strategyStore.Get().Bar
 		}
 		service.StartSignalBackfillLoop(ctx, db, func(format string, args ...any) {
 			logx.Logf("INFO", "[SIG-BF] "+format, args...)
@@ -541,8 +559,9 @@ func runApp(ctx context.Context) error {
 	} else {
 		liveBarVal := *liveBar
 		if liveBarVal == "" {
-			liveBarVal = strategy.Bar
+			liveBarVal = strategyStore.Get().Bar
 		}
+		startCfg := strategyStore.Get()
 		// ---- 4.6 历史信号回算 ----
 		// 回补只入库 K 线，历史 K 线图上没有 🚀。这里后台逐根跑 8 因子，
 		// 与实时扫描同一套 ComputeSignal（口径一致），写进 signals 表；
@@ -561,7 +580,7 @@ func runApp(ctx context.Context) error {
 			},
 		})
 		fmt.Printf("[TRADE] 自动交易已挂载：dry_run=%v 周期=%s 止盈 %.2f%% 布林上轨出场=%v\n",
-			strategy.DryRun, liveBarVal, strategy.Exit.TakeProfitPct, strategy.Exit.BollUpperExit)
+			startCfg.DryRun, liveBarVal, startCfg.Exit.TakeProfitPct, startCfg.Exit.BollUpperExit)
 	}
 
 	// ---- 4.7 OKX 成交明细同步 ----
@@ -633,8 +652,15 @@ func runApp(ctx context.Context) error {
 //	规则 1  不买美股 / ETF / 商品（OKX instCategory != 1 的全砍掉）
 //	规则 2  不买刚上线的（listTime 距今不足 N 天）
 //	规则 3  不买要下线的（OKX 公告中心 announcements-delistings 解析出来的名单）
-//	规则 4  单笔 0.1 USDT 必须买得起（minSz × ctVal × ctMult × 价格 ÷ 杠杆 ≤ 0.1）
-func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, st *service.StrategyConfig, days int) service.FilterStats {
+//	规则 4  单笔保证金必须 ≤ max_order_margin_usdt 才买得起
+//
+// ★ 所有阈值都从 store 现取（热读 configs/okx_strategy.json），
+//   所以改完 JSON 不用重启就能改掉 symbolList。
+func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *service.StrategyStore, days int) service.FilterStats {
+	st := store.Get() // ← 热读：文件一变这里拿到的就是新的
+	if st == nil {
+		return service.FilterStats{}
+	}
 	insts, err := db.ListInstruments()
 	if err != nil {
 		fmt.Printf("[准入] ⚠ 读合约列表失败：%v\n", err)

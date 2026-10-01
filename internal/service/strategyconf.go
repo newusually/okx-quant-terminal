@@ -98,6 +98,8 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		ScoreThreshold: 6,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		ExcludeStockETF: true, ExcludeNewListingDays: 30, ExcludeDelisting: true,
+		// ↑↓ 这些数字全是「配置文件缺失 / 解析失败」时的兜底，
+		//    真正生效的口径永远来自 configs/okx_strategy.json（热插拔）。
 		MaxOrderMarginUSDT: 1.0,
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
 			MarginUSDT: 1.0, Leverage: 20, MaxConcurrentPositions: 8,
@@ -133,12 +135,18 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	default:
 		cfg.Entry.MarginPolicy = "fixed"
 	}
-	// 硬上限不得低于目标每笔保证金，否则「0.1U」永远买不起任何合约
-	if cfg.MaxOrderMarginUSDT < cfg.Entry.MarginUSDT {
-		cfg.MaxOrderMarginUSDT = cfg.Entry.MarginUSDT
-	}
+	// 准入上限（max_order_margin_usdt）：**以 JSON 里写的为准**，
+	// 这里不做任何「要求」。
+	//
+	// 历史包袱：曾有一段「上限不得低于每笔保证金」的钳制，那是错的 ——
+	// 把上限收紧到比每笔保证金更低（每笔 1U、但只买最小一手 ≤0.5U 的合约）
+	// 是完全合理的收紧，不该被偷偷改回去；而放宽（1U → 1.5U）也只需改 JSON。
+	// 现在只有「没填 / 写了个负数」才回落到兜底值。
 	if cfg.MaxOrderMarginUSDT <= 0 {
 		cfg.MaxOrderMarginUSDT = cfg.Entry.MarginUSDT
+		if cfg.MaxOrderMarginUSDT <= 0 {
+			cfg.MaxOrderMarginUSDT = def.MaxOrderMarginUSDT
+		}
 	}
 	if cfg.ExcludeNewListingDays < 0 {
 		cfg.ExcludeNewListingDays = 0

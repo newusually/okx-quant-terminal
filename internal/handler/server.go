@@ -40,7 +40,7 @@ type Server struct {
 	db       *repo.DB
 	feed     *service.DataFeed
 	bf       *service.BackfillManager
-	strategy *service.StrategyConfig
+	strategy *service.StrategyStore
 	assets   fs.FS
 	root     string
 	startAt  time.Time
@@ -53,8 +53,19 @@ type Server struct {
 	freshAt map[string]time.Time
 }
 
+// cfg 取当前生效的策略配置。
+//
+// ★ 热插拔的关键：这里**不缓存**，每次问 store 要最新的。
+//   所以改 configs/okx_strategy.json 后，网页下次轮询就是新口径，不用重启服务。
+func (s *Server) cfg() *service.StrategyConfig {
+	if s.strategy == nil {
+		return &service.StrategyConfig{}
+	}
+	return s.strategy.Get()
+}
+
 // NewServer 组装服务
-func NewServer(db *repo.DB, feed *service.DataFeed, bf *service.BackfillManager, strategy *service.StrategyConfig, assetsDir, root string, logf func(string, ...any)) *Server {
+func NewServer(db *repo.DB, feed *service.DataFeed, bf *service.BackfillManager, strategy *service.StrategyStore, assetsDir, root string, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}

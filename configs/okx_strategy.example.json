@@ -47,7 +47,7 @@
   "exclude_stock_etf": true,        // 排掉美股/ETF/商品，只做加密
   "exclude_new_listing_days": 30,   // 上市不足 30 天的不买（新币插针、没历史 K 线）
   "exclude_delisting": true,        // 排掉 OKX 公告里说要下线的
-  "max_order_margin_usdt": 1.0,     // ★ 单笔准入上限：最小一手保证金 ≤ 1U 才买
+  "max_order_margin_usdt": 1.5,     // ★ 单笔准入上限：最小一手保证金 ≤ 1.5U 才买（2026-10-01 由 1.0 放宽）
 
   // ---- 扫描参数 -------------------------------------------------------------
   "bar": "15m",                 // 主周期。OKX 取值：5m 15m 30m 1H 2H 4H 6H 12H 1D
