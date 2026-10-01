@@ -157,7 +157,14 @@ func EngineRun(minute string) error {
 	// ② 入场
 	scanInfo := fmt.Sprintf("周期 %s 未启用扫描（bars_enabled 未包含）", bar)
 	if cfg.BarEnabled(bar) {
-		res, serr := Scan(cfg, cli, bar)
+		// 把本地库的读能力交给扫描器：库里已经有一百多万行 K 线，
+		// 没必要每轮再从 OKX 拉一遍（实测单合约网络 130ms vs 本地索引 1~5ms）。
+		// 拿不到 DB 句柄就传 nil —— 扫描器会退回原来的纯网络行为，不影响交易。
+		var kdb KlineReader
+		if db, derr := store.DB(); derr == nil {
+			kdb = db
+		}
+		res, serr := Scan(cfg, cli, bar, kdb)
 		if serr != nil {
 			eng.apiErrStreak++
 			eng.maybePauseOnErrors(cfg)
@@ -188,8 +195,8 @@ func EngineRun(minute string) error {
 				logx.Logf("WARN", "更新信号状态失败：%v", err)
 			}
 		}
-		scanInfo = fmt.Sprintf("全市场 %d / 候选 %d / 实算 %d / 信号 %d / 开仓 %d",
-			res.Universe, res.Candidates, res.Scanned, len(res.Signals), opened)
+		scanInfo = fmt.Sprintf("全市场 %d / 候选 %d / 实算 %d / 信号 %d / 开仓 %d / K线本地 %d 网络 %d",
+			res.Universe, res.Candidates, res.Scanned, len(res.Signals), opened, res.FromDB, res.FromNet)
 	}
 
 	if closed > 0 || added > 0 || cfg.BarEnabled(bar) {

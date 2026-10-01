@@ -260,8 +260,25 @@ func isNaN(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
 // 核心：算一次共振
 // ---------------------------------------------------------------------------
 
-// ComputeSignal 在 candles 的 idx 位置上算 8 因子。candles 必须按时间升序（老→新）。
-func ComputeSignal(instID, bar string, candles []Candle, idx int) *Signal {
+// ComputeSignal 判 cands[idx] 这一根的 8 因子。
+//
+// ★ 实现已迁到 indicator_series.go（2026-10-01 性能改造）★
+//
+// 为什么搬走：老版本为了判**一根** K 线，把整段 1500 根的指标全部重算一遍，
+// 逐根扫完整段就退化成 O(n²)（实测 bars1500 逐根 = 440.6ms / 361MB）。
+// 而且每次都 make 出十几个数组，实测 numGC 每秒 7.2 次、live heap 只有 3.5MB。
+//
+// 新实现拆成「指标算一遍」+「O(1) 取下标」，并用 sync.Pool 复用缓冲；
+// 对外语义不变。要对同一段 K 线取多个下标，请用 ComputeSeries。
+//
+// 本文件里的 sma / ema / rsiWilder / boll / macdHist / tdSetup 保留下来，
+// 作为 indicator_series_test.go 等价性测试的**参照实现** —— 两边结果必须比特一致，
+// 否则买卖点会漂移。（下面还有一份老的 computeSignalReference 供对照。）
+
+// computeSignalReference 改造前的原实现，逐行保留，只做等价性对照用。
+//
+// ⚠️ 不要在生产路径调用它 —— 它每次分配 258KB 且是 O(n) per call。
+func computeSignalReference(instID, bar string, candles []Candle, idx int) *Signal {
 	s := &Signal{InstID: instID, Bar: bar}
 	n := len(candles)
 	if n == 0 || idx < 0 || idx >= n {

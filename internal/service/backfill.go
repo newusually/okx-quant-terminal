@@ -848,20 +848,56 @@ func (m *BackfillManager) realtimeLoop() {
 // 老实现每轮都调 CoverageAll()（对 kline 全表按合约 GROUP BY）。表一旦长到
 // 千万行，这个查询要几十秒，而且每 3 分钟跑一次 —— 会把数据库拖垮。
 // 现在改成走内存里的 knownTs 快照：谁有数据、最新到哪根，写入时就记下来了。
+//
+// ★ 2026-10-01 串行改并发 ★
+//
+// 原实现是「串行 for 循环 + 每个合约一次 HTTP 请求」：
+//
+//	for k, maxTs := range known {
+//	    ks, err := m.feed.FetchCandles(instID, bar, 3)   // ← 每次 ~130ms 网络等待
+//	}
+//
+// 实测 `feed.refreshLatest` 平均 44.6 秒、**最大 753.3 秒（12.5 分钟）**。
+// 根因：15m K 线收盘的那一瞬间，479 个合约**同时到期**，而循环是一次一条，
+// 单线程等价于「479 × 单次网络延迟」；再叠加与回补共用限频闸门
+// （ratelimit.Candle() = 20 次/2 秒）时的排队，就滚到了 12 分钟。
+//
+// 现在拆成两段：
+//
+//	① 筛「到期任务」—— 纯内存判断，串行，微秒级
+//	② 抓最新一根 —— worker pool 并发，写法与 scanner.go 完全一致
+//
+// ⚠️ 收益的**天花板是限频闸门，不是并发数**：
+//
+//	闸门 20 次 / 2 秒 = 10 次/秒 → 479 条最少也要 47.9 秒。
+//	并发能把「等网络」和「等闸门」重叠起来，但不可能突破这个地板。
+//	所以预期是 753s → 50~90s，而不是「几秒」。想再快只能减少请求数
+//	（例如只给可交易合约续 K 线），那是产品口径变更，不在这里动。
+//
+// 并发数取 m.cfg.Workers（默认 6；本机 2 核，别超 8）。
 func (m *BackfillManager) refreshLatestKlines() {
 	known := m.knownSnapshot()
 	if len(known) == 0 {
 		return
 	}
 	now := time.Now().UnixMilli()
+
+	// 磁盘满了就整轮不做（与旧实现一致：旧版在循环里遇到就 return）
+	if !m.diskOK() {
+		return
+	}
+
+	// ---- ① 筛到期任务（纯内存，串行）----
+	type refreshJob struct {
+		instID string
+		bar    string
+	}
+	jobs := make([]refreshJob, 0, len(known))
 	for k, maxTs := range known {
 		select {
 		case <-m.stopCh:
 			return
 		default:
-		}
-		if !m.diskOK() {
-			return
 		}
 		instID, bar, ok := splitJobKey(k)
 		if !ok {
@@ -875,14 +911,75 @@ func (m *BackfillManager) refreshLatestKlines() {
 		if now-maxTs < int64(d/time.Millisecond)-3000 {
 			continue
 		}
-		ks, err := m.feed.FetchCandles(instID, bar, 3)
-		if err != nil {
-			continue
+		jobs = append(jobs, refreshJob{instID: instID, bar: bar})
+	}
+	if len(jobs) == 0 {
+		return
+	}
+
+	// ---- ② 并发抓最新一根（I/O 段）----
+	//
+	// 限频由 ratelimit.Candle() 在客户端内部统一把关（与回补、扫描共用同一把），
+	// 所以这里放心开并发 —— 加 worker 不会多打 OKX，只是把等待重叠掉。
+	workers := m.cfg.Workers
+	if workers <= 0 {
+		workers = 6
+	}
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+
+	ch := make(chan refreshJob)
+	var wg sync.WaitGroup
+	var okN, failN, skipN int64
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range ch {
+				ks, err := m.feed.FetchCandles(j.instID, j.bar, 3)
+				if err != nil {
+					atomic.AddInt64(&failN, 1)
+					continue
+				}
+				if len(ks) == 0 {
+					atomic.AddInt64(&skipN, 1)
+					continue
+				}
+				// 与原实现一致：入库失败不影响水位线推进
+				_, _ = m.db.UpsertKlines(ks)
+				m.markKnown(j.instID, j.bar, ks[len(ks)-1].Ts)
+				atomic.AddInt64(&okN, 1)
+			}
+		}()
+	}
+
+	start := time.Now()
+	stopped := false
+	for _, j := range jobs {
+		select {
+		case <-m.stopCh:
+			stopped = true
+		case ch <- j:
 		}
-		if len(ks) > 0 {
-			_, _ = m.db.UpsertKlines(ks)
-			m.markKnown(instID, bar, ks[len(ks)-1].Ts)
+		if stopped {
+			break
 		}
+	}
+	close(ch)
+	wg.Wait()
+
+	// 只在「真干了活」或「出过错」时打日志，避免每 30 秒刷屏
+	ok, fail := atomic.LoadInt64(&okN), atomic.LoadInt64(&failN)
+	elapsed := time.Since(start)
+	if fail > 0 || elapsed > 5*time.Second {
+		tail := ""
+		if stopped {
+			tail = "（收到停止信号，提前收尾）"
+		}
+		m.logf("续最新 K 线：到期 %d 条，成功 %d，失败 %d，跳过 %d，并发 %d，耗时 %.1fs%s",
+			len(jobs), ok, fail, atomic.LoadInt64(&skipN), workers, elapsed.Seconds(), tail)
 	}
 }
 

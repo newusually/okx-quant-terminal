@@ -24,13 +24,18 @@ package main
 //   go run ./cmd/okxweb -focus BTC-USDT-SWAP,ETH-USDT-SWAP
 //   go run ./cmd/okxweb -init-only             # 只建库建表 + 同步一次行情，然后退出
 //   go run ./cmd/okxweb -no-backfill           # 只起网页 + 实时行情
+//   go run ./cmd/okxweb -pprof-addr ""         # 关掉火焰图端口
+//
+// 火焰图在独立的 127.0.0.1:8091（见 startPprof）：绝不能被 Apache 反代到公网。
 
 import (
 	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -63,6 +68,11 @@ var (
 	scope   = flag.String("backfill-scope", "plan",
 		"回补范围：plan（默认，全部live×15m/1H/4H + 可交易×5m）| tradeable | live（约3.6GB，看磁盘）| focus | none")
 	minFree = flag.Int("min-free-mb", 800, "剩余磁盘低于此值就暂停回补（0=不检查）")
+
+	// 性能诊断：pprof 火焰图。单开端口、只绑回环，**绝不能挂在 8090 上**
+	// （8090 被 Apache 反代到公网 80，挂上去 = 把 goroutine 栈暴露给全世界）。
+	pprofAddr = flag.String("pprof-addr", "127.0.0.1:8091",
+		"pprof 火焰图监听地址（只允许回环地址，留空=关闭）。独立端口，不走 Apache")
 
 	// MySQL 连接参数：口令**不再有默认值**（原来这里写死明文，仓库一公开就泄漏）。
 	// 留空 = 走 internal/conf/secret.go 的解析链：
@@ -539,6 +549,17 @@ func runApp(ctx context.Context) error {
 		}
 	}()
 
+	// ---- 4.1 pprof 火焰图（只绑回环，独立端口）----
+	//
+	// 为什么不开在 8090 上：8090 被 Apache 反代到公网 80，挂上去等于把
+	// /debug/pprof 暴露给全世界（里面能读到 goroutine 栈、命令行、堆快照）。
+	// 所以单开一个只绑 127.0.0.1 的端口，Apache 完全不知道它的存在。
+	//
+	// 抓法：
+	//   go tool pprof -http=:9999 http://127.0.0.1:8091/debug/pprof/profile?seconds=30
+	//   curl "http://127.0.0.1:8091/debug/pprof/heap?debug=1"
+	startPprof(*pprofAddr)
+
 	// ---- 4.5 自动交易引擎（业务层）----
 	//
 	// 两条心跳，全自动，不需要人盯：
@@ -853,6 +874,84 @@ func applyMySQLFlags(c *repo.MySQLConfig) {
 	if *mDB != "" {
 		c.Database = *mDB
 	}
+}
+
+// startPprof 起一个**只绑回环地址**的 pprof 服务。
+//
+// 存在的理由：优化之前必须先知道 CPU 花在哪。没有火焰图就只能靠推断，
+// 而本项目的推断已经错过一次（以为瓶颈在指标计算，实测计算只占墙钟 0.21%）。
+//
+// 两条安全约束（都不是可选的）：
+//
+//  1. 独立端口 —— 绝不能挂在 8090 上。8090 被 Apache 反代到公网 80，
+//     挂上去等于把 goroutine 栈 / 命令行 / 堆快照暴露给全世界。
+//  2. 强制回环 —— 哪怕有人手滑传 `-pprof-addr 0.0.0.0:8091`，这里直接拒绝启动。
+//     端口配错不该变成一次安全事件。
+//
+// 抓法：
+//
+//	go tool pprof -http=:9999 "http://127.0.0.1:8091/debug/pprof/profile?seconds=30"
+//	go tool pprof -http=:9999 http://127.0.0.1:8091/debug/pprof/heap
+//
+// 抓完记得关：`-pprof-addr ""` 或改回默认。
+func startPprof(addr string) {
+	if strings.TrimSpace(addr) == "" {
+		fmt.Println("[PPROF] 已关闭（-pprof-addr 留空）")
+		return
+	}
+	if _, ok := pprofAddrIsLoopback(addr); !ok {
+		fmt.Printf("[PPROF] ✘ 拒绝启动：%q 不是回环地址。\n"+
+			"        pprof 能读到 goroutine 栈与堆快照，只允许 127.0.0.1（或 ::1 / localhost）。\n", addr)
+		return
+	}
+
+	// 显式建 mux，不用 http.DefaultServeMux —— 避免和别处的全局注册互相污染。
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	ps := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		fmt.Printf("[PPROF] 火焰图已开：http://%s/debug/pprof/\n", addr)
+		if err := ps.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("[PPROF] ⚠ 监听失败（不影响主服务）：%v\n", err)
+		}
+	}()
+}
+
+// pprofAddrIsLoopback 校验 pprof 监听地址是否安全。
+//
+// 抽成纯函数是为了能被穷举单测（见 main_pprof_test.go）：
+// 「端口配错」不该变成一次把 goroutine 栈和堆快照送出门的安全事件，
+// 所以这条判据必须被测试钉死，而不是靠 code review 的注意力。
+//
+// 只接受：127.0.0.0/8、::1、以及字面量 localhost。
+// 明确拒绝：0.0.0.0、::、空主机（= 全接口）、任何公网/内网具体 IP、以及解析不了的字符串。
+func pprofAddrIsLoopback(addr string) (string, bool) {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return "", false
+	}
+	// "localhost:8091" 这种写法要放行：它解析到的就是回环
+	if strings.EqualFold(host, "localhost") {
+		return host, true
+	}
+	// 空主机（如 ":8091"）等于绑全部接口，必须拒绝
+	if host == "" {
+		return "", false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return "", false
+	}
+	return host, true
 }
 
 func projectRoot() string {
