@@ -327,8 +327,13 @@ func TestAddon_WeightedAverage(t *testing.T) {
 // TestAddon_AutoBarUsesPositionBar rise_bar="auto" 时按「该仓位自己的周期」判定。
 //
 // 一期四个周期都参与开仓之后，这条必须成立：
-// 1m 开的仓要按 1m 判加仓，15m 开的仓按 15m 判 —— 否则「加仓条件与买入一致」
-// 在短周期仓位上是假的（拿 15m 的信号去加 1m 的仓）。
+// TestAddon_AutoBarUsesPositionBar 加仓周期：默认用**仓位自己的周期**，
+// 但仓位周期已下线时必须退回主周期。
+//
+// ★ 2026-10-02 四期：1m 下线（用户口径「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）★
+// 所以「auto + 1m 仓」的期望值从 "1m" 变成了 "15m"：
+// 1m 的 K 线会被 CleanupKlines 按 model.EnabledBars 整段删掉，
+// 继续按 1m 取信号只会永远取不到数据 → **该仓位再也不会加仓**（静默且永久）。
 func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Bar = "15m"
@@ -339,14 +344,21 @@ func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
 		posBar  string
 		want    string
 	}{
-		{"auto + 1m 仓", conf.AddonAutoBar, "1m", "1m"},
+		// 还在白名单里的周期：照旧按仓位自己的周期判
+		{"auto + 3m 仓", conf.AddonAutoBar, "3m", "3m"},
 		{"auto + 5m 仓", conf.AddonAutoBar, "5m", "5m"},
 		{"auto + 15m 仓", conf.AddonAutoBar, "15m", "15m"},
+		// ★ 四期：已下线的周期必须退回主周期
+		{"auto + 1m 仓（四期已下线）→ 退回主周期", conf.AddonAutoBar, "1m", "15m"},
+		{"auto + 1H 仓（从未上线）→ 退回主周期", conf.AddonAutoBar, "1H", "15m"},
 		{"auto + 老仓（bar 为空）→ 退回主周期", conf.AddonAutoBar, "", "15m"},
+		// 显式指定周期时不受「仓位周期」影响
 		{"显式写 15m → 忽略仓位周期", "15m", "1m", "15m"},
+		{"显式写 3m → 照用", "3m", "1m", "3m"},
 		// 空串与 "auto" 等价：fillDefaults 本来就会把空串补成 auto，
 		// 这里再认一次是为了「配置块缺失 / 手写漏了字段」时行为一致。
-		{"空串等价于 auto", "", "1m", "1m"},
+		{"空串等价于 auto", "", "5m", "5m"},
+		{"空串 + 1m 仓（已下线）→ 退回主周期", "", "1m", "15m"},
 		{"空串 + 老仓 → 退回主周期", "", "", "15m"},
 	}
 	for _, tc := range cases {
@@ -356,7 +368,11 @@ func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
 				tc.name, tc.riseBar, cfg.Bar, tc.posBar, got, tc.want)
 		}
 	}
-	t.Log("✓ 场景K auto 用仓位自己的周期；老仓 / 空值退回主周期")
+	// 极端情况：主周期自己也下线 → 退到白名单最后一个（当前是 15m）
+	if got := addonBarFor(conf.AddonAutoBar, "1m", "1m"); got != "15m" {
+		t.Errorf("主周期与仓位周期都下线时应退到白名单最后一个，实际 %q", got)
+	}
+	t.Log("✓ 场景K auto 用仓位自己的周期；已下线周期 / 老仓 / 空值退回主周期")
 }
 
 func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }

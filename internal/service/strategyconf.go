@@ -35,12 +35,17 @@ type StrategyEntry struct {
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
 }
 
-// StrategyExit 出场参数
+// StrategyExit 出场参数（前端展示用）。
+//
+//	用户口径（2026-10-02 四期）：「不准平仓，不准爆仓，只能超时 1 小时自动平仓」——
+//	指关掉**布林上轨那种乱平仓**，不是把止盈也关掉（用户后续纠正：
+//	「止盈 1% 不平仓有问题」，再改为「赚 0.3% 也平仓」）。
+//	所以保留两条：止盈 **+0.3%** + 超时 60 分钟；布林上轨关闭，不设止损。
 type StrategyExit struct {
-	TakeProfitPct float64 `json:"take_profit_pct"`
-	BollUpperExit bool    `json:"boll_upper_exit"`
+	TakeProfitPct float64 `json:"take_profit_pct"` // 四期最终口径 0.3（浮盈 +0.3% 平）
+	BollUpperExit bool    `json:"boll_upper_exit"` // false = 关闭（四期起）
 	// MaxHoldMinutes 超时平仓（分钟）。>0 时优先于 MaxHoldBars。
-	// 用户口径：开仓满 360 分钟（6 小时）还没止盈就自动市价平掉。
+	// 四期口径：开仓满 60 分钟（1 小时）自动市价平掉，是没摸到止盈线时的兜底离场。
 	MaxHoldMinutes int     `json:"max_hold_minutes"`
 	MaxHoldBars    int     `json:"max_hold_bars"`
 	StopLossPct    float64 `json:"stop_loss_pct"`
@@ -124,8 +129,11 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	minBarRiseDefault := conf.DefaultMinBarRisePct
 	def := &StrategyConfig{
 		Enabled: true, DryRun: true, Bar: "15m",
-		BarsEnabled: []string{"1m", "3m", "5m", "15m"},
-		SignalBars:  []string{"1m", "3m", "5m", "15m"},
+		// ★ 四期：1m 下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」），
+		//   与 model.EnabledBars 保持一致 —— 这份是给前端展示用的第二份 schema，
+		//   兜底值必须一起改，否则配置读不到时选项卡里会冒出 1m。
+		BarsEnabled: []string{"3m", "5m", "15m"},
+		SignalBars:  []string{"3m", "5m", "15m"},
 		// ★ 三期：阈值 8 → 4（= 用户说的「score > 3」）
 		ScoreThreshold: 4,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
@@ -144,7 +152,9 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
 			// 三期：默认要求「这根 K 线真涨 > 1%」（指针对上局部变量，别共享全局）
 			MinBarRisePct: &minBarRiseDefault},
-		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 360},
+		// ★ 四期：兜底也必须与 JSON 一致 —— 止盈 0.3 保留、布林上轨 false、超时 60。
+		//   否则配置缺失时布林上轨会静默复活（与三期 exclude_stock_etf 兜底同一个道理）。
+		Exit: StrategyExit{TakeProfitPct: 0.3, BollUpperExit: false, MaxHoldMinutes: 60},
 		// ★ MaxTimes: 0 = 不限；RiseBar "auto" = 用该仓位自己的周期。
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
 			RiseBar: conf.AddonAutoBar, MaxTimes: 0},

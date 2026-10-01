@@ -27,8 +27,8 @@ package service
 //   drop_pct / lookback_bars / only_when_price_up 只保留读兼容，不再参与判定。
 //
 // ★ 「加满 max_times 就自动平仓」这条出场规则已于 2026-10-01 一期删除。
-//   现在加满之后只是不再补仓 —— 仓位继续等 +1% 止盈 / 6 小时超时 / 布林上轨，
-//   三条出场通道里没有任何一条跟加仓次数有关。
+//   现在加满之后只是不再补仓 —— 仓位继续等 +0.3% 止盈 / 1 小时超时，
+//   两条出场通道里没有任何一条跟加仓次数有关。
 //
 // 满足之后按「原保证金 ÷ 3」下单；买不起最小 1 张时沿用 entry.margin_policy
 // 的口径（min_one 放大到刚好 1 张，但绝不超过 max_margin_usdt）。
@@ -195,6 +195,23 @@ func addonBarFor(riseBar, cfgBar, instBar string) string {
 	if bar == "" {
 		bar = "15m"
 	}
+	// ★ 2026-10-02 四期：仓位的周期可能**已经下线** ★
+	//
+	// `rise_bar: "auto"` 取的是**仓位自己的周期**（trade.bar）。老仓可能是
+	// 已经下线的 1m —— 那份 K 线会被 repo.CleanupKlines 按 model.EnabledBars
+	// 整段删掉，LatestSignal(…, "1m") 从此永远取不到数据。
+	// 后果不是「加仓条件略偏」，而是**这个仓位再也不会加仓**（静默失效，
+	// 而且是永久性的：K 线不会再回来）。
+	//
+	// 所以这里必须再判一次白名单：不在名单就退回主周期（cfgBar），
+	// 主周期也不在名单就取名单最后一个（通常是最大的周期）。
+	if !model.BarEnabled(bar) {
+		if fb := strings.TrimSpace(cfgBar); fb != "" && model.BarEnabled(fb) {
+			bar = fb
+		} else if n := len(model.EnabledBars); n > 0 {
+			bar = model.EnabledBars[n-1]
+		}
+	}
 	return bar
 }
 
@@ -316,8 +333,8 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	//    这里必须带 `a.MaxTimes > 0` 前置 —— 一期在 entry 的两个计数器上
 	//    踩过一模一样的坑：0 会被当成「已达上限 0」，第一笔就被拦掉。
 	//
-	//    ★ 加满之后只是不再补仓，不再自动平仓：出场只剩 +1% 止盈 /
-	//      6 小时超时 / 布林上轨，没有任何一条看加仓次数。
+	//    ★ 加满之后只是不再补仓，不再自动平仓：出场只剩 +0.3% 止盈 /
+	//      1 小时超时，没有任何一条看加仓次数。
 	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
 		return AddonDecision{}
 	}

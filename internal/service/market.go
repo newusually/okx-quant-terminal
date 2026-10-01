@@ -922,5 +922,100 @@ func ProbeAccountDiag() ([]string, error) {
 			p.InstID, p.MgnMode, p.PosSide, p.Pos, p.AvgPx, p.MarkPx, upl, p.Imr))
 	}
 	out = append(out, fmt.Sprintf("持仓汇总 upl=%.6f  ← 顶栏「浮盈」就该用这个值", sum))
+
+	// ④ 爆仓风险巡检（★ 2026-10-02 四期新增，回答用户「不准爆仓」）
+	//
+	// 先说结论：**交易所的强平是 OKX 单方面执行的，程序改不了它的开关** ——
+	// 任何「不准爆仓」都只能是「让爆仓概率低到事实上不发生」，而不是「关掉它」。
+	// 能做的就是把这个距离量化出来，别靠感觉。
+	//
+	// 全仓（cross）下强平看的是**账户整体**：调整后权益 adjEq 跌破维持保证金 mmr
+	// 才触发，跟单个仓位亏多少没有直接关系。
+	//   ★ 安全垫 = adjEq − mmr
+	//   ★ 名义敞口 ≈ Σ(imr × lever)，安全垫 ÷ 名义敞口 = 「全部持仓同时反向跌多少 % 才吃光它」
+	var adjEq, availEq, mmr, mgnRatioRaw float64
+	if raw, err := cli.Get("/api/v5/account/balance?ccy=USDT", true); err == nil {
+		var rows []struct {
+			AdjEq   string `json:"adjEq"`
+			AvailEq string `json:"availEq"`
+			MMR     string `json:"mmr"`
+			TotalEq string `json:"totalEq"`
+			Details []struct {
+				Ccy      string `json:"ccy"`
+				AvailBal string `json:"availBal"`
+				AvailEq  string `json:"availEq"`
+				EqUsd    string `json:"eqUsd"`
+				MMR      string `json:"mmr"`
+				MgnRatio string `json:"mgnRatio"`
+			} `json:"details"`
+		}
+		if json.Unmarshal(raw, &rows) == nil && len(rows) > 0 {
+			r := rows[0]
+			adjEq, availEq = toF(r.AdjEq), toF(r.AvailEq)
+			mmr = toF(r.MMR)
+			// ★ 单币种保证金模式（acctLv=2）下**顶层 adjEq / availEq / mmr 全是空串**，
+			//   真正有值的是 details[USDT] 里的同名（或 availBal / eqUsd）字段。
+			//   不在这里兜底的话，上面几个数字会整排显示 0 —— 看上去像「权益 0、
+			//   时刻会爆仓」，比不显示更吓人，也更误导。
+			for _, d := range r.Details {
+				if d.Ccy != "USDT" {
+					continue
+				}
+				if adjEq <= 0 {
+					adjEq = toF(d.EqUsd)
+				}
+				if availEq <= 0 {
+					availEq = toF(d.AvailEq)
+				}
+				if availEq <= 0 {
+					availEq = toF(d.AvailBal)
+				}
+				if mmr <= 0 {
+					mmr = toF(d.MMR)
+				}
+				mgnRatioRaw = toF(d.MgnRatio)
+				break
+			}
+			if adjEq <= 0 {
+				adjEq = toF(r.TotalEq)
+			}
+		}
+	}
+	imrSum, notional := 0.0, 0.0
+	for _, p := range pos {
+		imr := toF(p.Imr)
+		imrSum += imr
+		if lev := toF(p.Lever); lev > 0 {
+			notional += imr * lev
+		}
+	}
+	out = append(out, "")
+	out = append(out, "== 爆仓风险巡检（全仓 cross：adjEq 跌破 mmr 才强平）==")
+	out = append(out, fmt.Sprintf("  调整后权益 adjEq=%.4f  维持保证金 mmr=%.4f  可用 availEq=%.4f  （OKX 原始 mgnRatio=%.4f）",
+		adjEq, mmr, availEq, mgnRatioRaw))
+	cover := adjEq - mmr
+	out = append(out, fmt.Sprintf("  ★ 安全垫 = adjEq − mmr = %.4fU（> 0 就没爆仓，越厚越安全）", cover))
+	if notional > 0 {
+		out = append(out, fmt.Sprintf("  名义敞口 ≈ %.2fU（Σ imr×lever）→ 全部持仓**同时**反向跌 %.2f%% 才会吃光安全垫",
+			notional, cover/notional*100))
+	}
+	if adjEq > 0 {
+		out = append(out, fmt.Sprintf("  维持保证金占权益 %.2f%%（越低越安全；100%% 才强平）", mmr/adjEq*100))
+	}
+	if imrSum > 0 && adjEq > 0 {
+		out = append(out, fmt.Sprintf("  占用保证金 %.4fU / 权益 %.4fU = %.2f%%（对应风控 risk.max_total_margin_pct）",
+			imrSum, adjEq, imrSum/adjEq*100))
+	}
+	liqLines := []string{}
+	for _, p := range pos {
+		if lp := toF(p.LiqPx); lp > 0 {
+			liqLines = append(liqLines, fmt.Sprintf("%s@%.4f", p.InstID, lp))
+		}
+	}
+	if len(liqLines) > 0 {
+		out = append(out, "  单仓强平价："+strings.Join(liqLines, "  "))
+	} else {
+		out = append(out, "  单仓强平价：无（全仓 cross 下 OKX 不返回单仓 liqPx，只看账户整体）")
+	}
 	return out, nil
 }

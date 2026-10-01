@@ -172,9 +172,13 @@ func TestKlineRetainDefaultsTo10Days(t *testing.T) {
 	}
 }
 
-// TestBarsDefaultsCoverFourPeriods 默认周期名单 = 1m/3m/5m/15m，四个都参与扫描开仓。
-func TestBarsDefaultsCoverFourPeriods(t *testing.T) {
-	want := []string{"1m", "3m", "5m", "15m"}
+// TestBarsDefaultsCoverThreePeriods 默认周期名单 = 3m/5m/15m，三个都参与扫描开仓。
+//
+// ★ 2026-10-02 四期：1m 下线（用户口径「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）。
+// 这里同时**反向断言 1m 不在名单里** —— 下线这类改动最容易只改一半：
+// 只要还有一处留着 1m，扫描 / 回补 / 前端选项卡就会把它带回来。
+func TestBarsDefaultsCoverThreePeriods(t *testing.T) {
+	want := []string{"3m", "5m", "15m"}
 	d := defaultConfig()
 	if len(d.BarsEnabled) != len(want) {
 		t.Fatalf("默认 bars_enabled 应为 %v，实际 %v", want, d.BarsEnabled)
@@ -192,11 +196,18 @@ func TestBarsDefaultsCoverFourPeriods(t *testing.T) {
 			t.Fatalf("model.EnabledBars 里应当包含 %q", b)
 		}
 	}
-	// 没写这个键时也走默认（4 个周期）
+	// 1m 必须彻底出局（配置默认 + 全局白名单，两处都算）
+	if d.BarEnabled("1m") {
+		t.Fatal("1m 已下线，不应再出现在 bars_enabled 默认值里")
+	}
+	if model.BarEnabled("1m") {
+		t.Fatal("1m 已下线，不应再出现在 model.EnabledBars 里")
+	}
+	// 没写这个键时也走默认（3 个周期）
 	c := &Config{}
 	fillDefaults(c)
 	if len(c.BarsEnabled) != len(want) {
-		t.Fatalf("bars_enabled 缺失时应兜底 4 个周期，实际 %v", c.BarsEnabled)
+		t.Fatalf("bars_enabled 缺失时应兜底 3 个周期，实际 %v", c.BarsEnabled)
 	}
 }
 
@@ -310,5 +321,50 @@ func TestMinBarRisePctThreeStates(t *testing.T) {
 func TestExcludeStockETFDefaultsOff(t *testing.T) {
 	if defaultConfig().ExcludeStockETF {
 		t.Fatalf("默认 exclude_stock_etf 应为 false（三期已取消该过滤）")
+	}
+}
+
+// TestExitDefaultsKeepTakeProfitDropBoll 四期口径：止盈 +1% 保留、布林上轨关闭、超时 1 小时。
+//
+// 用户口径（2026-10-02）：「不准平仓，不准爆仓，只能超时 1 小时自动平仓」，
+// 紧接着又明确纠正：「止盈 1% 不平仓有问题」——
+// 即「不准平仓」针对的是**布林上轨那种开仓 15 秒就反手平掉**的行为，
+// 不是把止盈也一起关掉。
+//
+// 三处必须一致（JSON / defaultConfig / LoadStrategy 兜底）：
+// 任何一处把 BollUpperExit 留成 true，配置缺失时它就会静默复活，
+// 用户会再看到一遍 SNDK 那种「秒进秒出、亏 0.17%」。
+func TestExitDefaultsKeepTakeProfitDropBoll(t *testing.T) {
+	d := defaultConfig()
+	if d.Exit == nil {
+		t.Fatal("defaultConfig 必须有 Exit")
+	}
+	if d.Exit.TakeProfitPct != 0.3 {
+		t.Fatalf("四期默认 take_profit_pct 应为 0.3（止盈线必须保留，不能被关掉），实际 %v", d.Exit.TakeProfitPct)
+	}
+	if d.Exit.BollUpperExit {
+		t.Fatal("四期默认 boll_upper_exit 应为 false（关闭）—— 它会在开仓后立刻反手平掉")
+	}
+	if d.Exit.MaxHoldMinutes != 60 {
+		t.Fatalf("四期默认 max_hold_minutes 应为 60（1 小时），实际 %v", d.Exit.MaxHoldMinutes)
+	}
+	if d.Exit.StopLossPct != 0 {
+		t.Fatalf("不应设止损，实际 %v", d.Exit.StopLossPct)
+	}
+
+	// 归一化必须原样保留 false / 60，不能反压回 true / 360
+	c := &Config{Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false, MaxHoldMinutes: 60}}
+	fillDefaults(c)
+	if c.Exit.TakeProfitPct != 0.3 || c.Exit.BollUpperExit || c.Exit.MaxHoldMinutes != 60 {
+		t.Fatalf("归一化改动了出场口径：tp=%v boll=%v hold=%d",
+			c.Exit.TakeProfitPct, c.Exit.BollUpperExit, c.Exit.MaxHoldMinutes)
+	}
+
+	// Exit 整块缺失也不能 panic，同样退回四期默认
+	c2 := &Config{}
+	fillDefaults(c2)
+	if c2.Exit == nil || c2.Exit.MaxHoldMinutes != 60 ||
+		c2.Exit.BollUpperExit || c2.Exit.TakeProfitPct != 0.3 {
+		t.Fatalf("Exit 缺失时应退回四期默认（止盈 1.0 / 无上轨 / 超时 60），实际 %+v", c2.Exit)
 	}
 }

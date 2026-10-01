@@ -466,8 +466,14 @@ func runApp(ctx context.Context) error {
 	}
 	strategyStore := service.NewStrategyStore(cfgPath, cfgLog)
 	strategy := strategyStore.Get()
-	fmt.Printf("[CFG] 策略参数：%s，止盈 %.2f%%，共振阈值 %d/8，dry_run=%v\n",
-		strategy.MarginText(), strategy.Exit.TakeProfitPct, strategy.ScoreThreshold, strategy.DryRun)
+	fmt.Printf("[CFG] 策略参数：%s，共振阈值 %d/8，dry_run=%v\n",
+		strategy.MarginText(), strategy.ScoreThreshold, strategy.DryRun)
+	// ★ 四期口径：止盈 +0.3% **保留**，只关掉了布林上轨（原「秒进秒出」的元凶），
+	//   超时收紧到 1 小时。措辞交给 service.ExitText 统一生成 ——
+	//   它只列**真正开着**的通道，别在这里写死一句「已关闭 X」，
+	//   那种硬编码在口径再变一次时立刻变成假的（这里就刚错过一次）。
+	fmt.Printf("[CFG] 出场规则：%s\n",
+		service.ExitText(strategy.Exit.TakeProfitPct, strategy.Exit.BollUpperExit, strategy.Exit.MaxHoldMinutes))
 	// ★ 三期新增的入场条件必须和共振阈值一起打出来 ——
 	//   只看到一个数字，会以为「score 够了就买」。
 	riseRule := "K线涨幅条件已关闭"
@@ -656,8 +662,9 @@ func runApp(ctx context.Context) error {
 				fmt.Printf("%s [TRADE] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 			},
 		})
-		fmt.Printf("[TRADE] 自动交易已挂载：dry_run=%v 周期=%s 止盈 %.2f%% 布林上轨出场=%v\n",
-			startCfg.DryRun, liveBarVal, startCfg.Exit.TakeProfitPct, startCfg.Exit.BollUpperExit)
+		fmt.Printf("[TRADE] 自动交易已挂载：dry_run=%v 周期=%s 出场=%s\n",
+			startCfg.DryRun, liveBarVal,
+			service.ExitText(startCfg.Exit.TakeProfitPct, startCfg.Exit.BollUpperExit, startCfg.Exit.MaxHoldMinutes))
 	}
 
 	// ---- 4.7 OKX 成交明细同步 ----

@@ -421,13 +421,16 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineRead
 		} else if cfg.Exit.StopLossPct > 0 && pnlPct <= -cfg.Exit.StopLossPct {
 			reason = fmt.Sprintf("止损 %.2f%%", pnlPct)
 		} else if cfg.Exit.MaxHoldMinutes > 0 {
-			// 超时平仓（按分钟，默认 240 = 4 小时）：
-			// 开仓满 4 小时还没够到止盈线就撤，别让仓位一直占着并发额度。
+			// 超时平仓（按分钟）。四期默认 60 = 1 小时。
+			//
+			// ★ 四期口径：止盈 +1%（上面第一条）**保留**，布林上轨关闭。
+			//   所以这是「没摸到止盈线时的兜底离场」，不是唯一通道。
 			// 用「分钟」而不是「根」是因为 1H 图和 15m 图的 4 根完全不是一个时长。
-			// 实时巡检每 exit_sec（默认 3 秒）跑一次，到点立刻市价出，
-			// 不用等下一根 K 线收盘 —— 这是「不设止损」下第二条主动离场通道。
+			// 实时巡检每 exit_sec（默认 3 秒）跑一次，到点立刻市价出，不等下一根 K 线收盘。
 			if nowMs-p.OpenTs >= int64(cfg.Exit.MaxHoldMinutes)*60000 {
-				reason = fmt.Sprintf("超时 %s 未止盈", HoldText(cfg.Exit.MaxHoldMinutes))
+				// 措辞用「到点自动平仓」而不是旧的「未止盈」：
+				// 超时的定义是「持有到期」，不是「没到止盈线」。
+				reason = fmt.Sprintf("超时 %s 到点自动平仓", HoldText(cfg.Exit.MaxHoldMinutes))
 			}
 		} else if cfg.Exit.MaxHoldBars > 0 {
 			dur := BarDurationMs(p.Bar)
@@ -1057,6 +1060,36 @@ func HoldText(minutes int) string {
 		return fmt.Sprintf("%d 小时", minutes/60)
 	}
 	return fmt.Sprintf("%d 分钟", minutes)
+}
+
+// ExitText 把出场配置渲染成一句人话，给启动日志与 /api/state 共用。
+//
+// 四期口径（2026-10-02）下应当只输出「超时 1 小时」：
+// 止盈与布林上轨都已关闭，仓位只有等满 60 分钟才市价离场。
+//
+// 之所以要求「关闭」的项不出现在文案里，是因为启动日志里写
+// 「止盈 0.00%」会让人以为止盈开着、只是线设在 0 —— 与事实相反。
+func ExitText(tpPct float64, boll bool, holdMin int) string {
+	s := ""
+	addp := func(x string) {
+		if s != "" {
+			s += " / "
+		}
+		s += x
+	}
+	if tpPct > 0 {
+		addp(fmt.Sprintf("止盈 %+.2f%%", tpPct))
+	}
+	if boll {
+		addp("布林上轨")
+	}
+	if holdMin > 0 {
+		addp("超时 " + HoldText(holdMin))
+	}
+	if s == "" {
+		return "无（不会自动平仓）"
+	}
+	return s
 }
 
 func accountOrNew(a *Account) *Account {

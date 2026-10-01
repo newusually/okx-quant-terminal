@@ -57,9 +57,27 @@ type EntryCfg struct {
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
 }
 
+// ExitCfg 出场参数。
+//
+// ★ 2026-10-02 四期：用户口径「不准平仓，不准爆仓，只能超时 1 小时自动平仓」。
+// 这里的「不准平仓」= 关掉**布林上轨那种乱平仓**，**不是**把止盈也关掉 ——
+// 用户后续明确纠正：「止盈 1% 不平仓有问题」。
+// 所以保留两条通道：**止盈 +0.3%**（锁利）+ **超时 60 分钟**（兜底离场）；
+// 布林上轨关闭，不设止损。
+//
+// 判定处（service/trader.go 的 runExits）一律带 `> 0` / bool 前置，
+// 所以 0 / false 就是「关闭」，不会被别的兜底逻辑反压回默认值。
 type ExitCfg struct {
+	// TakeProfitPct 止盈线（%）。**四期最终口径 0.3** —— 浮盈到 +0.3% 立刻市价平。
+	// 0 才是关闭；实测把它关掉后，超时平仓的盈亏纯随机且净值为负
+	// （2026-10-02 00:40~00:55 的 9 笔：6 笔未止盈合计 -0.0924U）。
 	TakeProfitPct float64 `json:"take_profit_pct"`
-	BollUpperExit bool    `json:"boll_upper_exit"`
+
+	// BollUpperExit 布林上轨出场：收盘价 > SMA20 + 2σ 就平。
+	// **四期起默认关闭** —— 它与买入判据读同一根 K 线，会「秒进秒出」：
+	// 那根既涨 >1% 又被判上轨，开仓后下一轮 3 秒巡检立刻反手平掉
+	// （实测 SNDK 开仓 15 秒即平、亏 0.17%）。
+	BollUpperExit bool `json:"boll_upper_exit"`
 
 	// MaxHoldBars 超时平仓（按「根」算）。0 = 关闭。
 	// 注意它依赖持仓自己的周期，1H 图和 15m 图的 4 根完全不是一个时长，
@@ -67,10 +85,11 @@ type ExitCfg struct {
 	MaxHoldBars int `json:"max_hold_bars"`
 
 	// MaxHoldMinutes 超时平仓（按「分钟」算）。>0 时优先于 MaxHoldBars。
-	// 默认 360 —— 也就是「开仓满 6 小时还没到止盈线就自动平掉」，
-	// 免得仓位在里面耗着占额度。实时巡检每 3 秒判一次，到点立刻市价出。
+	// 四期起默认 **60**（开仓满 1 小时自动市价平掉），也是唯一的出场通道。
+	// 实时巡检每 3 秒判一次，到点立刻出，不用等下一根 K 线收盘。
 	MaxHoldMinutes int `json:"max_hold_minutes"`
 
+	// StopLossPct 硬止损（%）。0 = 关闭（不设止损）。
 	StopLossPct float64 `json:"stop_loss_pct"`
 }
 
@@ -414,8 +433,10 @@ func defaultConfig() *Config {
 		// ★ 2026-10-01 二期：1m/3m/5m 重新上线（用户口径「选项卡重新生成并补充数据」）。
 		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威，
 		//   这里只是「配置块缺失」时的兜底。
-		BarsEnabled:       []string{"1m", "3m", "5m", "15m"},
-		SignalBars:        []string{"1m", "3m", "5m", "15m"},
+		// ★ 2026-10-02 四期：1m 下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）。
+		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威。
+		BarsEnabled: []string{"3m", "5m", "15m"},
+		SignalBars:  []string{"3m", "5m", "15m"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -464,8 +485,11 @@ func defaultConfig() *Config {
 			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
 			MinBarRisePct: f64ptr(1.0),
 		},
-		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
-			MaxHoldBars: 0, MaxHoldMinutes: 360, StopLossPct: 0},
+		// ★ 2026-10-02 四期：止盈 **0.3%**、布林上轨关闭、超时收紧到 1 小时。
+		//   兜底默认值必须与 JSON 一致 —— 否则 JSON 读不到时布林上轨会静默复活
+		//   （与三期 exclude_stock_etf 的兜底同一个道理）。
+		Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false,
+			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
 		// 加仓：触发条件**与买入完全一致**（score ≥ 4 且触发那根涨幅 > 1%），金额 = 原持仓保证金 × 1/3
 		//
 		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
@@ -745,7 +769,7 @@ func fillDefaults(c *Config) {
 	if c.Exit == nil {
 		c.Exit = d.Exit
 	} else if c.Exit.MaxHoldMinutes <= 0 && c.Exit.MaxHoldBars <= 0 {
-		// 两个都没填 → 用默认的「6 小时超时」
+		// 两个都没填 → 用默认的「1 小时超时」（四期口径）
 		c.Exit.MaxHoldMinutes = d.Exit.MaxHoldMinutes
 	}
 

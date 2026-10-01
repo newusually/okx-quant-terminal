@@ -8,10 +8,10 @@ const state = {
   curInst: '',
   curBar: '15m',
   days: 30,
-  // ★ 2026-10-01 二期：1m/3m/5m 重新上线，共 4 个周期（选项卡由 /api/state 的
+  // ★ 2026-10-02 四期：1m 下线，只剩 3m/5m/15m（选项卡由 /api/state 的
   //   bars 字段渲染，这里只是首屏兜底 —— 真源是 model.EnabledBars）。
-  //   四个周期都参与扫描开仓，K 线只保留最近 10 天（每天凌晨清一次）。
-  bars: ['1m', '3m', '5m', '15m'],
+  //   三个周期都参与扫描开仓，K 线只保留最近 10 天（每天凌晨清一次）。
+  bars: ['3m', '5m', '15m'],
   marginText: '',
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
   universe: null,       // 准入统计 {total,kept,dropped,byReason}
@@ -675,13 +675,21 @@ function renderServiceInfo(st) {
     // ★ 2026-10-01 起「加满自动平仓」已删除 —— 加仓次数只限制还能补几次，
     //   不再是出场条件，所以这里不再显示「满则平仓」。
     : `最多 ${sa.max_times || '--'} 次（只限制补仓，不影响出场）`;
-  // 超时平仓：360 → "6 小时"。整数小时就说小时，否则说分钟，和后台的
+  // 超时平仓：60 → "1 小时"。整数小时就说小时，否则说分钟，和后台的
   // HoldText() 口径一致（以前后台写「60 分钟」、网页写「1 小时」，两边对不上）。
   const holdTxt = sx.max_hold_minutes > 0
     ? (sx.max_hold_minutes % 60 === 0 && sx.max_hold_minutes >= 60
       ? (sx.max_hold_minutes / 60) + ' 小时'
       : sx.max_hold_minutes + ' 分钟')
     : (sx.max_hold_bars > 0 ? sx.max_hold_bars + ' 根' : '关闭');
+  // 出场规则一句话（与后台 service.ExitText 口径一致）：
+  // 只列出**真正开着**的通道。四期口径下应当只剩「超时 1 小时」。
+  const exitRuleParts = [];
+  if (sx.take_profit_pct > 0) exitRuleParts.push('止盈 ' + sx.take_profit_pct + '%');
+  if (sx.boll_upper_exit) exitRuleParts.push('布林上轨');
+  if (sx.max_hold_minutes > 0) exitRuleParts.push('超时 ' + holdTxt);
+  else if (sx.max_hold_bars > 0) exitRuleParts.push('超时 ' + sx.max_hold_bars + ' 根');
+  const exitRuleTxt = exitRuleParts.length ? exitRuleParts.join(' · ') : '无（不会自动平仓）';
   const info = [
     ['每笔保证金', state.marginText || '--'],
     // 准入上限：symbolList 里「最小一手保证金 ≤ 这个值」才可买入。
@@ -693,10 +701,10 @@ function renderServiceInfo(st) {
     ['策略周期', (st.strategy && st.strategy.bar) || '--'],
     ['扫描周期', ((st.strategy && st.strategy.bars_enabled) || []).join(' / ') || '--'],
     ['信号周期', ((st.strategy && st.strategy.signal_bars) || []).join(' / ') || '--'],
-    // 出场条件三条一起列出来，一眼能看出「没有任何一条跟加仓次数有关」
-    ['出场条件', `止盈 ${(sx.take_profit_pct != null ? sx.take_profit_pct : '--')}% · 超时 ${holdTxt}` +
-      (sx.boll_upper_exit ? ' · 布林上轨' : '')],
-    ['止盈', (sx.take_profit_pct != null ? sx.take_profit_pct : '--') + '%'],
+    // 出场条件：★ 四期起唯一通道是超时（止盈与布林上轨已关闭）。
+    // 只列开着的通道 —— 把关闭项写成「0%」会让人以为只是线设在 0，与事实相反。
+    ['出场条件', exitRuleTxt],
+    ['止盈', sx.take_profit_pct > 0 ? sx.take_profit_pct + '%' : '关闭'],
     ['止损', sx.stop_loss_pct > 0 ? sx.stop_loss_pct + '%' : '不设'],
     ['超时平仓', holdTxt],
     ['布林上轨平仓', sx.boll_upper_exit ? '开' : '关'],

@@ -99,6 +99,9 @@ const (
 	PartitionColdMonths = 18
 	// partitionOldName 兜底分区名（覆盖 base 之前的一切数据）
 	partitionOldName = "p_old"
+	// partitionMaxName 上界兜底分区名（VALUES LESS THAN MAXVALUE）。
+	// 必须是最后一个分区，且**永不 DROP** —— 删了之后比最大上界还新的数据无处安放。
+	partitionMaxName = "pmax"
 )
 
 // PartitionedTables 需要分区的表。
@@ -448,7 +451,7 @@ func (d *DB) addMissingPartitions(table string, pi *partitionInfo, now time.Time
 		since = time.UnixMilli(minTs)
 	}
 
-	var parts, added []string
+	var parts []partBound
 	for _, b := range planBounds(since, now) {
 		if existing[b.Name] {
 			continue
@@ -457,22 +460,70 @@ func (d *DB) addMissingPartitions(table string, pi *partitionInfo, now time.Time
 		if b.LessThan <= pi.MaxDataLessThan {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("PARTITION %s VALUES LESS THAN (%d)", b.Name, b.LessThan))
-		added = append(added, b.Name)
+		parts = append(parts, b)
 	}
 	if len(parts) == 0 {
 		return nil
 	}
 
-	// 先把 pmax 拆掉，再加新分区，最后把 pmax 放回去。
-	// （MySQL 不允许在 MAXVALUE 之后再加分区，必须先 DROP 再 ADD）
-	sql := "ALTER TABLE `" + table + "` DROP PARTITION pmax, ADD PARTITION (" +
-		strings.Join(parts, ", ") + "), ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE))"
-	if _, err := d.sql.Exec(sql); err != nil {
+	ddl := buildAppendPartitionDDL(table, parts, existing[partitionMaxName])
+	if _, err := d.sql.Exec(ddl); err != nil {
+		// ★ 把完整 DDL 一起打出来 ★ —— 只在日志里写「补分区失败：Error 1064」，
+		// 排查时根本看不出是哪条语句坏在哪，这个坑已经吃过一次。
+		logx.Logf("WARN", "[PART] %s 补分区失败（%d 个）：%v\n  DDL: %s",
+			table, len(parts), err, ddl)
 		return err
 	}
-	logx.Logf("INFO", "[PART] %s 新增分区：%s", table, strings.Join(added, ", "))
+	names := make([]string, 0, len(parts))
+	for _, b := range parts {
+		names = append(names, b.Name)
+	}
+	logx.Logf("INFO", "[PART] %s 新增分区：%s", table, strings.Join(names, ", "))
 	return nil
+}
+
+// buildAppendPartitionDDL 生成「把新分区插到 pmax 之前」的 DDL。
+//
+// ★★ 这里必须用 REORGANIZE，不能用 DROP pmax + ADD ★★
+//
+// 原来的写法是一条语句里同时 DROP pmax、ADD 新分区、再把 pmax ADD 回去：
+//
+//	ALTER TABLE t DROP PARTITION pmax, ADD PARTITION (…), ADD PARTITION (PARTITION pmax …)
+//
+// MySQL **不允许在同一条 ALTER 里既 DROP 又 ADD 分区**（也确实不允许 ADD 出
+// 低于现有最大上界的非递增分区），实测恒定报 1064。也就是说这段代码
+// **从写下来那天起就没成功过**：新分区永远补不上，数据一路堆进 pmax ——
+// 而 pmax 恰恰是「永不 DROP」的兜底分区，于是容量只增不减。
+//
+// 正确形态是 REORGANIZE：把 pmax 覆盖的那一段区间原子地拆成
+// 「若干新分区 + 新的 pmax」。一条语句、原子完成，中途不存在
+// 「没有兜底分区可写」的窗口。pmax 正常情况下是空的（热区已经铺到
+// 今天 + PartitionDaysAhead），所以这次 reorganize 不搬任何数据，代价≈0。
+//
+// 表里没有 pmax 时（更老的方案、或压根还没分区）退回纯 ADD ——
+// 那是唯一合法的形态：没有 MAXVALUE 兜底分区时，ADD 是允许的。
+//
+// 抽成纯函数是为了能单测：这条 SQL 坏过一次，不能再靠「跑起来试试」。
+func buildAppendPartitionDDL(table string, parts []partBound, hasMax bool) string {
+	var sb strings.Builder
+	sb.WriteString("ALTER TABLE `" + table + "` ")
+	if hasMax {
+		sb.WriteString("REORGANIZE PARTITION " + partitionMaxName + " INTO (")
+	} else {
+		sb.WriteString("ADD PARTITION (")
+	}
+	for i, b := range parts {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(&sb, "PARTITION %s VALUES LESS THAN (%d)", b.Name, b.LessThan)
+	}
+	if hasMax {
+		sb.WriteString(", PARTITION " + partitionMaxName + " VALUES LESS THAN (MAXVALUE))")
+	} else {
+		sb.WriteString(")")
+	}
+	return sb.String()
 }
 
 // PartRange 一个分区区间的**只读快照**（导出）。
