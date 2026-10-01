@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// 三期口径（2026-10-01）：
+// 五期口径（2026-10-02）：
 //
-//	「score >3 + 额外条件：有信号的那个 K 线必须大于 1% 涨幅才行，
-//	  就买入和加仓」
+//	「Score >= 3 且 RisePct > 0.5（严格大于）」—— 两个条件必须落在**同一根已收盘 K 线**上。
 //
 // SignalQualified 是买入扫描 / 加仓判定 / 信号入库**三处共用的唯一判据**，
 // 所以它的边界必须钉死 —— 一旦这里漂移，三处会一起漂，而且不报错。
@@ -17,6 +16,11 @@ func TestSignalQualified(t *testing.T) {
 		return &Signal{Score: score, Ready: ready, RisePct: rise}
 	}
 
+	const (
+		th = 3   // 五期默认阈值（configs/okx_strategy.json 的 score_threshold）
+		mr = 0.5 // 五期默认涨幅门槛（entry.min_bar_rise_pct）
+	)
+
 	cases := []struct {
 		name      string
 		sig       *Signal
@@ -24,18 +28,19 @@ func TestSignalQualified(t *testing.T) {
 		minRise   float64
 		want      bool
 	}{
-		{"A 用户口径：score 4 且涨 2% → 通过", mk(4, true, 2.0), 4, 1.0, true},
-		{"B score 3 不满足「>3」→ 拒绝", mk(3, true, 2.0), 4, 1.0, false},
-		{"C score 满分但只涨 0.5% → 拒绝", mk(8, true, 0.5), 4, 1.0, false},
-		{"D 涨幅恰好 1.0（口径是严格大于）→ 拒绝", mk(5, true, 1.0), 4, 1.0, false},
-		{"E 涨幅 1.0001 → 通过", mk(5, true, 1.0001), 4, 1.0, true},
-		{"F minRise=0 = 关闭涨幅条件 → 通过", mk(5, true, -3.0), 4, 0, true},
-		{"G 暖机不足（Ready=false）→ 拒绝", mk(8, false, 5.0), 4, 1.0, false},
-		{"H nil 信号 → 拒绝", nil, 4, 1.0, false},
-		{"I 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, 5.0), 0, 1.0, false},
-		{"J RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), 4, 1.0, false},
-		{"K 下跌的 K 线 → 拒绝", mk(8, true, -2.0), 4, 1.0, false},
-		{"L minRise 为负 = 按未填处理，不启用", mk(5, true, 0.0), 4, -1.0, true},
+		{"A 用户口径：score 3 且涨 2% → 通过", mk(3, true, 2.0), th, mr, true},
+		{"B score 2 不满足「>= 3」→ 拒绝", mk(2, true, 2.0), th, mr, false},
+		{"C score 满分但只涨 0.4% → 拒绝", mk(8, true, 0.4), th, mr, false},
+		{"D 涨幅恰好 0.5（口径是严格大于）→ 拒绝", mk(5, true, 0.5), th, mr, false},
+		{"E 涨幅 0.5001 → 通过", mk(5, true, 0.5001), th, mr, true},
+		{"F 分数刚好 3 但涨幅压线 0.5 → 拒绝（两个条件缺一不可）", mk(3, true, 0.5), th, mr, false},
+		{"G minRise=0 = 关闭涨幅条件 → 通过", mk(5, true, -3.0), th, 0, true},
+		{"H 暖机不足（Ready=false）→ 拒绝", mk(8, false, 5.0), th, mr, false},
+		{"I nil 信号 → 拒绝", nil, th, mr, false},
+		{"J 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, 5.0), 0, mr, false},
+		{"K RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), th, mr, false},
+		{"L 下跌的 K 线 → 拒绝", mk(8, true, -2.0), th, mr, false},
+		{"M minRise 为负 = 按未填处理，不启用", mk(5, true, 0.0), th, -1.0, true},
 	}
 
 	for _, c := range cases {
@@ -45,20 +50,22 @@ func TestSignalQualified(t *testing.T) {
 	}
 }
 
-// 「score_threshold = 4」必须严格等价于用户说的「score > 3」。
+// 阈值语义必须是**非严格**的 `Score >= threshold` —— 五期口径原话就是「Score >= 3」。
 //
-// 这是本次最容易出错的一步：判定处是 `Score >= threshold`，
-// 用户说的是 `Score > 3`。若哪天有人把阈值改成 3（「3 以上嘛」），
-// 语义就变成了 score >= 3，门槛被悄悄放宽一档 —— 这个测试会立刻红。
-func TestThresholdFourIsExactlyScoreGreaterThanThree(t *testing.T) {
-	for s := 0; s <= 8; s++ {
-		got := SignalQualified(&Signal{Score: s, Ready: true, RisePct: 99}, 4, 1.0)
-		want := s > 3
-		if got != want {
-			t.Errorf("score=%d：threshold=4 应等价于 score>3（%v），实际 %v", s, want, got)
+// 这条把「>=」钉死：若哪天有人把它改成严格大于（`Score > threshold`），
+// 门槛会被悄悄收紧一档（score 刚好等于阈值的那批全部消失），这里立刻红。
+// （对照：三期为了表达「> 3」是把**配置值**写成 4，而不是去改判定符号；
+//   五期口径直接是「>= 3」，配置值 3 即字面语义。）
+func TestThresholdIsNonStrictGreaterOrEqual(t *testing.T) {
+	for th := 1; th <= 8; th++ {
+		for s := 0; s <= 8; s++ {
+			got := SignalQualified(&Signal{Score: s, Ready: true, RisePct: 99}, th, 1.0)
+			if want := s >= th; got != want {
+				t.Errorf("threshold=%d, score=%d：应为 >= 语义（%v），实际 %v", th, s, want, got)
+			}
 		}
 	}
-	// 反向确认：阈值 3 就**不是**「>3」，而是「>=3」（含 3）
+	// 反向确认：阈值 3 **包含** 3（不是「>3」）
 	if !SignalQualified(&Signal{Score: 3, Ready: true, RisePct: 99}, 3, 1.0) {
 		t.Errorf("threshold=3 应当放行 score=3（>=3）；若这里失败说明判定被改成了严格大于")
 	}
@@ -68,7 +75,8 @@ func TestThresholdFourIsExactlyScoreGreaterThanThree(t *testing.T) {
 //
 // 为什么要端到端测：RisePct 在 signalAt（池化路径）和 computeSignalReference
 // （对照实现）里各算一次。两处若有一处漏填，那条路径上的所有信号都会
-// RisePct=0 → 被「必须涨过 1%」全部拒掉，而且不报错、日志也看不出。
+// RisePct=0 → 被「必须涨过 min_bar_rise_pct（当前 0.5%）」全部拒掉，
+// 而且不报错、日志也看不出。
 func TestComputeSignalFillsRisePct(t *testing.T) {
 	n := 400
 	cands := make([]Candle, n)
@@ -85,7 +93,7 @@ func TestComputeSignalFillsRisePct(t *testing.T) {
 	if math.Abs(got.RisePct-2.0) > 1e-9 {
 		t.Fatalf("RisePct 应为 2.0（(102-100)/100×100），实际 %.6f", got.RisePct)
 	}
-	if !SignalQualified(got, 0+1, 1.0) {
+	if !SignalQualified(got, 0+1, 0.5) {
 		t.Logf("提示：该根 score=%d（合成序列，仅用于验证 RisePct 通路）", got.Score)
 	}
 

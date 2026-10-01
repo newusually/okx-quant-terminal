@@ -211,25 +211,25 @@ func TestBarsDefaultsCoverThreePeriods(t *testing.T) {
 	}
 }
 
-// TestScoreThresholdDefaultsToFour 买入/加仓阈值默认 4 —— 等价于用户说的「score > 3」。
+// TestScoreThresholdDefaultsToThree 买入/加仓阈值默认 3 —— 就是用户说的「Score >= 3」。
 //
 // 判定处是 `score >= score_threshold`，而 Score 是 0~8 的整数，
-// 所以「> 3」与「>= 4」完全等价。用 4 表达就不必把判定改成严格大于
-// （改了会让所有历史口径跟着漂）。
-func TestScoreThresholdDefaultsToFour(t *testing.T) {
+// 所以写 3 即字面语义「≥ 3」，判定符号一个字都不用动。
+// （三期时写的是 4、用来表达「> 3」；五期口径直接给到 3。）
+func TestScoreThresholdDefaultsToThree(t *testing.T) {
 	d := defaultConfig()
-	if d.ScoreThreshold != 4 {
-		t.Fatalf("默认 score_threshold 应为 4（等价 score>3），实际 %d", d.ScoreThreshold)
+	if d.ScoreThreshold != 3 {
+		t.Fatalf("默认 score_threshold 应为 3（Score >= 3），实际 %d", d.ScoreThreshold)
 	}
 	// 兜底里不给 BTC/ETH 单独放宽 —— 用户要的是「全市场同一个阈值」
 	if len(d.ScoreThresholdMap) != 0 {
 		t.Fatalf("默认 score_threshold_map 应为空，实际 %v", d.ScoreThresholdMap)
 	}
-	// 没写阈值时走 4；显式写的仍然生效
+	// 没写阈值时走 3；显式写的仍然生效
 	c := &Config{}
 	fillDefaults(c)
-	if c.ThresholdFor("BTC-USDT-SWAP") != 4 {
-		t.Fatalf("阈值缺失时应为 4，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
+	if c.ThresholdFor("BTC-USDT-SWAP") != 3 {
+		t.Fatalf("阈值缺失时应为 3，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
 	}
 	c = &Config{ScoreThreshold: 6}
 	fillDefaults(c)
@@ -267,25 +267,29 @@ func TestEntryMarginDefaultsTo01USDT(t *testing.T) {
 // TestMinBarRisePctThreeStates 「这根 K 线必须真涨」的三种状态必须泾渭分明。
 //
 //	min_bar_rise_pct 用**指针**，为的就是区分「没写」与「写了 0」：
-//	  没写   → 默认 1.0（漏配时条件仍在，不会静默放开全市场下单）
+//	  没写   → 默认 0.5（漏配时条件仍在，不会静默放开全市场下单）
 //	  写 0   → 真的关掉这个条件
-//	  写负数 → 视为写错，按默认 1.0
+//	  写负数 → 视为写错，按默认 0.5
 //
 // 为什么值得单独守：二期在 max_concurrent_positions / daily_max_entries 上
 // 正是栽在「用户写的 0 被 `<= 0` 反压回默认值」—— 配置看起来改了、其实没生效。
 // 若这里退化成值类型 + `<=0 兜底`，同一个坑会原样复现。
 func TestMinBarRisePctThreeStates(t *testing.T) {
-	// ① 没写（nil）→ 默认 1.0
+	// ① 没写（nil）→ 默认 0.5
 	d := defaultConfig()
-	if d.MinBarRisePct() != 1.0 {
-		t.Fatalf("默认 min_bar_rise_pct 应为 1.0，实际 %v", d.MinBarRisePct())
+	if d.MinBarRisePct() != 0.5 {
+		t.Fatalf("默认 min_bar_rise_pct 应为 0.5，实际 %v", d.MinBarRisePct())
+	}
+	// 默认常量本身也必须跟上（service 侧兜底读的就是它）
+	if DefaultMinBarRisePct != 0.5 {
+		t.Fatalf("DefaultMinBarRisePct 应为 0.5，实际 %v", DefaultMinBarRisePct)
 	}
 	c := &Config{}
 	fillDefaults(c)
-	if c.MinBarRisePct() != 1.0 {
-		t.Fatalf("键缺失时应为 1.0，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != 0.5 {
+		t.Fatalf("键缺失时应为 0.5，实际 %v", c.MinBarRisePct())
 	}
-	// ② 显式写 0 → 关闭条件（绝不能被反压回 1.0）
+	// ② 显式写 0 → 关闭条件（绝不能被反压回 0.5）
 	zero := 0.0
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &zero}}
 	fillDefaults(c)
@@ -299,17 +303,17 @@ func TestMinBarRisePctThreeStates(t *testing.T) {
 	if c.MinBarRisePct() != 2.5 {
 		t.Fatalf("min_bar_rise_pct=2.5 应原样保留，实际 %v", c.MinBarRisePct())
 	}
-	// ④ 负数 = 写错 → 按默认 1.0（既不能变成「关闭」，也不能倒扣）
+	// ④ 负数 = 写错 → 按默认 0.5（既不能变成「关闭」，也不能倒扣）
 	neg := -3.0
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &neg}}
 	fillDefaults(c)
-	if c.MinBarRisePct() != 1.0 {
-		t.Fatalf("负数应按默认 1.0 处理，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != 0.5 {
+		t.Fatalf("负数应按默认 0.5 处理，实际 %v", c.MinBarRisePct())
 	}
 	// ⑤ Entry 整块缺失也不能 panic，同样退回默认
 	c = &Config{Entry: nil}
-	if c.MinBarRisePct() != 1.0 {
-		t.Fatalf("Entry 为 nil 时应退回 1.0，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != 0.5 {
+		t.Fatalf("Entry 为 nil 时应退回 0.5，实际 %v", c.MinBarRisePct())
 	}
 }
 

@@ -53,8 +53,8 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径（2026-10-01 二期 → 2026-10-02 三期）：加仓次数**不限**，
-//	触发条件与买入完全一致（score ≥ 4 且触发那根 K 线涨幅 > 1%，共用 SignalQualified）。
+//	用户口径（2026-10-01 二期 → 2026-10-02 五期）：加仓次数**不限**，
+//	触发条件与买入完全一致（Score ≥ 3 且触发那根 K 线涨幅 > 0.5%，共用 SignalQualified）。
 type StrategyAddon struct {
 	Enabled  bool    `json:"enabled"`
 	Ratio    float64 `json:"ratio"`
@@ -134,8 +134,8 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		//   兜底值必须一起改，否则配置读不到时选项卡里会冒出 1m。
 		BarsEnabled: []string{"3m", "5m", "15m"},
 		SignalBars:  []string{"3m", "5m", "15m"},
-		// ★ 三期：阈值 8 → 4（= 用户说的「score > 3」）
-		ScoreThreshold: 4,
+		// ★ 2026-10-02 五期：阈值 4 → 3（用户口径「Score >= 3 且 RisePct > 0.5」）
+		ScoreThreshold: 3,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		// ★ 三期：品类过滤默认关闭（「取消美股 etf 不做的功能」）
 		ExcludeStockETF: false, ExcludeNewListingDays: 30, ExcludeDelisting: true,
@@ -150,7 +150,7 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 			//   与 conf.DefaultConfig 保持一致，免得兜底值把限制偷偷放回来。
 			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 0,
 			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
-			// 三期：默认要求「这根 K 线真涨 > 1%」（指针对上局部变量，别共享全局）
+			// ★ 五期：默认要求「这根 K 线真涨 > 0.5%」（指针对上局部变量，别共享全局）
 			MinBarRisePct: &minBarRiseDefault},
 		// ★ 四期：兜底也必须与 JSON 一致 —— 止盈 0.3 保留、布林上轨 false、超时 60。
 		//   否则配置缺失时布林上轨会静默复活（与三期 exclude_stock_etf 兜底同一个道理）。

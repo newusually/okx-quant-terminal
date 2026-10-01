@@ -709,10 +709,10 @@ function renderServiceInfo(st) {
     ['超时平仓', holdTxt],
     ['布林上轨平仓', sx.boll_upper_exit ? '开' : '关'],
     ['加仓', addonTxt],
-    // ★ 三期口径：score > 3 等价于「>= 4」，所以阈值显示成 4 时也把语义写出来。
-    ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8' +
-      (Number(st.strategy && st.strategy.score_threshold) === 4 ? '（score > 3）' : '')],
-    // 三期新增的门槛：触发信号那根 K 线必须真涨。0 = 该条件已关闭。
+    // ★ 五期口径：score_threshold 现在就是字面语义「Score ≥ 3」，不再需要括号注解
+    //   （三期时它写的是 4、用来表达「> 3」，才要额外说明）。
+    ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8'],
+    // 门槛「触发信号那根 K 线必须真涨」。0 = 该条件已关闭。五期阈值 0.5%。
     ['K线涨幅要求', (st.minBarRisePct > 0
       ? '> ' + fmtNum(st.minBarRisePct, 2) + '%（收盘 vs 开盘）'
       : '已关闭')],

@@ -300,8 +300,8 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 
 	// ③ 共振判据：**与买入扫描调同一个函数**（service.SignalQualified）。
 	//
-	//    2026-10-02 三期口径：score > 3（即 threshold = 4）
-	//    + 这根 K 线必须真涨过 min_bar_rise_pct（默认 1%）。
+	//    2026-10-02 五期口径：Score ≥ 3（threshold = 3）
+	//    + 这根 K 线必须真涨过 min_bar_rise_pct（当前 0.5%）。
 	//
 	//    ★ 刻意不再在这里手写 `sig.Score < th`：买入那边已经改调同一个函数，
 	//      这里若继续自己判，两个条件（分数 + 涨幅）就会各自只在一半路径上生效，

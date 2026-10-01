@@ -41,15 +41,15 @@ type EntryCfg struct {
 	// 否则即使共振达标也不下单。**买入与加仓共用同一个判据**
 	// （service.SignalQualified），所以它天然满足「加仓条件与买入一致」。
 	//
-	//	> 0  严格大于该值才通过（默认 1.0，即「必须大于 1% 涨幅」）
+	//	> 0  严格大于该值才通过（默认 0.5，即「必须大于 0.5% 涨幅」）
 	//	= 0  显式关闭这个条件（只看 score）
-	//	nil  没写这个键 → 用默认 1.0
+	//	nil  没写这个键 → 用默认 0.5
 	//
-	// ⚠ 语义是「严格大于」：用户口径原话是「必须大于 1% 涨幅才行」。
+	// ⚠ 语义是「严格大于」：涨 0.50% 不算，必须 > 0.5。
 	//
 	// ★ 为什么用指针而不是 float64 ★
 	//   值类型下「没写」和「写了 0」都是 0，两者语义完全相反：
-	//     没写 → 应当用默认 1.0（漏配时条件仍在，不会静默放开全市场下单）
+	//     没写 → 应当用默认 DefaultMinBarRisePct（漏配时条件仍在，不会静默放开全市场下单）
 	//     写 0 → 应当真的关掉这个条件
 	//   二期在 MaxConcurrentPositions / DailyMaxEntries 上正是栽在
 	//   「0 被 `<= 0` 反压回默认值」这一步（用户写了 0 想取消限制，配置却静默失效）。
@@ -75,7 +75,7 @@ type ExitCfg struct {
 
 	// BollUpperExit 布林上轨出场：收盘价 > SMA20 + 2σ 就平。
 	// **四期起默认关闭** —— 它与买入判据读同一根 K 线，会「秒进秒出」：
-	// 那根既涨 >1% 又被判上轨，开仓后下一轮 3 秒巡检立刻反手平掉
+	// 那根既涨过入场门槛、又被判上轨，开仓后下一轮 3 秒巡检立刻反手平掉
 	// （实测 SNDK 开仓 15 秒即平、亏 0.17%）。
 	BollUpperExit bool `json:"boll_upper_exit"`
 
@@ -457,13 +457,13 @@ func defaultConfig() *Config {
 		Workers:               4,
 		CandleLimit:           300,
 		HistoryPages:          2,
-		// ★ 2026-10-02 三期：阈值 8 → **4**（用户口径「score > 3」）。
-		//   判定处是 sig.Score >= threshold，而 Score 是 0~8 的整数，
-		//   所以「> 3」与「>= 4」完全等价 —— 用 4 表达，既忠于口径，
-		//   又不必把判定从 >= 改成 >（改了会让所有历史测试口径漂移）。
+		// ★ 2026-10-02 五期：阈值 4 → **3**（用户口径「Score >= 3 且 RisePct > 0.5」）。
+		//   判定处本就是 sig.Score >= threshold，Score 是 0~8 的整数，
+		//   所以写 3 就等于「≥ 3」，判定符号一个字都不用动。
+		//   （三期曾写 4 来表达「> 3」，那是当时「8 个共振中 4 个及以上」的口径。）
 		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
-		//     4 会有大量信号，靠下面的「这根 K 线必须真涨」把关。
-		ScoreThreshold:        4,
+		//     放到 3 命中量会明显大于 4，靠下面的「这根 K 线必须真涨」把关。
+		ScoreThreshold:        3,
 		ScoreThresholdMap:     map[string]int{},
 		SignalTimeoutSec:      900,
 		RequestTimeoutSec:     20,
@@ -480,17 +480,18 @@ func defaultConfig() *Config {
 			//   min_one 口径不变：买得起就按 0.1U 成交，买不起就放大到「刚好 1 张」，
 			//   硬顶 MaxMarginUSDT = 1U（与准入上限 max_order_margin_usdt 同值）。
 			MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
-			// ★ 2026-10-02 三期新增：触发信号的那根 K 线必须**真涨**超过这个百分比，
-			//   买入与加仓共用同一判据（service.SignalQualified）。
+			// ★ 2026-10-02 三期新增 / 五期改值：触发信号的那根 K 线必须**真涨**
+			//   超过这个百分比，买入与加仓共用同一判据（service.SignalQualified）。
+			//   五期按用户口径 1.1% → **0.5%**。
 			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
-			MinBarRisePct: f64ptr(1.0),
+			MinBarRisePct: f64ptr(0.5),
 		},
 		// ★ 2026-10-02 四期：止盈 **0.3%**、布林上轨关闭、超时收紧到 1 小时。
 		//   兜底默认值必须与 JSON 一致 —— 否则 JSON 读不到时布林上轨会静默复活
 		//   （与三期 exclude_stock_etf 的兜底同一个道理）。
 		Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false,
 			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
-		// 加仓：触发条件**与买入完全一致**（score ≥ 4 且触发那根涨幅 > 1%），金额 = 原持仓保证金 × 1/3
+		// 加仓：触发条件**与买入完全一致**（score ≥ 3 且触发那根涨幅 > 0.5%），金额 = 原持仓保证金 × 1/3
 		//
 		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
 		//   用户口径「加仓条件也是和买入条件一样」。
@@ -1005,17 +1006,21 @@ func StripJSONComments(b []byte) []byte {
 // ---------------------------------------------------------------------------
 
 // DefaultMinBarRisePct 「K 线必须真涨」条件的默认门槛（%）。
-const DefaultMinBarRisePct = 1.0
+//
+// ★ 2026-10-02 五期：1.0 → **0.5**（用户口径「Score >= 3 且 RisePct > 0.5」）。
+// 这个常量同时被 conf 与 service 两侧读（service.StrategyConfig.MinBarRisePct
+// 的兜底就用它），改一处两处都跟着变 —— 这正是它作为常量存在的意义。
+const DefaultMinBarRisePct = 0.5
 
 // f64ptr 取一个 float64 的指针（配置里的「三态」字段用）。
 func f64ptr(v float64) *float64 { return &v }
 
 // MinBarRisePct 触发信号的那根 K 线至少要涨多少（%）才允许下单。
 //
-//	Entry.MinBarRisePct == nil → 默认 1.0（键没写：条件仍然生效）
+//	Entry.MinBarRisePct == nil → 默认 DefaultMinBarRisePct（当前 0.5；键没写：条件仍然生效）
 //	Entry.MinBarRisePct == 0   → 0（显式关闭：只看 score）
 //	Entry.MinBarRisePct > 0    → 原值（严格大于）
-//	Entry.MinBarRisePct < 0    → 视为写错，按默认 1.0（负数没有物理含义）
+//	Entry.MinBarRisePct < 0    → 视为写错，按默认值（负数没有物理含义）
 //
 // 买入扫描与加仓判定都必须走这个方法，不要各自解指针
 // ——「同一个量两条路算」是本项目反复踩的坑。
