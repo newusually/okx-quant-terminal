@@ -45,6 +45,13 @@ if not defined TOKEN (
   exit /b 2
 )
 
+REM ---- 统一日期时间（%DATE% 在中文 Windows 下是「2026/10/01 周四」）------
+REM   直接拼进 git 提交信息会带上斜杠和星期，既难看又无法按字符串排序。
+for /f "tokens=1-3 delims=/ " %%a in ("%DATE%") do set "DASH=%%a-%%b-%%c"
+if not defined DASH set "DASH=%DATE%"
+set "CLK=%TIME:~0,5%"
+set "CLK=%CLK: =0%"
+
 if /i "%~1"=="check" goto :check
 
 REM ---- 代码仓 ----
@@ -54,6 +61,7 @@ goto :skipcode
 
 :pushcode
 call :pushone "%ROOT%" "%CODE_REPO%" "code"
+if errorlevel 1 set "FAILED=1"
 :skipcode
 
 REM ---- 归档仓 ----
@@ -62,8 +70,10 @@ if /i "%~1"=="data" goto :pushdata
 goto :done
 
 :pushdata
+REM 归档数据仓是独立仓库（archive\.git），主仓库用 .gitignore 排除了它
 if exist "%ROOT%\archive\.git" (
   call :pushone "%ROOT%\archive" "%DATA_REPO%" "data"
+  if errorlevel 1 set "FAILED=1"
 ) else (
   echo [SKIP] 归档仓还没初始化：%ROOT%\archive\.git 不存在
 )
@@ -84,6 +94,12 @@ if errorlevel 1 (echo   data  ^>^> × 推不通（多半是数据仓还没建）) else (echo  
 exit /b 0
 
 :done
+if defined FAILED (
+  echo.
+  echo [X] 有仓库推送失败，退出码 1（月度维护会记下 PushErr 并跳过后续破坏性动作）
+  endlocal
+  exit /b 1
+)
 endlocal
 exit /b 0
 
@@ -97,22 +113,40 @@ set "REPO=%~2"
 set "TAG=%~3"
 cd /d "%DIR%" || (echo [X] 进不去 %DIR% & exit /b 1)
 
-for /f "tokens=2" %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%B"
+REM ★ 取当前分支名：必须整行取（delims=）或 tokens=1。
+REM   `git rev-parse --abbrev-ref HEAD` 只输出一行分支名（1 个 token），
+REM   用 tokens=2 会取到空串 —— 实测 [tokens=2] -> [] / [tokens=1] -> [master]，
+REM   也就是说 BRANCH 一直是靠下面那行 hardcode 兜底蒙对的；仓库改名 main
+REM   之后就会静默推到错误的分支名。
+REM   symbolic-ref --short HEAD 更稳，分离头指针时它会失败，兜底才生效。
+for /f "delims=" %%B in ('git symbolic-ref --short HEAD 2^>nul') do set "BRANCH=%%B"
+if not defined BRANCH for /f "tokens=1" %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BRANCH=%%B"
 if not defined BRANCH set "BRANCH=master"
 
 git add -A
 git diff --cached --quiet
 if errorlevel 1 (
-  git -c user.name="okx-quant" -c user.email="okx-quant@localhost" commit -q -m "auto(%TAG%): %DATE% %TIME%"
+  git -c user.name="okx-quant" -c user.email="okx-quant@localhost" commit -q -m "auto(%TAG%): %DASH% %CLK%"
   if errorlevel 1 (echo [X] %TAG% 提交失败 & exit /b 1)
   echo [OK] %TAG% 已提交
 ) else (
   echo [--] %TAG% 无新增改动
 )
 
-git push "https://x-access-token:%TOKEN%@%REPO%" HEAD:%BRANCH% 2>&1 | %SystemRoot%\System32\findstr.exe /v "x-access-token" 
-if errorlevel 1 (
-  echo [X] %TAG% 推送失败
+REM ★ 推送成败必须取 git 自己的退出码。
+REM   不能写成 `git push ... | findstr ...` 再判 errorlevel ——
+REM   管道里的 errorlevel 是 findstr 的，而 `findstr /v` 只要打出任意一行
+REM   不含模式的内容就返回 0，推送失败时 git 的错误信息恰好全属于这类，
+REM   于是失败会被报成「[OK] 已推送」（实测踩到过）。
+REM   所以：先重定向到临时文件 -> 立刻取退出码 -> 再过滤打印 -> 最后删文件。
+set "OUT=%TEMP%\okxpush_%TAG%.log"
+git push "https://x-access-token:%TOKEN%@%REPO%" HEAD:%BRANCH% > "%OUT%" 2>&1
+set "RC=!ERRORLEVEL!"
+REM 过滤掉可能含 token 的行再打印（git 出错时有可能回显带 token 的 URL）
+%SystemRoot%\System32\findstr.exe /v "x-access-token" "%OUT%"
+del "%OUT%" >nul 2>&1
+if not "!RC!"=="0" (
+  echo [X] %TAG% 推送失败（git 退出码 !RC!）
   exit /b 1
 )
 echo [OK] %TAG% 已推送到 %REPO% ^(%BRANCH%^)
