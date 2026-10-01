@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"finally-main/internal/conf"
@@ -333,4 +334,101 @@ func logArchive(man *ArchiveManifest, dir string, err error) {
 	logx.Logf("INFO", "[ARCHIVE] %s 已导出：%d 行 / %d 合约 / %d 个分片 / %.1f MB → %s",
 		man.Month, man.TotalRows, man.Insts, len(man.Parts),
 		float64(man.TotalBytes)/1048576, dir)
+}
+
+// archiveMonthOf 从归档产物文件名里取出它属于哪个月（"YYYY-MM"）。
+// 只认 ExportMonth / WriteManifest 生成的那两种命名：
+//
+//	kline-15m-2026-09.part01.csv.gz
+//	manifest-2026-09.json
+//
+// 返回 "" 表示「这不是我能识别的归档文件」—— 一律不动。宁可漏删，不能误删：
+// 这个目录将来可能被塞进 README、校验脚本或别人手工放的说明文件。
+func archiveMonthOf(name string) string {
+	var s string
+	switch {
+	case strings.HasPrefix(name, "manifest-"):
+		s = strings.TrimSuffix(strings.TrimPrefix(name, "manifest-"), ".json")
+	case strings.HasPrefix(name, "kline-"):
+		// kline-<bar>-<YYYY>-<MM>.partNN.csv.gz → 去掉前缀/后缀/分片号
+		s = strings.TrimSuffix(strings.TrimPrefix(name, "kline-"), ".csv.gz")
+		if i := strings.Index(s, ".part"); i >= 0 {
+			s = s[:i]
+		}
+		parts := strings.Split(s, "-")
+		if len(parts) < 3 {
+			return ""
+		}
+		s = parts[len(parts)-2] + "-" + parts[len(parts)-1] // 末两段就是年、月
+	default:
+		return ""
+	}
+	// 校验恰好是 YYYY-MM：7 个字符、第 5 位是 '-'、其余全数字。
+	// bar 名里可能带数字（15m/1H），所以不能只看长度就信。
+	if len(s) != 7 || s[4] != '-' {
+		return ""
+	}
+	for i, c := range s {
+		if i == 4 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return s
+}
+
+// ArchiveExists 判断某个月（"YYYY-MM"）是否已经有完整归档落地。
+//
+// 只看 `manifest-<ym>.json` —— 它是 ExportMonth 跑完之后由 WriteManifest
+// 最后写出的，所以「manifest 在」就等于「那个月的分片都写完了」。
+// 反过来，如果只看到 .gz 而没有 manifest，说明上次导出是中途挂掉的，
+// 这里返回 false，下一轮会重新导出（同名分片会被覆盖，幂等）。
+func ArchiveExists(dir, ym string) bool {
+	if archiveMonthOf("manifest-"+ym+".json") != ym {
+		return false // 参数本身不是合法 YYYY-MM
+	}
+	st, err := os.Stat(filepath.Join(dir, "manifest-"+ym+".json"))
+	return err == nil && !st.IsDir()
+}
+
+// PruneArchivesBefore 删掉严格早于 keepYM（"YYYY-MM"）的归档产物，
+// 返回删除的文件数与字节数。这是「磁盘守卫」的归档侧动作 —— 只保留当月。
+//
+// ★ 调用前必须确认这些归档**已经成功推到远端**（见 RunMonthlyMaintenance
+// 里的顺序与门禁）。本地 archive/ 删掉之后就只剩远端那一份了。
+//
+// 判据用文件名做字符串比较：YYYY-MM 是定宽零填充，字典序 == 时间序，
+// 所以 `ym >= keepYM` 就是「当月或未来」，直接跳过。
+func PruneArchivesBefore(dir, keepYM string, dryRun bool) (files int, bytes int64, err error) {
+	ents, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return 0, 0, nil // 还没归档过，不是错误
+		}
+		return 0, 0, rerr
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		ym := archiveMonthOf(e.Name())
+		if ym == "" || ym >= keepYM {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue // 拿不到大小就别删，宁可留着
+		}
+		if !dryRun {
+			if derr := os.Remove(filepath.Join(dir, e.Name())); derr != nil {
+				err = derr // 记最后一个错误，继续删其余的
+				continue
+			}
+		}
+		files++
+		bytes += info.Size()
+	}
+	return files, bytes, err
 }

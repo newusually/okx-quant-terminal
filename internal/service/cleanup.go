@@ -148,10 +148,13 @@ type MaintenanceReport struct {
 	StartedAt string `json:"startedAt"`
 	Ms        int64  `json:"ms"`
 
-	ArchivedMonth  string           `json:"archivedMonth,omitempty"`
-	Archive        *ArchiveManifest `json:"archive,omitempty"`
-	ArchiveDir     string           `json:"archiveDir,omitempty"`
-	ArchiveErr     string           `json:"archiveErr,omitempty"`
+	// 归档是「补齐式」的：一次可能导出好几个月（首次部署、停机几个月、
+	// 上一次导出失败，都会留下缺口月份），所以这里是列表而不是单值。
+	ArchivedMonths []string           `json:"archivedMonths,omitempty"`
+	Archives       []*ArchiveManifest `json:"archives,omitempty"`
+	ArchiveSkipped []string           `json:"archiveSkipped,omitempty"` // 早已归档、本轮跳过
+	ArchiveDir     string             `json:"archiveDir,omitempty"`
+	ArchiveErr     string             `json:"archiveErr,omitempty"`
 	PushOut        string           `json:"pushOut,omitempty"`
 	Pushed         bool             `json:"pushed"`
 	PushErr        string           `json:"pushErr,omitempty"`
@@ -166,6 +169,11 @@ type MaintenanceReport struct {
 	GuardFired   bool    `json:"guardFired"`
 	GuardDropped []string `json:"guardDropped,omitempty"`
 	GuardRows    int64   `json:"guardRows"`
+	// 守卫的归档侧动作与它的「不许删」原因（见 RunMonthlyMaintenance 第 4 步）
+	GuardArcFiles int    `json:"guardArcFiles"`
+	GuardArcBytes int64  `json:"guardArcBytes"`
+	GuardKeepYM   string `json:"guardKeepYm,omitempty"`
+	GuardArcNote  string `json:"guardArcNote,omitempty"`
 
 	KlineDropped []string `json:"klineDropped,omitempty"`
 	KlineRows    int64    `json:"klineRows"`
@@ -195,32 +203,67 @@ func RunMonthlyMaintenance(dryRun bool) (*MaintenanceReport, error) {
 	cfg := conf.LoadConfig()
 	rep.FreeGBBefore = freeGB()
 
-	// ---- 1. 归档上个月 ----
-	prev := time.Now().AddDate(0, -1, 0).Format("2006-01")
-	rep.ArchivedMonth = prev
+	// ---- 1. 归档所有「还没归档过」的、早于本月的月份 ----
+	//
+	// ★ 为什么不是只导「上个月」★
+	// 第 4 步的磁盘守卫会把 K 线收缩到「只留当月」。如果某个早于当月的月份
+	// 从来没见过归档文件，那一刀下去就是永久损失 —— 库里删了、远端也没有。
+	// 首次部署、停机几个月、上一次导出失败，都会留下这种「缺口月份」。
+	// 所以这里按库里**实际存在的月份**逐个检查，缺哪个月补哪个月（幂等：
+	// 已有 manifest 的月份直接跳过，不会被重复导出）。
+	now := time.Now()
+	thisYM := now.Format("2006-01")
 	dir := ArchiveDir()
 	rep.ArchiveDir = dir
-	if dryRun {
-		rep.ArchiveErr = "（预演：未导出）"
-	} else {
-		man, err := ExportMonth(prev, dir)
-		rep.Archive = man
-		if err != nil {
-			rep.ArchiveErr = err.Error()
-		} else {
-			logArchive(man, dir, nil)
-			if _, werr := WriteManifest(dir, man); werr != nil {
-				rep.ArchiveErr = "清单写入失败：" + werr.Error()
-			}
+
+	kmons, merr := klineMonthsOf()
+	if merr != nil {
+		rep.ArchiveErr = "读取 K 线月份清单失败：" + merr.Error()
+	}
+	for _, km := range kmons {
+		ym := km.Month
+		if ym >= thisYM {
+			continue // 本月还没过完，不能归档
 		}
+		if km.Rows == 0 {
+			continue
+		}
+		if ArchiveExists(dir, ym) {
+			rep.ArchiveSkipped = append(rep.ArchiveSkipped, ym)
+			continue
+		}
+		if dryRun {
+			rep.ArchivedMonths = append(rep.ArchivedMonths, ym)
+			continue
+		}
+		man, err := ExportMonth(ym, dir)
+		if err != nil {
+			// 一个月失败不影响其它月份：缺的月份下一轮还会被补上
+			if rep.ArchiveErr == "" {
+				rep.ArchiveErr = ym + " 导出失败：" + err.Error()
+			}
+			logArchive(nil, dir, err)
+			continue
+		}
+		if _, werr := WriteManifest(dir, man); werr != nil {
+			if rep.ArchiveErr == "" {
+				rep.ArchiveErr = ym + " 清单写入失败：" + werr.Error()
+			}
+			continue
+		}
+		logArchive(man, dir, nil)
+		rep.Archives = append(rep.Archives, man)
+		rep.ArchivedMonths = append(rep.ArchivedMonths, ym)
 	}
 
 	// ---- 1.5 推送到 GitHub（必须在磁盘守卫之前！）----
 	//
-	// 顺序很关键：磁盘守卫可能把 K 线收缩到「只留当月」，
-	// 上个月的数据一旦被删就再也导不出来了 —— 所以先确保它安全落在远端。
-	// 推送失败不算任务失败（归档已在本地 archive/），只记一条警告。
-	if !dryRun && rep.ArchiveErr == "" {
+	// 顺序很关键：磁盘守卫会删掉本地 archive/ 里早于当月的归档，
+	// 先删后推一旦推送失败就是「本地没了、远端也没有」。所以先把手里
+	// 所有归档推到远端，确认成功了，第 4 步才允许删本地。
+	// 推送失败不算任务失败（本地 archive/ 还在），但要记警告，
+	// 并且第 4 步会因此**跳过归档删除**。
+	if !dryRun {
 		out, err := pushGitHub("data")
 		rep.PushOut = out
 		if err != nil {
@@ -240,11 +283,30 @@ func RunMonthlyMaintenance(dryRun bool) (*MaintenanceReport, error) {
 	files, bytes := purgeAllLogs(cfg, repo.LogRetainDays(), dryRun)
 	rep.LogFiles, rep.LogBytes = files, bytes
 
-	// ---- 4. 磁盘守卫 ----
+	// ---- 4. 磁盘守卫：C 盘可用 < 阈值 → 只保留当月 ----
 	guard := repo.ArchiveMinFreeGB()
 	if rep.FreeGBBefore < float64(guard) {
 		rep.GuardFired = true
-		cut := monthStartMs(time.Now())
+		rep.GuardKeepYM = thisYM
+		// 收缩点默认是「本月月初」，但**不许越过还没归档的月份**：
+		// 越过就等于把库里唯一一份数据删掉（缺口月份在远端根本没有副本）。
+		// kmons 是升序的，第一个「有数据但没归档」的月份就是回退目标。
+		cut := monthStartMs(now)
+		for _, km := range kmons {
+			if km.Month >= thisYM {
+				break
+			}
+			if ArchiveExists(dir, km.Month) {
+				continue
+			}
+			if ms, _, e := repo.MonthRange(km.Month); e == nil {
+				cut = ms
+				rep.GuardKeepYM = km.Month
+				logx.Logf("WARN", "[GUARD] %s 尚未归档 → 收缩点回退到该月，"+
+					"避免删掉库里唯一一份数据", km.Month)
+			}
+			break
+		}
 		if !dryRun {
 			dr, err := dropKlineBefore(cut)
 			if err != nil {
@@ -253,8 +315,29 @@ func RunMonthlyMaintenance(dryRun bool) (*MaintenanceReport, error) {
 			rep.GuardDropped = dr.Dropped
 			rep.GuardRows = dr.Rows
 		}
-		logx.Logf("WARN", "[GUARD] C 盘可用 %.1f GB < %d GB 阈值 → K 线收缩到当月（预演=%v）",
-			rep.FreeGBBefore, guard, dryRun)
+		// 归档侧「只留当月」。本地 archive/ 删掉后就只剩远端那一份，
+		// 所以必须先确认推送成功；推送没成功就整轮跳过，宁可多占点磁盘。
+		switch {
+		case dryRun:
+			f, b, _ := PruneArchivesBefore(dir, thisYM, true)
+			rep.GuardArcFiles, rep.GuardArcBytes = f, b
+			rep.GuardArcNote = "（预演：未删除）"
+		case !rep.Pushed:
+			rep.GuardArcNote = "推送未成功 → 跳过归档删除（本地 archive/ 是唯一副本）"
+			logx.Logf("WARN", "[GUARD] 推送未成功，跳过归档删除 —— 本地 archive/ 是唯一副本")
+		default:
+			f, b, perr := PruneArchivesBefore(dir, thisYM, false)
+			rep.GuardArcFiles, rep.GuardArcBytes = f, b
+			if perr != nil {
+				rep.GuardArcNote = "部分删除失败：" + perr.Error()
+			} else {
+				rep.GuardArcNote = "仅保留 " + thisYM + " 的归档"
+			}
+			logx.Logf("INFO", "[GUARD] 归档只留当月（%s）：删除 %d 个文件 / %.1f MB",
+				thisYM, f, float64(b)/1048576)
+		}
+		logx.Logf("WARN", "[GUARD] C 盘可用 %.1f GB < %d GB 阈值 → K 线收缩到 %s（预演=%v）",
+			rep.FreeGBBefore, guard, rep.GuardKeepYM, dryRun)
 	}
 
 	// ---- 5. 回收站 ----
@@ -421,6 +504,20 @@ func monthStartMs(t time.Time) int64 {
 	return time.Date(y, m, 1, 0, 0, 0, 0, t.Location()).UnixMilli()
 }
 
+// klineMonthsOf 取「库里实际存在的月份」清单（升序，形如 2026-08 / 2026-09）。
+//
+// 归档（第 1 步：缺哪个月补哪个月）和磁盘守卫（第 4 步：收缩点不许越过
+// 未归档月份）都要用它，所以把 Store/DB 的获取与错误收敛在一处。
+// KlineMonths 是 *DB 上的方法，不是包级函数，这里顺手包一层。
+func klineMonthsOf() ([]repo.KlineMonth, error) {
+	store := repo.NewStore(conf.LoadConfig())
+	db, err := store.DB()
+	if err != nil {
+		return nil, err
+	}
+	return db.KlineMonths()
+}
+
 // purgeAllLogs 清理所有日志目录（应用 + 数据库 + 网页）。
 //
 // 用户口径：「每个月要清除所有超过一个月的日志记录，包括数据库、
@@ -543,12 +640,23 @@ func monthlySummary(rep *MaintenanceReport) string {
 	}
 	var parts []string
 
-	if rep.Archive != nil {
-		parts = append(parts, fmt.Sprintf("归档 %s：%d 行 / %d 分片 / %.1f MB",
-			rep.ArchivedMonth, rep.Archive.TotalRows, len(rep.Archive.Parts),
-			float64(rep.Archive.TotalBytes)/1048576))
+	if n := len(rep.Archives); n > 0 {
+		var rows, bytes int64
+		var nparts int
+		for _, m := range rep.Archives {
+			rows += m.TotalRows
+			bytes += m.TotalBytes
+			nparts += len(m.Parts)
+		}
+		parts = append(parts, fmt.Sprintf("归档 %d 个月（%s）：%d 行 / %d 分片 / %.1f MB",
+			n, strings.Join(rep.ArchivedMonths, ","), rows, nparts, float64(bytes)/1048576))
+	} else if rep.DryRun && len(rep.ArchivedMonths) > 0 {
+		parts = append(parts, fmt.Sprintf("预演：将归档 %d 个月（%s）",
+			len(rep.ArchivedMonths), strings.Join(rep.ArchivedMonths, ",")))
 	} else if rep.ArchiveErr != "" {
 		parts = append(parts, "归档失败："+rep.ArchiveErr)
+	} else if n := len(rep.ArchiveSkipped); n > 0 {
+		parts = append(parts, fmt.Sprintf("归档已是最新（%d 个月已有）", n))
 	}
 	if rep.Pushed {
 		parts = append(parts, "已推送 GitHub")
@@ -567,8 +675,19 @@ func monthlySummary(rep *MaintenanceReport) string {
 			len(rep.LogFiles), float64(rep.LogBytes)/1048576))
 	}
 	if rep.GuardFired {
-		parts = append(parts, fmt.Sprintf("★磁盘守卫触发（%.1f GB < %d GB）：K 线只留当月，DROP %d 个分区 / %d 行",
-			rep.FreeGBBefore, repo.ArchiveMinFreeGB(), len(rep.GuardDropped), rep.GuardRows))
+		g := fmt.Sprintf("★磁盘守卫触发（%.1f GB < %d GB）：K 线保留到 %s，DROP %d 个分区 / %d 行",
+			rep.FreeGBBefore, repo.ArchiveMinFreeGB(), rep.GuardKeepYM,
+			len(rep.GuardDropped), rep.GuardRows)
+		if rep.GuardKeepYM != "" && rep.GuardKeepYM < time.Now().Format("2006-01") {
+			g += "（有未归档月份，收缩点已回退）"
+		}
+		if rep.GuardArcNote != "" {
+			g += "；归档 " + rep.GuardArcNote
+		} else if rep.GuardArcFiles > 0 {
+			g += fmt.Sprintf("；归档删 %d 个 / %.1f MB", rep.GuardArcFiles,
+				float64(rep.GuardArcBytes)/1048576)
+		}
+		parts = append(parts, g)
 	}
 	if rep.Recycle != nil {
 		if rep.Recycle.Err != "" {
@@ -774,21 +893,35 @@ func MaintenanceText(rep *MaintenanceReport) string {
 	b.WriteString("----------------------------------------------\n")
 
 	if rep.Kind == "monthly" {
-		fmt.Fprintf(&b, "归档月份   : %s\n", rep.ArchivedMonth)
+		// 注意：这里刻意不用 %-10s 之类的宽度补齐来对齐中文标签 ——
+		// Go 的宽度按**字节**算，而「归档目录」(12 字节) 和「待归档」(9 字节)
+		// 显示宽度都是 4 个汉字，补齐后反而会错位。标签统一写成等宽的固定串。
 		fmt.Fprintf(&b, "归档目录   : %s\n", rep.ArchiveDir)
-		if rep.Archive != nil {
-			fmt.Fprintf(&b, "归档结果   : %d 行 / %d 个合约 / %d 个分片 / %.1f MB\n",
-				rep.Archive.TotalRows, rep.Archive.Insts, len(rep.Archive.Parts),
-				float64(rep.Archive.TotalBytes)/1048576)
-			for _, p := range rep.Archive.Parts {
-				fmt.Fprintf(&b, "             · %-42s %8d 行  %6.1f MB\n",
-					p.Name, p.Rows, float64(p.Bytes)/1048576)
+		if len(rep.ArchiveSkipped) > 0 {
+			fmt.Fprintf(&b, "已存在归档 : %s（跳过，不重复导出）\n",
+				strings.Join(rep.ArchiveSkipped, ", "))
+		}
+		switch {
+		case len(rep.ArchivedMonths) == 0:
+			b.WriteString("待归档月份 : （无 —— 所有早于本月的月份都已有归档）\n")
+		case len(rep.Archives) == 0:
+			// 预演：能算出要导哪些月份，但没真导，所以没有清单
+			fmt.Fprintf(&b, "待归档月份 : %s（预演：未导出）\n",
+				strings.Join(rep.ArchivedMonths, ", "))
+		default:
+			fmt.Fprintf(&b, "本次归档   : %d 个月\n", len(rep.Archives))
+			for i, m := range rep.Archives {
+				fmt.Fprintf(&b, "  [%d] %s : %d 行 / %d 合约 / %d 分片 / %.1f MB\n",
+					i+1, rep.ArchivedMonths[i], m.TotalRows, m.Insts,
+					len(m.Parts), float64(m.TotalBytes)/1048576)
+				for _, p := range m.Parts {
+					fmt.Fprintf(&b, "      · %-42s %8d 行  %6.1f MB\n",
+						p.Name, p.Rows, float64(p.Bytes)/1048576)
+				}
 			}
-			if rep.Archive.From != "" {
-				fmt.Fprintf(&b, "时间范围   : %s ~ %s\n", rep.Archive.From, rep.Archive.To)
-			}
-		} else if rep.ArchiveErr != "" {
-			fmt.Fprintf(&b, "归档结果   : × %s\n", rep.ArchiveErr)
+		}
+		if rep.ArchiveErr != "" {
+			fmt.Fprintf(&b, "归档异常   : × %s\n", rep.ArchiveErr)
 		}
 		switch {
 		case rep.Pushed:
@@ -841,9 +974,27 @@ func MaintenanceText(rep *MaintenanceReport) string {
 	if rep.Kind == "monthly" {
 		fmt.Fprintf(&b, "\n【磁盘守卫】阈值 %d GB · 当前 C 盘可用 %.1f GB → %s\n",
 			repo.ArchiveMinFreeGB(), rep.FreeGBBefore,
-			map[bool]string{true: "★ 触发：K 线只保留当月", false: "未触发（空间充足）"}[rep.GuardFired])
-		if rep.GuardFired && !rep.DryRun {
-			fmt.Fprintf(&b, "  DROP %d 个分区 / %d 行\n", len(rep.GuardDropped), rep.GuardRows)
+			map[bool]string{true: "★ 触发：只保留当月", false: "未触发（空间充足）"}[rep.GuardFired])
+		if rep.GuardFired {
+			fmt.Fprintf(&b, "  K 线保留到：%s", rep.GuardKeepYM)
+			if rep.GuardKeepYM < time.Now().Format("2006-01") {
+				fmt.Fprintf(&b, "（有未归档月份，收缩点从本月回退，避免删掉唯一副本）")
+			}
+			b.WriteString("\n")
+			if rep.DryRun {
+				fmt.Fprintf(&b, "  将 DROP：未知（预演不执行）\n")
+			} else {
+				fmt.Fprintf(&b, "  DROP %d 个分区 / %d 行：%s\n", len(rep.GuardDropped),
+					rep.GuardRows, strings.Join(rep.GuardDropped, ", "))
+			}
+			if rep.GuardArcNote != "" {
+				fmt.Fprintf(&b, "  归档侧：%s", rep.GuardArcNote)
+				if rep.GuardArcFiles > 0 {
+					fmt.Fprintf(&b, "（%d 个文件 / %.1f MB）", rep.GuardArcFiles,
+						float64(rep.GuardArcBytes)/1048576)
+				}
+				b.WriteString("\n")
+			}
 		}
 	}
 
