@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>验收报告 · 五期（买入门槛 Score ≥ 3 且涨幅 &gt; 0.5%）2026-10-02</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --sub:#5b6673; --line:#e3e6ea;
+    --ok:#0a7d4c; --warn:#a8620a; --bad:#b3261e; --accent:#0b62c4;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 24px 72px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+  .lead{color:var(--sub);margin:0 0 28px;font-size:14px}
+  h2{font-size:18px;margin:38px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;font-weight:600;color:var(--sub);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code,pre{font-family:var(--mono);font-size:12.5px}
+  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+  pre{background:#1c2128;color:#d6dde6;padding:14px 16px;border-radius:8px;overflow-x:auto;line-height:1.55}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:21px;letter-spacing:-.3px;margin-bottom:2px}
+  .kpi span{font-size:12px;color:var(--sub)}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:99px;
+        border:1px solid currentColor;vertical-align:1px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  blockquote{margin:12px 0;padding:10px 16px;background:#fff;border-left:3px solid var(--accent);
+             border-radius:0 8px 8px 0;color:#333;font-size:14px}
+  .foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+  .hl{background:#fffbe6;padding:1px 5px;border-radius:4px;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>验收报告 · 五期：买入/加仓门槛改为 <code>Score ≥ 3</code> 且涨幅 <code>&gt; 0.5%</code></h1>
+  <p class="lead">
+    OKX 全合约量化终端 · <code>C:\Users\Administrator\Documents\finally</code> ·
+    2026-10-02 01:32 – 01:45 · 运行时 <code>bin\okxweb.exe</code> = 9,037,824 字节
+    （<code>go build -trimpath -ldflags "-s -w"</code>，md5 <code>f1c23ce928a778dce6b367acbf1de359</code>）
+  </p>
+
+  <div class="grid">
+    <div class="kpi"><b class="ok">0 → 22 条</b><span>同一轮三周期信号数（0/0/0 → 3/5/14）</span></div>
+    <div class="kpi"><b class="ok">0 → 15 笔</b><span>切换后首轮真实开仓</span></div>
+    <div class="kpi"><b class="ok">5 处</b><span>副本全部同改（真源 + 模板 + 兜底 + 常量 + 前端）</span></div>
+    <div class="kpi"><b class="ok">5 / 5</b><span>单测包全绿（conf/handler/repo/service/cmd）</span></div>
+    <div class="kpi"><b class="ok">0 处</b><span>旧口径残留（grep 已收口）</span></div>
+    <div class="kpi"><b class="ok">a4b3a2a</b><span>已推双仓，三重校验一致</span></div>
+  </div>
+
+  <h2>一、用户指令与口径变更</h2>
+
+  <div class="card">
+    <blockquote>「Score &gt;= 3 且 RisePct &gt; 0.5（严格大于）修改一下」</blockquote>
+
+    <table>
+      <tr><th>项</th><th>旧值</th><th>新值</th><th>说明</th></tr>
+      <tr>
+        <td><code>score_threshold</code></td>
+        <td><code>4</code></td>
+        <td class="hl"><code>3</code></td>
+        <td>判定处本就是 <code>sig.Score &gt;= threshold</code>，所以配 3 <b>即字面语义「≥ 3」</b>，判定符号一个字都没动</td>
+      </tr>
+      <tr>
+        <td><code>entry.min_bar_rise_pct</code></td>
+        <td><code>1.1</code></td>
+        <td class="hl"><code>0.5</code></td>
+        <td>语义是<b>严格大于</b>：涨 0.50% <b>不算</b>，必须 &gt; 0.5%</td>
+      </tr>
+    </table>
+
+    <p>
+      两个条件仍然必须落在<b>同一根已收盘 K 线</b>上 —— 取 <code>IndexOfLastClosed</code> 那一根，
+      <code>Score</code> 与 <code>RisePct</code> 都算在它身上，不跨根、不取「最近几根里任意一根满足」。
+      买入扫描 / 加仓判定 / 信号入库三处共用 <code>service.SignalQualified</code>，
+      所以图上标的信号与实盘真正会下单的信号必然一致。
+    </p>
+  </div>
+
+  <h2>二、改动清单：五处副本全部同改 <span class="pill ok">少一处 = 静默失效</span></h2>
+
+  <div class="card">
+    <table>
+      <tr><th>#</th><th>位置</th><th>角色</th><th>改动</th></tr>
+      <tr><td>①</td><td><code>configs/okx_strategy.json</code></td><td>配置真源（gitignore）</td><td><code>4 → 3</code> / <code>1.1 → 0.5</code>，注释重写</td></tr>
+      <tr><td>②</td><td><code>configs/okx_strategy.example.json</code></td><td>随仓库分发的模板</td><td>同步</td></tr>
+      <tr><td>③</td><td><code>internal/conf/config.go</code> <code>defaultConfig()</code></td><td>引擎兜底默认</td><td><code>ScoreThreshold: 4 → 3</code>、<code>f64ptr(1.0) → f64ptr(0.5)</code></td></tr>
+      <tr><td>④</td><td><code>internal/conf/config.go</code> <code>DefaultMinBarRisePct</code></td><td>导出公共常量（被另一包引用）</td><td><code>1.0 → 0.5</code></td></tr>
+      <tr><td>⑤</td><td><code>internal/service/strategyconf.go</code> <code>LoadStrategy()</code></td><td>第二份 schema（前端展示用）兜底</td><td><code>4 → 3</code>，涨幅沿用 ④</td></tr>
+      <tr><td>⑥</td><td><code>web/assets/app.js</code></td><td>前端文案</td><td>删掉 <code>=== 4 ? '（score &gt; 3）'</code> 的括号注解（配置值现在就是字面语义）</td></tr>
+      <tr><td>⑦</td><td>带注释 JSON 顶部总览行</td><td><b>口径摘要</b>（最易漏）</td><td><code>score &gt; 3（即 ≥4 个因子）… 真涨 &gt; 1%</code> → 新口径</td></tr>
+    </table>
+
+    <p class="warn">
+      ③④⑤ 三处必须同值 —— 否则配置读不到时「已取消的规则」会悄悄复活（兜底是新值、只有某一处还是旧值）。
+    </p>
+  </div>
+
+  <h2>三、实测取证：切换前后同一现场对比 <span class="pill ok">决定性证据</span></h2>
+
+  <div class="card">
+    <h3>运行日志原始行（节选）</h3>
+    <pre>01:32:46  3m：… 信号 0 / 开仓 0 ；5m：… 信号 0 / 开仓 0 ；15m：… 信号 0 / 开仓 0
+          在持 0 仓，本轮开仓 0、平仓 0、加仓 0，用时 2.385s      ← 旧口径下「长期 0 单」
+
+01:34:07  3m：… 信号 3 / 开仓 3 ；5m：… 信号 5 / 开仓 3 ；15m：… 信号 14 / 开仓 9
+          在持 15 仓，本轮开仓 15、平仓 0、加仓 0，用时 24.241s    ← 配置热加载即刻生效
+
+01:35:52  3m：… 信号 3 / 开仓 0 ；5m：… 信号 4 / 开仓 2 ；15m：… 信号 14 / 开仓 0
+          在持 14 仓，本轮开仓 2、平仓 0、加仓 0，用时 7.722s</pre>
+
+    <h3>逐轮信号数对比</h3>
+    <table>
+      <tr><th>时间</th><th>3m 信号</th><th>5m 信号</th><th>15m 信号</th><th>本轮开仓</th><th>口径</th></tr>
+      <tr><td>01:27:12</td><td>0</td><td>0</td><td>0</td><td>0</td><td rowspan="7">旧：Score ≥ 4 且 涨幅 &gt; 1.1%</td></tr>
+      <tr><td>01:28:44</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>01:29:44</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>01:30:44</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>01:31:44</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>01:32:46</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>01:34:07</td><td class="ok">3</td><td class="ok">5</td><td class="ok">14</td><td class="ok">15</td></tr>
+      <tr><td>01:35:52</td><td>3</td><td>4</td><td>14</td><td>2</td><td rowspan="4">新：Score ≥ 3 且 涨幅 &gt; 0.5%</td></tr>
+      <tr><td>01:36:45</td><td>0</td><td>4</td><td>14</td><td>0</td></tr>
+      <tr><td>01:37:49</td><td>0</td><td>4</td><td>14</td><td>0</td></tr>
+      <tr><td>01:39:45</td><td>0</td><td>4</td><td>14</td><td>0</td></tr>
+    </table>
+
+    <blockquote>
+      <b>结论</b>：旧口径下三周期信号长期为 <b>0</b>（8 因子中要命中 4 个<b>且</b>同一根涨 &gt;1.1%，实际几乎不可能同时满足）；
+      新口径下每轮稳定产生 <b>15m ≈ 14 条、5m 3~5 条、3m 0~3 条</b> 信号，并已真实成交。<br>
+      ——「改了有没有用」的答案在这里：<b>从「长期不出单」变成「每轮十几条信号」</b>。
+    </blockquote>
+  </div>
+
+  <h2>四、接口复核</h2>
+
+  <div class="card">
+    <pre>GET /api/state  → HTTP 200
+  score_threshold = 3
+  minBarRisePct   = 0.5
+  bars            = ['3m', '5m', '15m']
+  exit            = {take_profit_pct: 0.3, boll_upper_exit: false,
+                     max_hold_minutes: 60, max_hold_bars: 0, stop_loss_pct: 0}</pre>
+    <p>出场口径未受影响（四期形态保持）：<b>止盈 +0.3% 保留</b> / 布林上轨关闭 / 超时 1 小时 / 不设止损。</p>
+  </div>
+
+  <h2>五、测试同步</h2>
+
+  <div class="card">
+    <table>
+      <tr><th>测试</th><th>改动</th></tr>
+      <tr>
+        <td><code>TestScoreThresholdDefaultsToFour</code></td>
+        <td>→ <b><code>TestScoreThresholdDefaultsToThree</code></b>，断言 3（含「显式写 6 保留」「&gt; 8 夹到 8」）</td>
+      </tr>
+      <tr>
+        <td><code>TestMinBarRisePctThreeStates</code></td>
+        <td>默认 <code>1.0 → 0.5</code>；新增断言 <code>DefaultMinBarRisePct == 0.5</code>；三态（不写 / 0 / 负数）全部覆盖</td>
+      </tr>
+      <tr>
+        <td><code>TestSignalQualified</code></td>
+        <td>用例表整体改 <code>threshold=3 / minRise=0.5</code>；新增边界：score=2 拒 / score=3 收、涨 0.5 拒（严格大于）/ 涨 0.5001 收</td>
+      </tr>
+      <tr>
+        <td><code>TestThresholdFourIsExactlyScoreGreaterThanThree</code></td>
+        <td>→ <b><code>TestThresholdIsNonStrictGreaterOrEqual</code></b>：不再钉「4 ≡ &gt;3」，改为钉「阈值语义是非严格 <code>&gt;=</code>」（1~8 阈值 × 0~8 分数全枚举）</td>
+      </tr>
+      <tr>
+        <td><code>TestAddon_SkipWhenBarDidNotRise</code></td>
+        <td>边界 <code>1.0 → 0.5</code>（涨 0.3 拒 / 涨 0.5 拒 / 涨 0.6 收）</td>
+      </tr>
+      <tr>
+        <td><code>TestAddon_ThreePeriodDefaultScore</code></td>
+        <td>→ <b><code>TestAddon_FifthPeriodDefaultScore</code></b>（默认阈值 3：score=3 加、score=2 不加）</td>
+      </tr>
+    </table>
+    <p><code>go vet ./...</code> 干净；<code>go test -count=1 ./internal/... ./cmd/...</code> <b class="ok">五包全绿</b>。</p>
+  </div>
+
+  <h2>六、文档与历史沿革</h2>
+
+  <div class="card">
+    <p>
+      <code>README.md</code> / <code>docs/架构说明.md</code> / <code>docs/策略说明.md</code> /
+      <code>docs/项目详情.md</code> 中所有「score ≥ 4」「score &gt; 3」「涨幅 &gt; 1%」「1.1%」的表述
+      同步为「Score ≥ 3」「涨幅 &gt; 0.5%」，并写明为什么曾经是 4：
+    </p>
+    <blockquote>
+      三期口径是「8 个共振中 4 个及以上」。为了<b>不改判定符号</b>，当时把配置值写成 <b>4</b> 来表达「&gt; 3」。
+      五期用户口径直接给到 <b>3</b>（<code>Score &gt;= 3</code>），配置值与语义重新对齐。<br>
+      <span class="warn">教训</span>：配置值不要用来模拟比较符 —— 语义错位一格，会让文档、前端、测试
+      长期背着额外注解，用户一改口全部作废。
+    </blockquote>
+  </div>
+
+  <h2>七、交付</h2>
+
+  <div class="card">
+    <ul>
+      <li>二进制：<code>tmp/mb53/okxweb.exe</code> = <b>9,037,824 字节</b>、md5 <code>f1c23ce928a778dce6b367acbf1de359</code>，
+          已换壳为 <code>bin/okxweb.exe</code>（旧件备份 <code>bin/okxweb.exe.bak-20261002-0140</code>）</li>
+      <li>服务：<code>OKXMySQL</code> / <code>OKXWeb</code> / <code>OKXApache</code> 全部 Running；
+          80 / 8090 / 3306 全部 LISTENING</li>
+      <li>提交 <code>a4b3a2a</code>（14 文件，+178 / −159），已推双仓；
+          本地 HEAD = <code>ls-remote</code> = GitHub API <b>三重一致</b></li>
+      <li>配置热加载即刻生效，换壳只是把<b>新的兜底默认值</b>打进二进制</li>
+    </ul>
+  </div>
+
+  <div class="foot">
+    OKX 全合约量化终端 · 五期验收报告 · 生成于 2026-10-02 01:45 (UTC+8) ·
+    全部数字来自运行日志、<code>/api/state</code> 接口与 MySQL 实查，未做任何估算。
+  </div>
+
+</div>
+</body>
+</html>
