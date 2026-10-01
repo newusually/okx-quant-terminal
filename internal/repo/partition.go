@@ -16,22 +16,32 @@ package repo
 //   4. 统计信息按分区维护，ANALYZE 的粒度更细
 //
 // ---------------------------------------------------------------------------
-// 为什么「按月 + 按周」两层（关键设计）
+// 为什么「按月 + 按天」两层分区（关键设计，2026-10-01 二期由按周改为按天）
 // ---------------------------------------------------------------------------
-// 纯按月的问题：整月数据 402MB，**比 384MB 的 buffer pool 还大** ——
-// 一个月都装不下，查「最近一小时」照样要读盘。
+// 纯按月的问题：整月数据远超 buffer pool，一个月都装不下，
+// 查「最近一小时」照样要读盘。
 //
-// 纯按周的问题：历史拉长之后分区数暴涨（一年 52 个）。kline 项目要求
-// 「每个周期至少覆盖一个月」，但历史区间会长到一两年，52×N 个分区管理起来累。
+// 纯按天的问题：历史拉长之后分区数暴涨（一年 365 个），管理成本高。
+// 对当前口径（K 线只留 10 天）来说一年根本不存在，但 p_old 之前的历史
+// 还是要按月聚拢，否则 DROP 的单位太碎、information_schema 也吃不消。
 //
 // 所以分两层：
-//   · 热区（最近 8 周 + 未来 3 个月）：**按周**切。单分区约 90MB，
-//     384MB 的 buffer pool 能同时装下最近 4 周 —— 查最新行情基本零磁盘 IO。
-//   · 冷区（更早的历史）：**按月**切。一年 12 个，管理成本可控，
-//     而且冷数据本来也很少查。
+//   · 热区（最近 21 天 + 未来 2 天）：**按天**切。
+//     单天约 100MB（四个周期合计），最近几天的热点数据能常在 buffer pool 里；
+//     更重要的是**每日清理能整段 DROP**（见下面「为什么必须按天」）。
+//   · 冷区（更早的历史）：**按月**切。正常应该是空的（10 天保留窗口会把它删光），
+//     只在「清理任务停了很久」或「保留窗口被临时调大」时才有数据。
 //
-// 两层用同一句 `PARTITION BY RANGE COLUMNS(ts)` 表达 —— RANGE 分区**不要求
-// 各分区等宽**，所以「先几个月的、再一串 7 天的、最后 pmax」完全合法。
+// ---------------------------------------------------------------------------
+// 为什么必须按天（这是二期改动力度最大的一处）
+// ---------------------------------------------------------------------------
+// 每日清理的 cutoff = now − 10 天，落点在一周中的任意一天。
+// 分区粒度必须**细于**删除粒度，否则每次清理都会有一个「跨在 cutoff 上的分区」
+// 既不能 DROP、又必须逐行 DELETE，而 kline 上**没有独立的 ts 索引**
+// （主键是 inst_id,bar,ts，见 indexes.go 的说明），`WHERE ts < ?` 只能全索引扫。
+// 按周切时那个边界分区有 7 天的数据、约 90MB，每批 LIMIT 5000 都要重扫一遍 ——
+// 几十批下来就是几十分钟。按天切之后，边界分区只有 1 天数据，
+// 而凌晨 00:0x 跑任务时 cutoff 恰好落在某个日边界附近，需要逐行删的只有几分钟的量。
 //
 // ---------------------------------------------------------------------------
 // 分区键选择
@@ -62,12 +72,28 @@ import (
 )
 
 const (
-	// PartitionHotWeeks 热区（按周切）覆盖最近多少周
-	PartitionHotWeeks = 8
-	// PartitionMonthsAhead 预建未来几个自然月（热区按周一直铺到那个月 1 号）。
-	// 只铺 1 个月：kline 的保留期约 30 天，再多铺出来的分区长期是空的，
-	// 纯属给 information_schema 添负担。真正需要时 EnsurePartitions 会自动补。
-	PartitionMonthsAhead = 1
+	// PartitionHotDays 热区（按天切）覆盖最近多少天。
+	//
+	// ★ 2026-10-01 二期：从「按周」改成「按天」★
+	//
+	// 起因：K 线保留窗口从 365 天砍到 **10 天**（用户口径「只能查询保存最近 10 天
+	// 数据，多出来就删除」+「自动每天凌晨删除数据一次」），而每日清理靠
+	// `DROP PARTITION`。分区粒度必须**细于**删除粒度，否则每天都在跨分区边界：
+	//
+	//	按周切 + 每天删 → cut 落在某个 7 天分区中间，那个分区永远 DROP 不掉，
+	//	                     只能逐行 DELETE 扫一个 90MB 分区（每批 LIMIT 5000 都要重扫一遍）
+	//	按天切 + 每天删 → 整天的分区直接 DROP（毫秒级），残余只有边界那一小段
+	//
+	// 热区天数取 21：够覆盖 10 天保留窗口 + 两周缓冲，
+	// 万一某天清理任务没跑（服务停了、机器重启），数据仍落在可 DROP 的日分区里，
+	// 不会掉进永不删除的 p_old。
+	PartitionHotDays = 21
+
+	// PartitionDaysAhead 预建未来几天。
+	// 只铺 2 天：跨时区/时钟漂移时下一根 K 线不会落到 pmax，
+	// 再多铺出来的分区长期是空的，纯属给 information_schema 添负担。
+	PartitionDaysAhead = 2
+
 	// PartitionColdMonths 冷区（按月切）最多回溯多少个月；
 	// 更早的数据统一落进第一个 p_old 兜底分区，避免分区数失控
 	PartitionColdMonths = 18
@@ -95,6 +121,13 @@ var PartitionedTables = []string{"kline"}
 func monthStart(t time.Time) time.Time {
 	y, m, _ := t.Date()
 	return time.Date(y, m, 1, 0, 0, 0, 0, t.Location())
+}
+
+// dayStart 返回 t 所在自然日的 00:00:00（本地时区）。
+// 热区日分区的边界锚在这里 —— 与「每天凌晨清理」的时间口径对齐。
+func dayStart(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 }
 
 // monthStartMs t 所在月的下一个月 1 号毫秒时间戳（即「本月上界」）
@@ -227,7 +260,7 @@ type partBound struct {
 	Name     string
 	LessThan int64
 	From     time.Time // 区间起点（只用于注释与日志）
-	Weekly   bool      // 是否是按周切出来的
+	Daily    bool      // 是否是热区按天切出来的
 }
 
 // planBounds 生成分区方案（上界列表，升序）。
@@ -239,8 +272,15 @@ type partBound struct {
 //
 //	p_old                覆盖 base 之前的一切（正常是空的，纯兜底）
 //	+ 冷区按月           base 月 1 号 → hotStart，每月一个
-//	+ 热区按周           hotStart → 未来 PartitionMonthsAhead 个月，每 7 天一个
+//	+ 热区按天           hotStart → 未来 PartitionDaysAhead 天，每 1 天一个
 //	+ pmax               兜底（调用方补）
+//
+// ★ 2026-10-01 二期：热区从「按周」改成「按天」★
+//
+//	热区起点 = 「今天往前 PartitionHotDays 天」所在自然日的 00:00（本地时区）。
+//	日边界刻意对齐本地零点，与每日清理任务的运行时间口径一致
+//	—— 凌晨 00:0x 跑清理时，cutoff 恰好落在某个日边界附近，
+//	所以「整段过期的日分区」能全部 DROP，只剩边界那一小段需要逐行删。
 func planBounds(firstData, now time.Time) []partBound {
 	loc := now.Location()
 	coldFloor := monthStart(now).AddDate(0, -PartitionColdMonths, 0)
@@ -249,10 +289,8 @@ func planBounds(firstData, now time.Time) []partBound {
 		dataFrom = coldFloor
 	}
 
-	// 热区起点：把「今天往前 HotWeeks 周」所在的**自然月 1 号**当作分界。
-	// 取整月是为了让热/冷边界落在月 1 号上 —— 否则会出现一个只覆盖
-	// 两三天的碎片分区（既没意义，又让 REORGANIZE 的边界推导变麻烦）。
-	hotStart := monthStart(now.AddDate(0, 0, -7*PartitionHotWeeks))
+	// 热区起点：今天往前 HotDays 天的自然日 00:00。
+	hotStart := dayStart(now.In(loc).AddDate(0, 0, -PartitionHotDays))
 	if hotStart.Before(dataFrom) {
 		hotStart = dataFrom
 	}
@@ -261,8 +299,8 @@ func planBounds(firstData, now time.Time) []partBound {
 		base = hotStart
 	}
 
-	// 热区要铺到「当前月 + Ahead」的 1 号
-	end := monthStart(now).AddDate(0, PartitionMonthsAhead+1, 0)
+	// 热区要铺到「今天 + Ahead」那天的 00:00（不含），再往后由 pmax 接住
+	end := dayStart(now.In(loc)).AddDate(0, 0, PartitionDaysAhead+1)
 
 	var bs []partBound
 	// 兜底老分区：上界 = base
@@ -278,11 +316,11 @@ func planBounds(firstData, now time.Time) []partBound {
 			Name: "p" + monthTag(c), LessThan: next.UnixMilli(), From: c,
 		})
 	}
-	// 热区：按 7 天一段。锚点是「热区起点所在月的 1 号」，保证边界可复现。
-	for c := hotStart; c.Before(end); c = c.AddDate(0, 0, 7) {
-		next := c.AddDate(0, 0, 7)
+	// 热区：按 1 天一段。锚点是「今天往前 HotDays 天」的零点，保证边界可复现。
+	for c := hotStart; c.Before(end); c = c.AddDate(0, 0, 1) {
+		next := c.AddDate(0, 0, 1)
 		bs = append(bs, partBound{
-			Name: "pw" + dayTag(c), LessThan: next.UnixMilli(), From: c, Weekly: true,
+			Name: "pd" + dayTag(c), LessThan: next.UnixMilli(), From: c, Daily: true,
 		})
 	}
 	return bs
@@ -341,22 +379,22 @@ func (d *DB) MigrateToPartition(table string, force bool) error {
 
 	bs := planBounds(since, now)
 	clause := buildPartitionClause(bs)
-	weekly, monthly := 0, 0
+	daily, monthly := 0, 0
 	for _, b := range bs {
-		if b.Weekly {
-			weekly++
+		if b.Daily {
+			daily++
 		} else if b.Name != partitionOldName {
 			monthly++
 		}
 	}
 	start := time.Now()
-	logx.Logf("INFO", "[PART] 开始重建 %s 的分区方案（数据起点 %s，%d 个月分区 + %d 个周分区，会重建整表）...",
-		table, since.Format("2006-01-02"), monthly, weekly)
+	logx.Logf("INFO", "[PART] 开始重建 %s 的分区方案（数据起点 %s，%d 个月分区 + %d 个日分区，会重建整表）...",
+		table, since.Format("2006-01-02"), monthly, daily)
 
 	if _, err := d.sql.Exec("ALTER TABLE `" + table + "` " + clause); err != nil {
 		return fmt.Errorf("分区 %s 失败：%w", table, err)
 	}
-	logx.Logf("INFO", "[PART] ✔ %s 分区完成，用时 %.1fs（冷区按月 + 热区按周）",
+	logx.Logf("INFO", "[PART] ✔ %s 分区完成，用时 %.1fs（冷区按月 + 热区按天）",
 		table, time.Since(start).Seconds())
 	return nil
 }
@@ -391,9 +429,9 @@ func (d *DB) EnsurePartitions() {
 // addMissingPartitions 把计划里「比现有最大上界还大、且名字没出现过」的分区补上。
 //
 // 为什么同时要判名字和上界：
-//   · 只判上界：老的纯按月方案（p202609 < 2026-10-01）会让计划的周分区
-//     pw20260801（< 2026-08-08）被判为「已覆盖」而漏建 —— 虽然它确实不该建，
-//     因为方案变了；但反过来如果表已按新方案建好，缺失的周分区必须补上。
+//   · 只判上界：老的纯按月方案（p202609 < 2026-10-01）会让计划的日分区
+//     pd20260928（< 2026-09-29）被判为「已覆盖」而漏建 —— 虽然它确实不该建，
+//     因为方案变了；但反过来如果表已按新方案建好，缺失的日分区必须补上。
 //   · 只判名字：容易被「同名不同界」骗过去。
 //
 // 两个条件同时满足才 ADD，既不会插出非递增的非法分区，也不会漏建。
@@ -437,6 +475,69 @@ func (d *DB) addMissingPartitions(table string, pi *partitionInfo, now time.Time
 	return nil
 }
 
+// PartRange 一个分区区间的**只读快照**（导出）。
+//
+// 内部用的是小写的 partRange；这里单独导出一份是给 service 层的
+// 「每日清理 dry-run 预告」用的 —— service 不能（也不该）依赖 repo 的内部结构。
+type PartRange struct {
+	Name     string // 分区名，形如 p_old / p202609 / pd20261001 / pmax
+	LessThan int64  // 上界（不含）；pmax 记 1<<62-1
+	IsMax    bool   // pmax 兜底分区
+	IsOld    bool   // p_old 垃圾桶分区（永不 DROP）
+}
+
+// DroppablePartitions 从分区快照里挑出「上界 ≤ cutMs、且可以整段丢弃」的分区名。
+//
+// ★★ 预演与真跑必须共用这一个判据 ★★
+//
+// 原来两处各写了一遍：真跑（DropKlinePartitionsBefore）正确地跳过了
+// p_old / pmax，而每日清理的 dry-run 预告只判了「上界 ≤ cutoff」，
+// 于是预报出「将整段 DROP 1 个日分区 [p_old]」—— **预演在说谎**。
+// 用户恰恰是靠这条预演核对「10 天红线到底会删哪些分区」，报错一个名字整条核对链就废了。
+//
+// 两条永不返回：
+//   - pmax：MAXVALUE 兜底分区，删了之后比最大上界还新的数据无处安放，写入直接报错；
+//   - p_old：低位垃圾桶，装的是低于第一个分区下界的碎片，
+//     交给 PurgeKlineBefore 分批逐行删（一次 DROP 会把里面还没过期的行一起带走）。
+func DroppablePartitions(ranges []PartRange, cutMs int64) []string {
+	if cutMs <= 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ranges))
+	for _, r := range ranges {
+		if r.IsMax || r.IsOld {
+			continue
+		}
+		if r.LessThan > 0 && r.LessThan <= cutMs {
+			out = append(out, r.Name)
+		}
+	}
+	return out
+}
+
+// toPartRanges 内部 partRange → 导出的 PartRange（补上 IsOld 标记）
+func toPartRanges(rs []partRange) []PartRange {
+	out := make([]PartRange, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, PartRange{
+			Name: r.Name, LessThan: r.LessThan, IsMax: r.IsMax,
+			IsOld: r.Name == partitionOldName,
+		})
+	}
+	return out
+}
+
+// KlinePartitionRanges 取 kline 现有分区区间（升序，按 ordinal_position）。
+//
+// 只在自检 / dry-run 预告 / 面板里调用，不在任何轮询路径上。
+func (d *DB) KlinePartitionRanges() ([]PartRange, error) {
+	pi, err := d.inspectPartition("kline")
+	if err != nil {
+		return nil, err
+	}
+	return toPartRanges(pi.Ranges), nil
+}
+
 // PartitionSummary 分区概况（自检/接口展示用）
 func (d *DB) PartitionSummary() []map[string]any {
 	out := []map[string]any{}
@@ -446,12 +547,18 @@ func (d *DB) PartitionSummary() []map[string]any {
 			out = append(out, map[string]any{"table": t, "error": err.Error()})
 			continue
 		}
-		weekly, monthly := 0, 0
+		daily, monthly, legacyWeekly, old := 0, 0, 0, 0
 		for _, r := range pi.Ranges {
 			switch {
 			case r.IsMax:
+			case r.Name == partitionOldName:
+				old++
+			case strings.HasPrefix(r.Name, "pd"):
+				daily++
 			case strings.HasPrefix(r.Name, "pw"):
-				weekly++
+				// 老方案（按周）留下的分区：跑到 -repartition 之后就没了。
+				// 单独计数而不是并进「月分区」，否则运维会以为新方案没生效。
+				legacyWeekly++
 			default:
 				monthly++
 			}
@@ -460,8 +567,10 @@ func (d *DB) PartitionSummary() []map[string]any {
 			"table":       t,
 			"partitioned": pi.Partitioned,
 			"count":       len(pi.Names),
-			"weekly":      weekly,
+			"daily":       daily,
 			"monthly":     monthly,
+			"legacyWeeks": legacyWeekly,
+			"old":         old,
 			"names":       pi.Names,
 		})
 	}

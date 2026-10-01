@@ -419,14 +419,9 @@ func (d *DB) DropKlinePartitionsBefore(cutMs int64) (*PartitionDropResult, error
 		return res, nil // 没分区，交给 PurgeKlineBefore 分批删
 	}
 
-	for _, r := range pi.Ranges {
-		if r.IsMax || r.Name == partitionOldName {
-			continue // pmax 是兜底、p_old 是垃圾桶，都不能 DROP
-		}
-		if r.LessThan > 0 && r.LessThan <= cutMs {
-			res.Dropped = append(res.Dropped, r.Name)
-		}
-	}
+	// ★ 判据与 service 层 dry-run 预告**共用** DroppablePartitions ★
+	//   原来这里和预告各写了一遍，结果预告多报了一个 p_old（见该函数注释）。
+	res.Dropped = DroppablePartitions(toPartRanges(pi.Ranges), cutMs)
 	if len(res.Dropped) == 0 {
 		return res, nil
 	}
@@ -524,18 +519,33 @@ func (d *DB) KlineSpan() (rowsN, minTs, maxTs int64, err error) {
 	return
 }
 
-// StreamKlines 把 [fromMs, toMs) 区间内的 K 线**流式**逐行喂给 fn。
+// StreamKlines 把 [fromMs, toMs) 区间内、**指定周期**的 K 线流式逐行喂给 fn。
+//
+// bar 传空串 = 不过滤（一次遍历所有周期）。
+//
+// 为什么要带 bar 过滤：归档要**按周期分文件**（kline-<bar>-<ym>.partNN.csv.gz）。
+// 一次遍历把四个周期混在一个文件里虽然 CSV 合法（有 bar 列），
+// 但文件名就没法用周期命名，将来想单独拿 1m 也要先全量解压再筛。
+// 分区表上 `AND bar = ?` 不额外增加扫描代价：分区裁剪仍由 ts 条件决定，
+// bar 只在命中的分区内部过滤。
 //
 // 为什么不用 QueryKlines：那个接口会把整个结果集读进内存再返回。
-// 归档一个月是 134 万行（未来会是单次上千万行的窗口），
+// 归档一个月是几十万到上百万行（未来会是单次上千万行的窗口），
 // 一次性装进内存再序列化，在 2GB 内存的机器上会直接把进程顶死。
 //
 // 这个版本底层是 `sql.Rows` 游标，一次只在内存里放一行。
 // fn 返回非 nil 错误会立刻中止遍历并把错误透传出去。
-func (d *DB) StreamKlines(fromMs, toMs int64, fn func(Kline) error) error {
-	rows, err := d.sql.Query(
-		`SELECT inst_id, bar, ts, o, h, l, c, v FROM kline
-		 WHERE ts >= ? AND ts < ? ORDER BY inst_id, ts`, fromMs, toMs)
+func (d *DB) StreamKlines(fromMs, toMs int64, bar string, fn func(Kline) error) error {
+	q := `SELECT inst_id, bar, ts, o, h, l, c, v FROM kline
+		 WHERE ts >= ? AND ts < ?`
+	args := []any{fromMs, toMs}
+	if b := strings.TrimSpace(bar); b != "" {
+		q += ` AND bar = ?`
+		args = append(args, b)
+	}
+	q += ` ORDER BY inst_id, ts`
+
+	rows, err := d.sql.Query(q, args...)
 	if err != nil {
 		return err
 	}
@@ -552,13 +562,14 @@ func (d *DB) StreamKlines(fromMs, toMs int64, fn func(Kline) error) error {
 	return rows.Err()
 }
 
-// StreamMonth 便捷包装：流式遍历某个自然月（`2026-09`）的 K 线。
-func (d *DB) StreamMonth(ym string, fn func(Kline) error) error {
+// StreamMonth 便捷包装：流式遍历某个自然月（`2026-09`）指定周期的 K 线。
+// bar 传空串 = 不过滤。
+func (d *DB) StreamMonth(ym, bar string, fn func(Kline) error) error {
 	from, to, err := MonthRange(ym)
 	if err != nil {
 		return err
 	}
-	return d.StreamKlines(from, to, fn)
+	return d.StreamKlines(from, to, bar, fn)
 }
 
 // MonthRange 把 `2026-09` 解析成 [月初, 下月初) 的毫秒时间戳区间。

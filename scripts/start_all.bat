@@ -90,11 +90,11 @@ if errorlevel 1 (
     if exist "%ROOT%\bin\okxweb.exe" (
         if exist "%ROOT%\scripts\hidden_run.vbs" (
             rem window style 0 = 完全隐藏；wscript /B 让脚本自己也不出声
-            "%SYS%\wscript.exe" /B /Nologo "%ROOT%\scripts\hidden_run.vbs" "%ROOT%\bin\okxweb.exe" "-addr 127.0.0.1:8090 -days 365 -workers 6"
+            "%SYS%\wscript.exe" /B /Nologo "%ROOT%\scripts\hidden_run.vbs" "%ROOT%\bin\okxweb.exe" "-addr 127.0.0.1:8090 -days 0 -workers 6"
             echo       已启动（隐藏窗口，日志写在 logs\）。
         ) else (
             rem 最后的兜底：/B 不新建窗口，只是会跟着这个 cmd 一起退出
-            start "" /B "%ROOT%\bin\okxweb.exe" -addr 127.0.0.1:8090 -days 365 -workers 6
+            start "" /B "%ROOT%\bin\okxweb.exe" -addr 127.0.0.1:8090 -days 0 -workers 6
             echo       已启动（无独立窗口，日志写在 logs\）。
         )
     )

@@ -1,9 +1,13 @@
 package service
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"finally-main/internal/model"
 )
 
 // 归档侧「只留当月」的判据 —— 这一段在磁盘充足时永远不会在线上跑到，
@@ -25,6 +29,11 @@ func TestArchiveMonthOf(t *testing.T) {
 		{"kline-1H-2026-12.part01.csv.gz", "2026-12"},
 		{"manifest-2026-09.json", "2026-09"},
 
+		// ★ 四周期归档的分片名（bar 段里带数字，最容易解析错）★
+		{"kline-1m-2026-09.part01.csv.gz", "2026-09"},
+		{"kline-3m-2026-09.part02.csv.gz", "2026-09"},
+		{"kline-5m-2026-10.part01.csv.gz", "2026-10"},
+
 		// 不像归档产物的 —— 一律不动（宁可漏删，不能误删）
 		{"README.md", ""},
 		{"manifest-.json", ""},
@@ -45,26 +54,70 @@ func TestArchiveMonthOf(t *testing.T) {
 	}
 }
 
+// writeArchiveFile 在测试目录里落一个文件
+func writeArchiveFile(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestArchiveExists 覆盖「某月是否已有完整归档」的全部判据。
+//
+// ★ 这个函数从「只看文件在不在」升级成「逐周期核对」★
+// 一期只归档 15m，老清单里没有 1m/3m/5m。若仍只看文件存在，
+// 那三个周期永远不会被归档 —— 静默漏归档比重复导出危险得多。
 func TestArchiveExists(t *testing.T) {
 	dir := t.TempDir()
-	// 有 manifest 才算「完整归档」——它是最后写出的
-	if err := os.WriteFile(filepath.Join(dir, "manifest-2026-09.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// 只有分片没有 manifest = 上次导出中途挂了，不算存在（要重导）
-	if err := os.WriteFile(filepath.Join(dir, "kline-15m-2026-08.part01.csv.gz"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	bars := exportBars()
+	if len(bars) == 0 {
+		t.Fatal("exportBars() 不该为空")
 	}
 
-	if !ArchiveExists(dir, "2026-09") {
-		t.Error("2026-09 有 manifest，应判定为已归档")
-	}
-	if ArchiveExists(dir, "2026-08") {
-		t.Error("2026-08 只有分片没有 manifest，应判定为未完成")
-	}
+	// (a) 什么都没有
 	if ArchiveExists(dir, "2026-07") {
 		t.Error("2026-07 什么都没有，应为 false")
 	}
+
+	// (b) 只有分片、没有 manifest = 上次导出中途挂了 → 要重导
+	writeArchiveFile(t, dir, "kline-15m-2026-08.part01.csv.gz", "x")
+	if ArchiveExists(dir, "2026-08") {
+		t.Error("2026-08 只有分片没有 manifest，应判定为未完成")
+	}
+
+	// (c) 一期老清单（只有 bar 单值 "15m"）：缺 1m/3m/5m → 不算齐
+	writeArchiveFile(t, dir, "manifest-2026-09.json",
+		`{"month":"2026-09","bar":"15m","totalRows":100}`)
+	if ArchiveExists(dir, "2026-09") {
+		t.Error("老清单只覆盖 15m，缺 1m/3m/5m，应判定为未完成（要重导覆盖）")
+	}
+
+	// (d) 四周期齐全 → true（新格式：bars 数组）
+	full, _ := json.Marshal(map[string]any{
+		"month": "2026-09", "bar": strings.Join(bars, ","), "bars": bars, "totalRows": 100,
+	})
+	writeArchiveFile(t, dir, "manifest-2026-09.json", string(full))
+	if !ArchiveExists(dir, "2026-09") {
+		t.Errorf("四周期齐全（%v），应判定为已归档", bars)
+	}
+
+	// (e) 只有 bar 逗号串（没有 bars 数组）也要能认出齐全 —— 兼容中间版本
+	writeArchiveFile(t, dir, "manifest-2026-12.json",
+		`{"month":"2026-12","bar":"`+strings.Join(bars, ",")+`","totalRows":1}`)
+	if !ArchiveExists(dir, "2026-12") {
+		t.Error("bar 逗号串已覆盖全部周期，应判定为已归档")
+	}
+
+	// (f) 空 JSON / 畸形 JSON → 不能误判为已归档
+	writeArchiveFile(t, dir, "manifest-2026-10.json", "{}")
+	if ArchiveExists(dir, "2026-10") {
+		t.Error("空清单没有周期信息，应判定为未完成")
+	}
+	writeArchiveFile(t, dir, "manifest-2026-11.json", "这不是 JSON")
+	if ArchiveExists(dir, "2026-11") {
+		t.Error("畸形清单应判定为未完成")
+	}
+
 	// 参数非法时不能把畸形文件名当命中
 	if ArchiveExists(dir, "2026-9") || ArchiveExists(dir, "") {
 		t.Error("非法月份参数应返回 false")
@@ -149,6 +202,25 @@ func TestPruneArchivesBeforeMissingDir(t *testing.T) {
 	}
 	if n != 0 || b != 0 {
 		t.Errorf("空目录应返回 0/0，实际 %d/%d", n, b)
+	}
+}
+
+// TestExportBarsFollowsEnabledBars 归档周期必须跟 model.EnabledBars 走。
+//
+// 「归档覆盖哪些周期」不能有第二份名单：model.EnabledBars 是周期白名单的
+// 唯一权威（repo 的 K 线清理、service 的扫描/回补都读它）。
+// 一旦归档自己写死一个周期列表，就会出现「某周期在库里有数据、
+// 但永久不被归档」的静默漏洞 —— 而 K 线只有 10 天窗口，删了就没了。
+func TestExportBarsFollowsEnabledBars(t *testing.T) {
+	got := exportBars()
+	if len(got) != len(model.EnabledBars) {
+		t.Fatalf("exportBars() = %v，期望与 model.EnabledBars(%v) 等长",
+			got, model.EnabledBars)
+	}
+	for i, b := range model.EnabledBars {
+		if got[i] != b {
+			t.Errorf("第 %d 个周期 = %q，期望 %q", i, got[i], b)
+		}
 	}
 }
 

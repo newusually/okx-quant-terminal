@@ -18,8 +18,21 @@ import "encoding/json"
 
 // EnabledBars 当前业务在用的 K 线周期。
 //
-// ★ 2026-10-01：全库只保留 15m ★
-// 用户口径：「把 4H / 1H / 5m 全部删除，只保留 15 分钟的信号和买卖点」。
+// ★ 2026-10-01 二期：1m / 3m / 5m 重新上线，与 15m 一起共 4 个周期 ★
+// 用户口径：「1 分钟 3 分钟 5 分钟 15 分钟 选项卡重新生成并且补充数据」。
+//
+// 一期曾经「全库只留 15m」（原因：1m+3m 占 kline 表 69% 的行，磁盘扛不住）。
+// 二期把数据保留窗口从 365 天砍到 **10 天**（kline_retain_days = 10，每天凌晨清一次），
+// 所以行数反而比一期更少：
+//
+//	1m  479 合约 × 1440 根/天 × 10 天 ≈ 430 万行（最大的一块）
+//	3m                               ≈ 230 万行
+//	5m                               ≈ 140 万行
+//	15m                              ≈  46 万行
+//	合计 ≈ 700 万行 —— 低于一期「15m 留一年」的 1041 万行。
+//
+// 注意：四个周期**都**参与「扫描 + 开仓」（bars_enabled），
+// 不只是展示 —— 用户明确要求「四个周期都参与开仓」。
 //
 // 为什么放在 model 层：repo（回补、清理）和 service（行情、信号、前端下拉）
 // 都要用这份名单，而依赖方向是 handler → service → repo ——
@@ -29,7 +42,7 @@ import "encoding/json"
 //   1. service.SupportedBars        （前端下拉 / /api/kline 白名单）
 //   2. repo.CleanupKlines           （会把不在名单里的周期整段删掉）
 //   3. backfill 的 pick             （只回补名单里的周期）
-var EnabledBars = []string{"15m"}
+var EnabledBars = []string{"1m", "3m", "5m", "15m"}
 
 // BarEnabled 该周期是否在当前白名单里（大小写、空白都不敏感）
 func BarEnabled(bar string) bool {

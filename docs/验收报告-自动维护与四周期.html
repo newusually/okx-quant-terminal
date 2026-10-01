@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>验收报告 · 二期（四周期 + 10 天保留 + 每日自动清理）2026-10-01</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --sub:#5b6673; --line:#e3e6ea;
+    --ok:#0a7d4c; --warn:#a8620a; --bad:#b3261e; --accent:#0b62c4;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 24px 72px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+  .lead{color:var(--sub);margin:0 0 28px;font-size:14px}
+  h2{font-size:18px;margin:38px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;font-weight:600;color:var(--sub);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code,pre{font-family:var(--mono);font-size:12.5px}
+  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+  pre{background:#1c2128;color:#d6dde6;padding:14px 16px;border-radius:8px;overflow-x:auto;line-height:1.55}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:21px;letter-spacing:-.3px;margin-bottom:2px}
+  .kpi span{font-size:12px;color:var(--sub)}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:99px;
+        border:1px solid currentColor;vertical-align:1px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  blockquote{margin:12px 0;padding:10px 16px;background:#fff;border-left:3px solid var(--accent);
+             border-radius:0 8px 8px 0;color:#333;font-size:14px}
+  .foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>验收报告 · 二期：四周期 / 10 天保留 / 每日自动清理</h1>
+  <p class="lead">
+    OKX 全合约量化终端 · <code>C:\Users\Administrator\Documents\finally</code> ·
+    2026-10-01 19:51–23:15 · 运行时 <code>bin\okxweb.exe</code> = 9,013,760 字节（<code>-trimpath -ldflags "-s -w"</code>）
+  </p>
+
+  <div class="grid">
+    <div class="kpi"><b class="ok">9 / 9</b><span>二期口径全部落地</span></div>
+    <div class="kpi"><b class="ok">21.3 s</b><span>每日清理实测（释放 996 万行）</span></div>
+    <div class="kpi"><b class="ok">4 / 4</b><span>单测包全绿（conf/handler/repo/service）</span></div>
+    <div class="kpi"><b class="ok">15m 10.00 天</b><span>保留红线精确命中</span></div>
+  </div>
+
+  <blockquote>
+    本报告取代一期《月度/年度自动维护》验收报告。一期口径（<code>kline_retain_days=365</code>、只留 15m、
+    30 分钟 tick、年度才删 K 线、按周分区）<b>已全部作废</b>，勿再引用。
+  </blockquote>
+
+  <h2>一、二期要求 → 落地位置</h2>
+  <table>
+    <thead><tr><th>#</th><th>要求</th><th>落点</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>买入金额 <b>0.01 美金</b></td>
+          <td><code>margin_policy="min_one"</code>：实付 = max(0.01, 合约最小一手)，硬顶 <code>max_margin_usdt=1.0</code></td>
+          <td class="ok">✔ 实测 170 个可交易合约最小一手 0.01~0.73U</td></tr>
+      <tr><td>2</td><td>symbolList 要求 <b>&lt; 1U</b></td>
+          <td><code>max_order_margin_usdt = 1.0</code></td>
+          <td class="ok">✔ 1U 上限不损失任何合约</td></tr>
+      <tr><td>3</td><td>加仓 / 买入 <b>不限</b> 次数</td>
+          <td><code>addon.max_times=0</code>、<code>max_concurrent_positions=0</code>、<code>daily_max_entries=0</code>（<b>0 = 不限</b>）</td>
+          <td class="ok">✔ 三处同改：JSON + 归一化 + 判定</td></tr>
+      <tr><td>4</td><td>1m / 3m / 5m / 15m <b>选项卡重新生成 + 补数据</b></td>
+          <td><code>model.EnabledBars</code> 四周期；<code>engineRunBars</code> 公共段只做一次</td>
+          <td class="ok">✔ 四周期扫描日志齐全</td></tr>
+      <tr><td>5</td><td>只保存 <b>最近 10 天</b>，多出来就删</td>
+          <td><code>kline_retain_days = 10</code>（旧键 <code>keep_kline_days</code> 默认值改 0，防止劫持）</td>
+          <td class="ok">✔ 15m 起点 2026-09-21 23:00 = 整 10 天</td></tr>
+      <tr><td>6</td><td><b>每天凌晨自动删一次</b></td>
+          <td><code>RunDailyMaintenance</code> + meta 表 <code>maint_last_daily</code></td>
+          <td class="ok">✔ 22:34:00 首跑成功</td></tr>
+      <tr><td>7</td><td>买入要求 <b>8 个共振指标</b></td>
+          <td><code>score_threshold = 8</code>（满分 8/8）</td>
+          <td class="warn">✔ 已生效 · 见下方风险提示</td></tr>
+      <tr><td>8</td><td>加仓条件与买入 <b>一致</b></td>
+          <td>同一个 <code>LatestSignal</code> + 同 8 因子；<code>addon.rise_bar="auto"</code> 按仓位自身周期判</td>
+          <td class="ok">✔</td></tr>
+      <tr><td>9</td><td>仓位 = <b>本金的 1/3</b></td>
+          <td>加仓保证金 = 原持仓保证金 × 1/3</td>
+          <td class="ok">✔</td></tr>
+    </tbody>
+  </table>
+
+  <h3>⚠ 阈值 8 的现实风险（已写进 JSON 注释与文档，不是 bug）</h3>
+  <div class="card">
+    近 30 天 2329 条信号实测分布：<code>score 6 → 2168</code>、<code>score 7 → 161</code>、
+    <b><code>score 8 → 0</code></b>。
+    <br>也就是说「8 因子同时命中」在现有数据里<b>一次都没出现过</b>，策略会长期 0 单。
+    这是用户明确要求的口径，已原样落地并标注；要恢复开单需下调 <code>score_threshold</code>。
+  </div>
+
+  <h2>二、四条保留红线</h2>
+  <p>不同类型的行增长速度差 3 个数量级，塞进同一个窗口一定出事。</p>
+  <table>
+    <thead><tr><th>类别</th><th>代表对象</th><th>增速</th><th>保留窗口</th><th>谁清</th><th>频率</th></tr></thead>
+    <tbody>
+      <tr><td><b>K 线</b></td><td><code>kline</code>（1m/3m/5m/15m）</td>
+          <td>4 周期 × 480 合约，一年 ≈ <b>1 亿行</b></td>
+          <td><code>kline_retain_days = 10</code></td><td><code>RunDailyMaintenance</code></td><td class="ok"><b>每日</b></td></tr>
+      <tr><td><b>记录表</b></td>
+          <td><code>trade</code> <code>trade_event</code> <code>signals</code> <code>equity</code> <code>runlog</code> <code>ai_call</code></td>
+          <td><code>equity</code> 每 3 秒 1 条 → 一年 1000 万行</td>
+          <td><code>retain_days = 30</code></td><td><code>RunRetentionCleanup</code></td><td>月度</td></tr>
+      <tr><td><b>日志</b></td><td>DB / 客户端 / 网页</td><td>—</td>
+          <td><code>log_retain_days = 30</code></td><td><code>purgeAllLogs</code></td><td>月度</td></tr>
+      <tr><td><b>归档</b></td><td><code>archive\kline-YYYY-MM-*.gz</code></td><td>—</td>
+          <td>永久（补齐式，缺哪补哪）</td><td><code>ArchiveMonth</code></td><td>月度</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、每日清理 · 首跑实测</h2>
+  <p>服务启动后 90 秒首延迟 + 10 分钟 tick，比对 meta 表 <code>maint_last_daily</code>，<b>不同才跑</b> —— 停机重启多次也只清一次。</p>
+  <pre>2026-10-01 22:33:39 [INFO] [MAINT] 今天（2026-10-01）还没清过 K 线，开始执行…
+2026-10-01 22:34:00 [INFO] [MAINT] 每日 K 线清理：红线 10 天（早于 2026-09-21 22:33 的都删）；
+                                   整段 DROP 23 个日分区 [p202510 … p202609, pd20260910 … pd20260920]，
+                                   约 9959984 行；C 盘可用 19.56GB → 20.63GB（耗时 21319 ms）
+2026-10-01 22:34:01 [INFO] [MAINT] 每日 K 线清理完成
+2026-10-01 22:48:37 [INFO] [MAINT] 每日 K 线清理：边界残余删除 471 行；C盘 20.43GB → 20.43GB（耗时 225 ms）</pre>
+  <div class="grid">
+    <div class="kpi"><b class="ok">996 万行</b><span>一次 DROP 掉</span></div>
+    <div class="kpi"><b class="ok">+1.07 GB</b><span>C 盘可用（19.56 → 20.63）</span></div>
+    <div class="kpi"><b class="ok">21.3 s</b><span>耗时（DROP PARTITION）</span></div>
+    <div class="kpi"><b class="ok">471 行</b><span>二次运行只清边界残余</span></div>
+  </div>
+  <p><b>为什么这么快：</b>K 线删除走 <code>DROP PARTITION</code> 而不是 <code>DELETE</code>。
+    只有分区<b>上界 ≤ cutoff</b> 才整段扔掉；<code>p_old</code> / <code>pmax</code> 兜底分区永不 DROP；
+    边界残余交 <code>PurgeKlineBefore</code>（<code>DELETE … LIMIT 5000</code>，批间 20ms）。</p>
+
+  <h2>四、分区重构：周 → 天</h2>
+  <table>
+    <thead><tr><th>项</th><th>一期</th><th>二期</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>分区粒度</td><td>按周</td><td class="ok"><b>按天</b></td>
+          <td><code>kline</code> 没有以 <code>ts</code> 为前导的索引（主键 <code>(inst_id,bar,ts)</code>），
+              <code>WHERE ts &lt; ?</code> 只能全分区扫。周分区边界有 <b>7 天 / 约 90MB</b>，改成天分区只剩 <b>1 天</b></td></tr>
+      <tr><td>边界锚点</td><td>—</td><td class="ok">对齐本地零点</td>
+          <td>锚在带时分秒的时刻会让边界逐日漂移</td></tr>
+    </tbody>
+  </table>
+  <pre>重分区实测（<code>okxweb -repartition</code>）：310.6 s
+结果：38 个分区（日 24 / 月 12 / 兜底 1），原先压在 p_old 里的 945 万行 → 0.0 MB
+副产品：归档单月从「>5 分钟跑不完」降到 4 分 58 秒内（EXPLAIN 从命中 p_old / rows=9450737 变为命中当月分区）</pre>
+
+  <h2>五、四周期回补现状（23:15 实测）</h2>
+  <table>
+    <thead><tr><th>周期</th><th>行数</th><th>覆盖</th><th>每合约根数（avg / max）</th><th>≥400 根（转本地）</th><th>扫描读源</th></tr></thead>
+    <tbody>
+      <tr><td><b>15m</b></td><td>457,369</td><td class="ok">10.00 天</td><td>954 / 961</td><td class="ok">477 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
+      <tr><td><b>1m</b></td><td>193,892+</td><td>回补中</td><td>686 / 14,407</td><td class="warn">19 / 480</td><td class="warn">本地 19 / 网络 61</td></tr>
+      <tr><td><b>3m</b></td><td>147,875</td><td>回补中（15.6 h）</td><td>312 / 313</td><td class="bad">0 / 480</td><td class="bad">本地 0 / 网络 80</td></tr>
+      <tr><td><b>5m</b></td><td>145,701</td><td>回补中（25.6 h）</td><td>307 / 308</td><td class="bad">0 / 480</td><td class="bad">本地 0 / 网络 80</td></tr>
+    </tbody>
+  </table>
+  <div class="card">
+    <h3 style="margin-top:0">为什么 3m/5m 还走网络</h3>
+    <p>扫描读本地有<b>两个</b>前提：<b>够新</b>（本地最新一根 ≥ 刚收盘那根）与 <b>够长</b>
+       （<code>len(rows) ≥ minCandles = 400</code>）。网络路径是「300 根 + 翻 1 页 100 根 = 400 根」，
+       本地必须取同样长度，否则递归指标（ATR/RSI/EMA/TD9）因<b>窗口起始位置不同</b>算出不同信号。</p>
+    <p>3m 需要 400 × 3 min = <b>20 小时</b>、5m 需要 400 × 5 min = <b>33.3 小时</b>。
+       现在 3m 到 15.6 h（313 根）、5m 到 25.6 h（308 根）—— <b>是长度不够，不是新鲜度不够</b>，
+       会随回补推进自动达标。</p>
+    <p>接口旁证：<code>/api/kline?inst=ETH-USDT-SWAP</code> → 1m 1000 根（截断到一屏上限）、
+       3m 313 根、5m 307 根、15m 961 根；BTC 的 1m coverage <code>days = 10.004</code>。</p>
+  </div>
+
+  <h2>六、性能回归与修复：四周期把 OKX 闸门打满</h2>
+  <p>这是二期引入的真问题，已定位并修掉。</p>
+  <h3>现象</h3>
+  <pre>23:01  [PERF] 耗时 eng.scan=101701ms live.exitPass=36150ms live.exitWait=35424ms
+23:02  [PERF] 耗时 feed.refreshLatest=141767ms eng.scan=51568ms
+       [1m,3m,5m,15m] … 用时 3m48.378s</pre>
+  <h3>根因（可算，不用猜）</h3>
+  <ol>
+    <li>OKX 行情类限频 <b>20 次 / 2 秒 = 10 次/秒</b>，且 <b>全进程共用一把闸门</b>
+        （<code>internal/ratelimit</code>：扫描 / 回补 / 续 K 线 / 出场共用）。</li>
+    <li>「续最新一根」按 <b>库里有数据的 (合约,周期)</b> 逐个续 = 可交易合约 169 × 4 周期 = <b>676 条</b>
+        → 单轮最少 <b>67.6 秒 &gt; 1 分钟</b>。</li>
+    <li>而 1m 读本地的判据是「本地含刚收盘那根」——刷新周期超过 1 分钟，
+        <b>1m 永远不可能新鲜</b> → 每轮都回退网络（80 次）→ 和续 K 线抢同一把闸门
+        → 续 K 线更慢 → 本地更不新鲜 …… <b>死循环</b>。</li>
+    <li>连锁后果：<code>live.exitWait</code>（出场巡检等引擎锁）被顶到 <b>35 秒</b> ——
+        出场巡检被饿死，这是会亏钱的那一类。</li>
+  </ol>
+  <h3>修法</h3>
+  <div class="card">
+    <p>把「续最新一根」的范围<b>截到扫描真正会用的那批</b>
+       （<code>top_n_by_volume</code>，默认 80）：80 × 4 = 320 条 ≈ <b>32 秒 &lt; 60 秒</b>，
+       1m 本地开始真正转热，扫描回落本地，省下的闸门还给回补 —— 打破死循环。</p>
+    <p>落点：<code>service.BackfillConfig.RefreshTopNFn</code>（回调，跟随热插拔的策略 JSON）+
+        <code>pickRefreshInsts()</code> / <code>refreshScope()</code>（<b>纯函数 + 7 组单测</b>）。</p>
+    <p><b>口径同源：</b>刷新范围与扫描候选都取 <code>inst</code> 表里
+       <code>tradeable=1</code> 按 24h 成交额降序的前 N 个 —— 两处各写一份口径必然对不上，
+       这是本项目反复踩过的坑。唯一差异是扫描用实时 ticker 成交额、刷新用库里的
+       <code>quote_vol24h</code>（每 60 秒同步），边界互换只影响 1 个请求，可接受。</p>
+    <p><b>查库失败时不截断</b>（返回 nil = 不限）：宁可多打几次 OKX，也不能让全站 K 线图一起停更。</p>
+  </div>
+  <h3>修复后实测</h3>
+  <table>
+    <thead><tr><th>指标</th><th>修复前</th><th>修复后</th><th>变化</th></tr></thead>
+    <tbody>
+      <tr><td><code>feed.refreshLatest</code></td><td>141,767 ms</td><td class="ok">9,058 / 12,551 / 18,334 ms</td><td class="ok">7.7 ~ 15×</td></tr>
+      <tr><td><code>live.exitPass</code></td><td>36,150 ms</td><td class="ok">3,951 ms</td><td class="ok">9.1×</td></tr>
+      <tr><td><code>live.exitWait</code>（等锁）</td><td>35,424 / 49,262 ms</td><td class="ok">13,977 ms</td><td class="ok">2.5 ~ 3.5×</td></tr>
+      <tr><td>整轮用时</td><td>3 m 48.4 s</td><td class="warn">2 m 34.2 s</td><td class="warn">1.5×（待 3m/5m 转本地）</td></tr>
+      <tr><td>1m 读本地合约数</td><td>3 ~ 10</td><td class="ok">19</td><td class="ok">上升中</td></tr>
+      <tr><td>CPU 均值</td><td>14 ~ 23%</td><td class="ok">4 ~ 7%</td><td class="ok">3×</td></tr>
+    </tbody>
+  </table>
+  <blockquote>
+    <b>整轮仍然慢的剩余原因</b>：3m/5m 各 80 次网络回退（160 次 ÷ 10 次/秒 = 16 秒起），
+    叠加回补抢闸门。等 3m/5m 每合约过 400 根、扫描全部落本地，
+    预期回到一期的 <b>526~837 ms</b> 量级。<b>这不是靠加并发能解决的 —— 闸门是地板。</b>
+  </blockquote>
+
+  <h2>七、幽灵仓对账（附带修复）</h2>
+  <p>本地在持、OKX 已无的「幽灵仓」会让引擎每 3 秒重试平仓一次，白吃 20 次/2 秒 的共享闸门。</p>
+  <pre>2026-10-01 22:39:47 [ERROR] XLM-USDT-SWAP 平仓失败，下一轮重试：OKX code=1 msg=All operations failed
+2026-10-01 22:40:10 [WARN] 对账平仓 XLM-USDT-SWAP：连续 3 轮不在 OKX 持仓列表，本地记为已平（张数=1.9 开仓价=0.222295 保证金=2.3704U）
+2026-10-01 22:40:10 [WARN] 对账平仓 PROS-USDT-SWAP：连续 3 轮不在 OKX 持仓列表，本地记为已平（张数=14 开仓价=0.696500 保证金=1.0000U）
+2026-10-01 22:40:10 [WARN] 对账平仓 LTC-USDT-SWAP：连续 3 轮不在 OKX 持仓列表，本地记为已平（张数=0.3 开仓价=66.763333 保证金=1.3343U）</pre>
+  <ul>
+    <li>判据：连续 <b>3 轮</b>缺席才判幽灵（<code>ghostDecision</code>），只写本地库，<b>不碰 OKX</b>。</li>
+    <li>持仓判定用「<code>pos != 0</code> 即算有仓」—— <b>极保守</b>，宁可漏判也不误杀（误杀不可逆）。</li>
+    <li>修复后「平仓失败」<b>0 条</b>；<code>live.exitPass</code> 24,355 ms → <b>2,432 ms</b>。</li>
+  </ul>
+
+  <h2>八、归档：12 个月全部成功</h2>
+  <table>
+    <thead><tr><th>项</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>月份数</td><td class="ok">12 / 12（2025-10 ~ 2026-09），总耗时 6 m 45 s</td></tr>
+      <tr><td>单月规模</td><td>2025-10 → 585,491 行 / 8.5 MB；2026-09 → 1,336,768 行 / 17.4 MB</td></tr>
+      <tr><td>四周期覆盖</td><td class="ok">12 个 manifest 全部带 <code>bars: ["1m","3m","5m","15m"]</code></td></tr>
+      <tr><td>确定性</td><td class="ok">2026-09 用新逻辑重导，sha256 <code>e9952ff5e7a5…</code> 与旧文件<b>完全一致</b></td></tr>
+    </tbody>
+  </table>
+  <p><b>三个必须记住的实现细节：</b></p>
+  <ul>
+    <li>归档是<b>补齐式</b>：按 <code>repo.KlineMonths()</code> 逐个查 manifest，缺哪补哪（幂等）。
+        不能只导「上个月」—— 磁盘守卫会收缩 K 线，没归档的月份一删就是永久损失。</li>
+    <li>判据<b>不能只看文件在不在</b>：一期只归档 15m，老 manifest 里没有 1m/3m/5m，
+        只看文件存在会让那三个周期<b>永久不被归档</b>。<code>ArchiveExists</code> 读 manifest 逐周期核对。</li>
+    <li>必须用 <code>LongDDL=true</code> 连接：<code>ORDER BY inst_id, ts</code> 无可用索引 → filesort，
+        单月 85 万行要 5 分钟，超 DSN <code>readTimeout=60s</code> → 报 <code>i/o timeout</code>（极难定位）。</li>
+  </ul>
+
+  <h2>九、交付物与验证</h2>
+  <table>
+    <thead><tr><th>项</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>运行时可执行</td><td><code>bin\okxweb.exe</code> = 9,013,760 字节；备份 <code>bin\okxweb.exe.bak-20261001-{1951,2231,2239,2244,2250,2258,2309}</code></td></tr>
+      <tr><td>服务状态</td><td class="ok">OKXMySQL / OKXWeb / OKXApache 全部 Running</td></tr>
+      <tr><td>端口</td><td class="ok">80（Apache 反代）/ 8090（回环）/ 8091（pprof，只回环）/ 3306</td></tr>
+      <tr><td>单测</td><td class="ok">conf / handler / repo / service / cmd 全绿；新增 <code>refresh_scope_test.go</code>（7 组）+ <code>reconcile_test.go</code> + <code>maintenance_text_test.go</code> + <code>drop_predicate_test.go</code> + <code>universe_policy_test.go</code></td></tr>
+      <tr><td><code>/api/state</code> 口径</td><td class="ok"><code>bars=["1m","3m","5m","15m"]</code> · <code>klineRetainDays=10</code> · <code>backfillDays=10</code> · <code>maxOrderMarginUsdt=1</code> · <code>marginText="0.01U/笔 · 20x"</code> · <code>score_threshold=8</code> · <code>take_profit_pct=1</code></td></tr>
+      <tr><td>磁盘</td><td><code>mysql/data</code> 4.1 GB → 676 MB；<code>okx</code> 库 521 MB → 131.6 MB；C 盘可用 20.26 GB</td></tr>
+    </tbody>
+  </table>
+
+  <h3>待办（不阻塞交付）</h3>
+  <ul>
+    <li>1m / 3m / 5m 回补至 10 天窗口 —— 3m 需每合约 ≥400 根（20 h）、5m 需 ≥400 根（33.3 h），过线后自动转本地读取。</li>
+    <li>数据仓月归档推送（<code>scripts\push_github.bat data</code>）。</li>
+  </ul>
+
+  <div class="foot">
+    验收时间 2026-10-01 23:15（UTC+8）· 证据来源：<code>logs/okxbot.log</code>、
+    <code>/api/state</code>、<code>/api/kline</code>、MySQL <code>kline</code>/<code>trade</code>/<code>backfill_job</code> 直查、
+    <code>go test ./internal/... ./cmd/...</code> 输出。<br>
+    本文档为二期唯一验收口径，与 <code>docs/架构说明.md</code>、<code>docs/策略说明.md</code>、<code>docs/项目详情.md</code> 同步。
+  </div>
+
+</div>
+</body>
+</html>

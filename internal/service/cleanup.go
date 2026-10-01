@@ -54,17 +54,24 @@ import (
 )
 
 const (
-	// maintTickInterval 巡检间隔。30 分钟足够「月度/年度」这种粗粒度，
-	// 又不至于让服务空转 —— 每次 tick 只是读两行 meta 做字符串比较。
-	maintTickInterval = 30 * time.Minute
+	// maintTickInterval 巡检间隔。
+	//
+	// ★ 2026-10-01 二期：30 分钟 → **10 分钟** ★
+	// 因为多了一条「每天凌晨清 K 线」的任务，30 分钟 tick 意味着实际执行时间
+	// 落在 00:00~00:30 之间，运气不好就是 00:29 才删 —— 用户口径是「凌晨」。
+	// 10 分钟 tick 把它收进 00:00~00:10。每次 tick 只是读三行 meta 做字符串比较
+	// （走的是常驻连接池，不开新连接），代价可以忽略。
+	maintTickInterval = 10 * time.Minute
 
 	// maintFirstDelay 启动后延迟。回补 / 信号回算 / 成交同步都在前 60 秒内起跑，
 	// 维护任务会跑批量 DELETE 和 ALTER TABLE，错开一下避免抢 IO。
 	maintFirstDelay = 90 * time.Second
 
-	// metaLastMonthly / metaLastYearly meta 表里的「上次跑过哪个月/哪一年」
+	// metaLastMonthly / metaLastYearly / metaLastDaily
+	// meta 表里的「上次跑过哪个月 / 哪一年 / 哪一天」
 	metaLastMonthly = "maint_last_monthly"
 	metaLastYearly  = "maint_last_yearly"
+	metaLastDaily   = "maint_last_daily"
 )
 
 // ---------------------------------------------------------------------------
@@ -107,9 +114,34 @@ func RunDueMaintenance() error {
 	now := time.Now()
 	monthTag := now.Format("2006-01")
 	yearTag := now.Format("2006")
+	dayTag := now.Format("2006-01-02")
 
+	lastDay, _, _ := db.GetMeta(metaLastDaily)
 	lastMonth, _, _ := db.GetMeta(metaLastMonthly)
 	lastYear, _, _ := db.GetMeta(metaLastYearly)
+
+	// ---- 每日：K 线超期删除（2026-10-01 二期新增）----
+	//
+	// 用户口径：「只能查询保存最近 10 天数据，不能多，多出来就删除」
+	//          +「自动每天凌晨删除数据一次」。
+	//
+	// 调度口径与月度/年度完全一致：记「上次跑的是哪一天」，不同就补跑。
+	// 所以凌晨关机、服务没起、重启二十次，都只会老老实实跑一次，不重不漏；
+	// 而如果凌晨那会儿服务恰好不在，当天第一次巡检（比如下午三点）会补跑
+	// —— 宁可晚几小时，也不要因为「错过的正是凌晨」而永远不删。
+	if lastDay != dayTag {
+		logx.Logf("INFO", "[MAINT] 今天（%s）还没清过 K 线，开始执行…", dayTag)
+		rep, err := RunDailyMaintenance(false)
+		if err != nil {
+			// 每日任务失败不能拖累月度/年度 —— 那两条的窗口长得多，更该跑。
+			logx.Logf("WARN", "[MAINT] 每日 K 线清理失败：%v（下个 tick 重试）", err)
+		} else {
+			if err := db.SetMeta(metaLastDaily, dayTag); err != nil {
+				logx.Logf("WARN", "[MAINT] 写回 %s 失败：%v（下个 tick 会重跑一次）", metaLastDaily, err)
+			}
+			logx.Logf("INFO", "[MAINT] 每日 K 线清理完成：%s", rep.Summary)
+		}
+	}
 
 	if lastMonth != monthTag {
 		logx.Logf("INFO", "[MAINT] 本月（%s）还没跑过维护任务，开始执行…", monthTag)
@@ -178,6 +210,7 @@ type MaintenanceReport struct {
 	KlineDropped []string `json:"klineDropped,omitempty"`
 	KlineRows    int64    `json:"klineRows"`
 	KlineMonths  int      `json:"klineMonths"`
+	KlineMB      float64  `json:"klineMb,omitempty"`
 
 	Recycle *RecycleResult `json:"recycle,omitempty"`
 
@@ -356,6 +389,123 @@ func RunMonthlyMaintenance(dryRun bool) (*MaintenanceReport, error) {
 		logx.Logf("INFO", "[MAINT] %s（耗时 %d ms）", rep.Summary, rep.Ms)
 	}
 	return rep, nil
+}
+
+// ---------------------------------------------------------------------------
+// 每日任务
+// ---------------------------------------------------------------------------
+
+// RunDailyMaintenance 每天跑一次：把超过 kline_retain_days（当前 10 天）的 K 线删掉。
+//
+// 用户口径（2026-10-01 二期）：
+//
+//	「只能查询保存最近 10 天数据，不能多，多出来就删除」
+//	「自动每天凌晨删除数据一次」
+//
+// 只做 K 线一件事，别的都不碰：
+//
+//	· 记录表（历史仓位 / 成交 / 信号 / 权益 / 日志表）仍是独立的 30 天红线，
+//	  跟月度任务走 —— 那是「查询历史交易记录」用的，10 天太短。
+//	· 日志文件、回收站、GitHub 归档同理，都在月度任务里。
+//
+// 执行方式（这是它能在凌晨几秒内跑完的关键）：
+//
+//	① DROP PARTITION —— 整段过期的**日分区**直接扔掉，毫秒级。
+//	                    分区方案已按天切（见 repo/partition.go），
+//	                    所以「早于 cutoff 的那些天」全都能整段删。
+//	② PurgeKlineBefore —— 只有跨在 cutoff 上的那一小段残余（通常几分钟的量）
+//	                    需要逐行 DELETE，每批 5000 行、批间 20ms。
+//
+// 幂等：随时可以重复跑，删过一次之后第二次就是 0 行。
+func RunDailyMaintenance(dryRun bool) (*MaintenanceReport, error) {
+	start := time.Now()
+	rep := &MaintenanceReport{
+		Kind:      "daily",
+		DryRun:    dryRun,
+		StartedAt: start.Format("2006-01-02 15:04:05"),
+	}
+	rep.FreeGBBefore = freeGB()
+
+	days := repo.KlineRetainDays()
+	if days <= 0 {
+		days = 10
+	}
+	cut := time.Now().AddDate(0, 0, -days).UnixMilli()
+
+	if dryRun {
+		// 只报「会删掉哪些分区」，一行都不删。
+		//
+		// ★ 判据必须走 repo.DroppablePartitions ★
+		// 它和真跑的 DropKlinePartitionsBefore 是**同一个函数**，
+		// 预演说删什么、真跑就删什么。原来这里自己写了一遍判断，
+		// 漏了 p_old/pmax 的排除，预报出「将 DROP [p_old]」—— 预演在说谎。
+		if pi, err := partitionRanges(); err == nil {
+			rep.KlineDropped = repo.DroppablePartitions(pi, cut)
+		}
+		rep.KlineMonths = len(rep.KlineDropped)
+		rep.Ms = time.Since(start).Milliseconds()
+		rep.Summary = dailySummary(rep, days, cut)
+		return rep, nil
+	}
+
+	dr, err := dropKlineBefore(cut)
+	if err != nil {
+		rep.Err = "K 线每日清理失败：" + err.Error()
+	}
+	if dr != nil {
+		rep.KlineDropped = dr.Dropped
+		rep.KlineRows = dr.Rows
+		rep.KlineMB = dr.MB
+	}
+	rep.KlineMonths = len(rep.KlineDropped)
+
+	rep.FreeGBAfter = freeGB()
+	rep.Ms = time.Since(start).Milliseconds()
+	rep.Summary = dailySummary(rep, days, cut)
+	if !dryRun {
+		logx.Logf("INFO", "[MAINT] %s（耗时 %d ms）", rep.Summary, rep.Ms)
+	}
+	return rep, nil
+}
+
+// partitionRanges 取 kline 现有分区区间（daily 的 dry-run 预告用）。
+// 拿不到就返回 nil —— 预告失败不该让整个任务报错。
+func partitionRanges() ([]repo.PartRange, error) {
+	store := repo.NewStore(conf.LoadConfig())
+	db, err := store.DB()
+	if err != nil {
+		return nil, err
+	}
+	return db.KlinePartitionRanges()
+}
+
+// dailySummary 把一次每日清理压成一行人话
+func dailySummary(rep *MaintenanceReport, days int, cutMs int64) string {
+	cutTxt := time.UnixMilli(cutMs).Format("2006-01-02 15:04")
+	parts := fmt.Sprintf("每日 K 线清理：红线 %d 天（早于 %s 的都删）", days, cutTxt)
+	if len(rep.KlineDropped) > 0 {
+		// 预演时不报行数 —— 预演只查分区区间、不扫行，报「约 0 行」是假的。
+		seg := fmt.Sprintf("；将整段 DROP %d 个日分区 [%s]",
+			len(rep.KlineDropped), strings.Join(rep.KlineDropped, ", "))
+		if rep.DryRun {
+			parts += seg
+		} else {
+			parts += seg + fmt.Sprintf("，约 %d 行", rep.KlineRows)
+		}
+	} else if rep.KlineRows > 0 {
+		parts += fmt.Sprintf("；边界残余删除 %d 行", rep.KlineRows)
+	} else {
+		parts += "；没有超期数据"
+	}
+	if rep.FreeGBAfter > 0 {
+		parts += fmt.Sprintf("；C 盘可用 %.2fGB → %.2fGB", rep.FreeGBBefore, rep.FreeGBAfter)
+	} else {
+		parts += fmt.Sprintf("；C 盘可用 %.2fGB", rep.FreeGBBefore)
+	}
+	if rep.Err != "" {
+		parts += "；⚠ " + rep.Err
+	}
+	return parts
 }
 
 // ---------------------------------------------------------------------------
@@ -881,8 +1031,11 @@ func MaintenanceText(rep *MaintenanceReport) string {
 	}
 	var b strings.Builder
 	title := "月度维护"
-	if rep.Kind == "yearly" {
+	switch rep.Kind {
+	case "yearly":
 		title = "年度清理"
+	case "daily":
+		title = "每日 K 线清理"
 	}
 	fmt.Fprintf(&b, "== 自动维护程序 · %s ==\n", title)
 	if rep.DryRun {
@@ -952,13 +1105,31 @@ func MaintenanceText(rep *MaintenanceReport) string {
 		fmt.Fprintf(&b, "%-14s %-12s %10d %10d\n", "合计", "", totBefore, totDel)
 	}
 
-	if len(rep.LogFiles) > 0 {
-		fmt.Fprintf(&b, "\n【日志清理】共 %d 个文件 / %.1f MB\n", len(rep.LogFiles), float64(rep.LogBytes)/1048576)
-		for _, f := range rep.LogFiles {
-			fmt.Fprintf(&b, "  · %s\n", f)
+	// 日志清理是月度/年度任务的一步，不属于每日 K 线清理 ——
+	// 每日清理时打这行只会让人以为「每日任务也在管日志」。
+	if rep.Kind != "daily" {
+		if len(rep.LogFiles) > 0 {
+			fmt.Fprintf(&b, "\n【日志清理】共 %d 个文件 / %.1f MB\n", len(rep.LogFiles), float64(rep.LogBytes)/1048576)
+			for _, f := range rep.LogFiles {
+				fmt.Fprintf(&b, "  · %s\n", f)
+			}
+		} else {
+			fmt.Fprintf(&b, "\n【日志清理】%d 天内没有过期日志文件\n", repo.LogRetainDays())
 		}
-	} else {
-		fmt.Fprintf(&b, "\n【日志清理】%d 天内没有过期日志文件\n", repo.LogRetainDays())
+	}
+
+	if rep.Kind == "daily" {
+		// 每日清理只有一件事（按 10 天红线 DROP / 删 K 线），所以直接打
+		// dailySummary 那一行人话 —— 它与常驻服务日志里的 [MAINT] 行**同源**，
+		// 手工核对时看到的就是线上实际会做的事，不会对不上。
+		//
+		// 原来这里没有 daily 分支：标题掉回「月度维护」、
+		// 分区清单被整段吞掉，手工预演等于什么都看不到。
+		b.WriteString("\n【K 线每日清理】\n")
+		fmt.Fprintf(&b, "  %s\n", rep.Summary)
+		if rep.DryRun {
+			b.WriteString("  预演：上面列出的分区**一个都没删**；去掉 -maint-daily-dry 才会真删。\n")
+		}
 	}
 
 	if rep.Kind == "yearly" {
@@ -1016,7 +1187,13 @@ func MaintenanceText(rep *MaintenanceReport) string {
 	}
 
 	b.WriteString("----------------------------------------------\n")
-	fmt.Fprintf(&b, "C 盘可用：%.1f GB → %.1f GB\n", rep.FreeGBBefore, rep.FreeGBAfter)
+	if rep.FreeGBAfter > 0 {
+		fmt.Fprintf(&b, "C 盘可用：%.1f GB → %.1f GB\n", rep.FreeGBBefore, rep.FreeGBAfter)
+	} else {
+		// 预演（或没测到）时 FreeGBAfter 是 0，直接按两段打会变成
+		// 「20.5 GB → 0.0 GB」，看着像把 C 盘写爆了。
+		fmt.Fprintf(&b, "C 盘可用：%.1f GB\n", rep.FreeGBBefore)
+	}
 	fmt.Fprintf(&b, "耗时：%d ms\n", rep.Ms)
 	if rep.Err != "" {
 		fmt.Fprintf(&b, "错误：%s\n", rep.Err)

@@ -1,23 +1,32 @@
 package service
 
-// addon.go —— 加仓（浮亏补仓 / 摊薄均价）
+// addon.go —— 加仓（补仓 / 摊薄均价）
 //
-// 口径（用户指定）：
+// 口径（2026-10-01 二期，用户指定）：
 //
-//	加仓额 = 原持仓保证金 × 1/3
-//	触发   = 15m 周期上「先跌 0.5%」然后「15m K 线重新转涨」
+//	加仓额 = 原持仓保证金 × ratio（默认 1/3，即「仓位为本金的三分之一」）
+//	触发   = ★★ 与买入条件**完全一致**：该周期最后一根已收盘 K 线 8 个因子全中 ★★
+//	次数   = 不限（max_times = 0）
 //
 // 判定顺序（每一步不满足就这一轮不加）：
 //
-//	① 加仓开关开着，且本仓加仓次数 < max_times
-//	② 只取「开仓之后」的已收盘 15m K 线（开仓前的历史走势不算数）
-//	③ 先跌：这批 K 线里出现过 ≤ 开仓价 ×(1 - drop_pct%) 的最低价
-//	④ 后涨：最后一根已收盘 15m 是阳线（收 > 开）且收盘价高于前一根收盘价
-//	⑤ 低点必须落在最后一根之前（先跌 → 后涨，顺序不能反）
-//	⑥ 距上次加仓至少 min_gap_bars 根（同一根 K 线只加一次）
+//	① 加仓开关开着，仓位有有效开仓价
+//	② 用该仓位自己的周期（rise_bar = "auto" → p.Bar）算最新一根已收盘 K 线的 8 因子
+//	③ 指标暖机完整（sig.Ready）且 score ≥ cfg.ThresholdFor(instID)（当前 8）
+//	④ 这根 K 线必须**晚于**开仓那根（同一根不重复加）
+//	⑤ 距上次加仓至少 min_gap_bars 根（同一根 K 线只加一次）
+//	⑥ 次数：max_times <= 0 表示不限
 //
-// ★ 「加满 max_times 就自动平仓」这条出场规则已于 2026-10-01 彻底删除
-//   （用户：「平仓取消掉一个条件，就是加仓次数，这个不需要」）。
+// ★ 为什么用 LatestSignal 而不是自己抓 K 线：
+//   LatestSignal 是出场（布林上轨）与买入扫描**共用的同一个函数**
+//   （loadCandles + IndexOfLastClosed + ComputeSignal），
+//   所以「加仓条件 = 买入条件」这句话在代码上是真的相等，不是「看着差不多」。
+//   自己另写一遍抓 K 线，迟早会在窗口长度或 Confirm 语义上走岔。
+//
+// ★ 旧的「15m 先跌 0.5% 后转涨」口径已下线（用户：「加仓条件也是和买入条件一样」）。
+//   drop_pct / lookback_bars / only_when_price_up 只保留读兼容，不再参与判定。
+//
+// ★ 「加满 max_times 就自动平仓」这条出场规则已于 2026-10-01 一期删除。
 //   现在加满之后只是不再补仓 —— 仓位继续等 +1% 止盈 / 6 小时超时 / 布林上轨，
 //   三条出场通道里没有任何一条跟加仓次数有关。
 //
@@ -29,7 +38,6 @@ package service
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"finally-main/internal/conf"
@@ -70,18 +78,23 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineRea
 	if a == nil || !a.Enabled || len(openPos) == 0 {
 		return 0, closedIDs
 	}
-	bar := strings.TrimSpace(a.RiseBar)
-	if bar == "" {
-		bar = "15m"
-	}
-	durMs := BarDurationMs(bar)
-	if durMs <= 0 {
-		durMs = BarDurationMs("15m")
-	}
 
 	added := 0
 	for i := range openPos {
 		p := &openPos[i]
+
+		// 加仓用哪个周期判定：rise_bar = "auto"（默认）= 该仓位自己的周期。
+		//
+		// 为什么按仓位自己的周期：买入是按某个周期扫出来的 8 因子信号，
+		// 「加仓条件与买入一致」自然应该对着同一个周期判 ——
+		// 1m 开的仓按 1m 判，15m 开的仓按 15m 判。
+		// 老仓（本次改造前开的）库里 bar 可能是空的，那时退回配置里的主周期。
+		bar := addonBarFor(a.RiseBar, cfg.Bar, p.Bar)
+		durMs := BarDurationMs(bar)
+		if durMs <= 0 {
+			durMs = BarDurationMs("15m")
+		}
+
 		px := markPrices[p.InstID]
 		if px <= 0 {
 			// 拿不到标记价就退回行情最新价
@@ -150,24 +163,58 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineRea
 		p.AddonCount, p.AddonMargin, p.LastAddonTs = dec.Count, dec.AllMargin, dec.Ts
 
 		added++
-		logx.Logf("SIGNAL", "加仓 %s 第 %d 次 张数=%s 价格=%.6f 保证金=%.4fU 新均价=%.6f 订单=%s",
-			p.InstID, dec.Count, fmtSz(dec.Sz, ins.LotSzDec), dec.AddPx,
+		logx.Logf("SIGNAL", "加仓 %s 周期=%s 第 %d 次 张数=%s 价格=%.6f 保证金=%.4fU 新均价=%.6f 订单=%s",
+			p.InstID, bar, dec.Count, fmtSz(dec.Sz, ins.LotSzDec), dec.AddPx,
 			dec.Margin, dec.NewAvgPx, ordID)
 	}
 	return added, closedIDs
 }
 
-// checkAddon 单仓加仓判定：抓 K 线 + 合约信息，然后交给纯逻辑 decideAddon
+// addonBarFor 决定某个仓位用哪个周期做加仓判定。
 //
-// ★ K 线改读本地库（2026-10-01）。原来固定走 cli.Candles —— 每仓一次 OKX HTTP，
-// 跟回补/扫描抢同一把限频闸门，实测 eng.addons 一轮要 7.6 秒。
+//	riseBar = "auto"（或空）→ 用该仓位自己的周期 instBar；老仓 instBar 为空 → cfgBar
+//	riseBar 写了具体周期   → 用它（想「不管什么周期开的都按 15m 加」就写死 15m）
+//	最后兜底             → "15m"
 //
-// ★ 这里**必须**用 loadCandlesLocal，不能图省事用 loadCandles：
-// decideAddon 的输入要过 closedWindow，而 closedWindow 直接读 Candle.Confirm 字段
-// （跳过 !Confirm 的）。klinesToCandles 把 Confirm 恒留 false 是给
-// IndexOfLastClosed 的「按时间推算」分支用的 —— 喂给 closedWindow 会得到空窗口，
-// **加仓会静默地永远不触发**。loadCandlesLocal 会把 Confirm 按周期+时间补上，
-// 与 OKX 的原生 confirm 语义一致。
+// 抽成纯函数是为了能被穷举单测 —— 这个映射一旦走岔，
+// 「加仓条件与买入一致」就会变成「拿 A 周期的信号加 B 周期的仓」，
+// 而且不会报错、日志也看不出异常。
+func addonBarFor(riseBar, cfgBar, instBar string) string {
+	rb := strings.TrimSpace(riseBar)
+	auto := rb == "" || strings.EqualFold(rb, conf.AddonAutoBar)
+
+	bar := ""
+	if auto {
+		bar = strings.TrimSpace(instBar)
+		if bar == "" {
+			bar = strings.TrimSpace(cfgBar) // 老仓（bar 列是空的）
+		}
+	} else {
+		bar = rb
+	}
+	if bar == "" {
+		bar = "15m"
+	}
+	return bar
+}
+
+// checkAddon 单仓加仓判定：算最新一根已收盘 K 线的 8 因子，然后交给纯逻辑 decideAddon。
+//
+// ★ 2026-10-01 二期：改用 LatestSignal —— 与买入扫描、出场（布林上轨）**同一个函数**。
+//
+// 用户口径「加仓条件也是和买入条件一样」，那就必须真的用买入那套代码：
+// LatestSignal = loadCandles（本地优先、窗口 min_candles 根）
+//              + IndexOfLastClosed（只认已收盘那根）
+//              + ComputeSignal（8 因子，指标整段算一遍）。
+//
+// 为什么不再自己抓 K 线自己算：
+//   ① 自己另取一个窗口（比如「开仓之后那几根」），递归指标（ATR/RSI/EMA/TD9）
+//      的种子位置不同 → 同一根 K 线算出的值就可能不一样，「条件一致」变成假的；
+//   ② 一期踩过的坑：closedWindow 直接读 Candle.Confirm，而 klinesToCandles
+//      恒把 Confirm 置 false —— 喂错版本会让加仓**静默地永远不触发**。
+//      共用 LatestSignal 之后，这条路只有一处实现，不存在喂错的可能。
+//
+// 传给 decideAddon 的 sig 已经保证：Ready = true（暖机够）、Ts = 那根 K 线的时间。
 func checkAddon(cfg *conf.Config, cli *OKXClient, kdb KlineReader, p repo.OpenPos,
 	markPx float64, bar string, durMs int64) (AddonDecision, error) {
 
@@ -175,24 +222,16 @@ func checkAddon(cfg *conf.Config, cli *OKXClient, kdb KlineReader, p repo.OpenPo
 	if a == nil || !a.Enabled {
 		return AddonDecision{}, nil
 	}
-	// 次数加满的判定放在下面第 ⑥ 步（要先确认「加仓信号确实又成立了」，
-	// 否则一个根本没触发的仓位也会被当成「加满」而白跑一遍分支）。
 	if p.EntryPx <= 0 {
 		return AddonDecision{}, nil
 	}
 
-	look := a.LookbackBars
-	if look < 4 {
-		look = 4
-	}
-	cands, _, err := loadCandlesLocal(kdb, cli, p.InstID, bar, look+10, cli.nowMs())
+	sig, _, _, err := LatestSignal(cfg, cli, kdb, p.InstID, bar)
 	if err != nil {
 		return AddonDecision{}, err
 	}
-
-	win := closedWindow(cands, p.OpenTs, durMs)
-	if len(win) < 2 {
-		return AddonDecision{}, nil // 至少要两根才谈得上「先跌后涨」
+	if sig == nil || !sig.Ready {
+		return AddonDecision{}, nil // K 线不够 / 暖机不足
 	}
 
 	insts, ierr := cli.Instruments(false)
@@ -203,10 +242,15 @@ func checkAddon(cfg *conf.Config, cli *OKXClient, kdb KlineReader, p repo.OpenPo
 	if !ok {
 		return AddonDecision{}, nil
 	}
-	return decideAddon(cfg, p, markPx, win, durMs, ins), nil
+	return decideAddon(cfg, p, markPx, sig, durMs, ins), nil
 }
 
-// closedWindow 只留「已收盘」且与持仓时间有交集的 K 线（开仓前就收完的不要）
+// closedWindow 只留「已收盘」且与持仓时间有交集的 K 线（开仓前就收完的不要）。
+//
+// ★ 2026-10-01 二期起 decideAddon 不再用它（加仓条件改成了 8 因子共振），
+//   保留下来的唯一原因是它是「Candle.Confirm 语义」的历史证据 ——
+//   addon_test.go 里那条「喂 klinesToCandles 会得到空窗口」的回归测试还在用它。
+//   新代码不要再依赖它。
 func closedWindow(cands []Candle, openTs, durMs int64) []Candle {
 	win := make([]Candle, 0, len(cands))
 	for _, c := range cands {
@@ -223,61 +267,55 @@ func closedWindow(cands []Candle, openTs, durMs int64) []Candle {
 
 // decideAddon 纯判定逻辑（不碰网络，方便单测）。
 //
-// win 必须是从老到新、且已收盘的 K 线序列。
+// ★ 2026-10-01 二期：触发条件 = 8 因子共振（与买入完全一致）★
+//
+// sig 必须是由 LatestSignal / ComputeSignal 算出来的那根**已收盘** K 线的信号。
 func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
-	win []Candle, durMs int64, ins Instrument) AddonDecision {
+	sig *Signal, durMs int64, ins Instrument) AddonDecision {
 
 	a := cfg.Addon
-	if a == nil || !a.Enabled || len(win) < 2 || p.EntryPx <= 0 || markPx <= 0 {
+	if a == nil || !a.Enabled || sig == nil || p.EntryPx <= 0 || markPx <= 0 {
+		return AddonDecision{}
+	}
+	if !sig.Ready {
 		return AddonDecision{}
 	}
 
-	// ② 先跌：出现过 ≤ 开仓价 ×(1 - drop_pct%) 的最低价
-	dropPct := a.DropPct
-	if dropPct <= 0 {
-		dropPct = 0.5
+	// ③ 8 因子共振：与买入用同一个阈值（cfg.ThresholdFor，当前 8 = 全中）。
+	//    注意**不区分**是哪个周期 —— 阈值是同一个，信号来源不同而已。
+	th := cfg.ThresholdFor(p.InstID)
+	if th <= 0 {
+		th = 8
 	}
-	threshold := p.EntryPx * (1 - dropPct/100)
-	iLow, minLow := 0, math.MaxFloat64
-	for i, c := range win {
-		if c.L > 0 && c.L < minLow {
-			minLow, iLow = c.L, i
+	if sig.Score < th {
+		return AddonDecision{}
+	}
+
+	// ④ 这根 K 线必须**晚于**开仓那根。
+	//    开仓时 trade.open_ts 写的就是「触发开仓那根 K 线的时间戳」，
+	//    所以 sig.Ts > p.OpenTs 恰好等价于「不是开仓那一根自己」——
+	//    否则开仓瞬间就会在同一根上再补一次，那不是加仓，是重复下单。
+	if durMs > 0 {
+		if sig.Ts <= p.OpenTs {
+			return AddonDecision{}
 		}
-	}
-	if minLow == math.MaxFloat64 {
-		return AddonDecision{}
-	}
-	if markPx < minLow {
-		minLow, iLow = markPx, len(win)-1
-	}
-	if minLow > threshold+1e-12 {
-		return AddonDecision{} // 压根没跌够
-	}
-
-	// ④ 低点必须在最后一根之前（先跌 → 后涨，顺序不能反）
-	if iLow >= len(win)-1 {
+	} else if sig.Ts < p.OpenTs {
 		return AddonDecision{}
 	}
 
-	// ③ 后涨：最后一根已收盘 K 线是阳线且收盘高于前一根
-	last, prev := win[len(win)-1], win[len(win)-2]
-	if !(last.C > last.O && last.C > prev.C) {
-		return AddonDecision{}
-	}
-
-	// ⑤ 间隔
+	// ⑤ 间隔：距上次加仓至少 min_gap_bars 根（同一根 K 线只加一次）
 	if a.MinGapBars > 0 && p.LastAddonTs > 0 && durMs > 0 &&
-		last.Ts-p.LastAddonTs < int64(a.MinGapBars)*durMs {
+		sig.Ts-p.LastAddonTs < int64(a.MinGapBars)*durMs {
 		return AddonDecision{}
 	}
 
-	// ⑥ 次数：加满了。
+	// ⑥ 次数：**<= 0 = 不限**（2026-10-01 二期，用户口径「加仓没有任何限制」）。
 	//
-	// 「先跌 0.5% → 重新转涨」这套加仓信号又成立了一次，但 3 次额度已经用完。
+	//    这里必须带 `a.MaxTimes > 0` 前置 —— 一期在 entry 的两个计数器上
+	//    踩过一模一样的坑：0 会被当成「已达上限 0」，第一笔就被拦掉。
 	//
-	// ★ 2026-10-01 起：加满之后**只是不再补仓**，不再自动平仓。
-	//   用户明确要求取消「加仓次数」这条出场条件 —— 出场只剩三条：
-	//   +1% 止盈 / 6 小时超时 / 布林上轨，没有任何一条看加仓次数。
+	//    ★ 加满之后只是不再补仓，不再自动平仓：出场只剩 +1% 止盈 /
+	//      6 小时超时 / 布林上轨，没有任何一条看加仓次数。
 	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
 		return AddonDecision{}
 	}
@@ -312,14 +350,18 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if newSz > 0 {
 		newAvg = (p.Sz*p.EntryPx + sz*markPx) / newSz
 	}
-	realDrop := (p.EntryPx - minLow) / p.EntryPx * 100
+	dropFromEntry := (p.EntryPx - markPx) / p.EntryPx * 100
+	timesTxt := "不限"
+	if a.MaxTimes > 0 {
+		timesTxt = fmt.Sprintf("上限 %d 次", a.MaxTimes)
+	}
 
 	return AddonDecision{
 		Add: true, AddPx: markPx, Sz: sz, Margin: used,
 		NewSz: newSz, NewAvgPx: newAvg, NewMargin: newMargin,
 		Count: p.AddonCount + 1, AllMargin: p.AddonMargin + used,
-		Ts: last.Ts,
-		Reason: fmt.Sprintf("15m 先跌 %.2f%%（低点 %.6f ≤ %.6f）后转涨（%.6f > %.6f）→ 补原仓位 1/3",
-			realDrop, minLow, threshold, last.C, prev.C),
+		Ts: sig.Ts,
+		Reason: fmt.Sprintf("8 因子共振 %d/%d（%s）与买入同条件 → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
+			sig.Score, th, sig.HitList, dropFromEntry, timesTxt),
 	}
 }

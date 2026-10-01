@@ -242,19 +242,20 @@ func liveTickOnce(opt LiveOptions) {
 }
 
 // liveScanOnce 跑一轮买入信号扫描
+//
+// ★ 2026-10-01 二期：改成「一轮扫全部启用周期」★
+// 用户口径「1m/3m/5m/15m 四个周期都参与开仓」。原来这里只传 opt.Bar（单周期），
+// 现在走 EngineRunEnabled()：账户/持仓/出场/加仓只做一次，扫描按周期循环。
+// opt.Bar 仅用于「cfg.BarsEnabled 为空」时兜底，以及 liveSnap 上显示的主周期。
 func liveScanOnce(opt LiveOptions) {
 	start := time.Now()
 	cfg := conf.LoadConfig()
 	if cfg == nil || !cfg.Enabled {
 		return
 	}
-	bar := opt.Bar
-	if bar == "" {
-		bar = cfg.Bar
-	}
 
 	before := currentPosCount()
-	if err := EngineRun(bar); err != nil {
+	if err := EngineRunEnabled(); err != nil {
 		setLiveErr(err)
 		return
 	}
@@ -354,12 +355,17 @@ func exitPass() (int, *Account, error) {
 	pAcct := perf.Track("exit.acct")
 	var account *Account
 	markPrices := map[string]float64{}
+	balOK, posOK := false, false
+	liveIDs := map[string]bool{}
 
 	if hasKeys(cfg) {
 		if acc, aerr := cli.Balance(); aerr == nil {
 			account = acc
+			balOK = true
 		}
 		if ps, perr := cli.Positions(); perr == nil {
+			posOK = true
+			liveIDs = livePositionIDs(ps)
 			account = accountOrNew(account)
 			account.PosCount = len(ps)
 			account.PositionList = ps
@@ -377,6 +383,11 @@ func exitPass() (int, *Account, error) {
 		logx.Logf("WARN", "读在持仓失败：%v", err)
 		return 0, account, nil
 	}
+
+	// 对账：本地在持但 OKX 上已经没有的仓，就地清掉（只改本地库、不发单）。
+	// 3 秒一次的巡检是对账最快的入口 —— 幽灵仓留在这里的每一轮，
+	// 都会去发一张注定被拒的平仓单，并吃掉一个限频令牌。
+	openPos = reconcilePositions(cfg, store, balOK && posOK, liveIDs, markPrices, openPos)
 
 	// 标记价没拿到的，用行情最新价补
 	//

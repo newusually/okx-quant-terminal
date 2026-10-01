@@ -33,6 +33,12 @@ type engineState struct {
 	apiErrStreak int
 	pausedUntil  time.Time
 	pauseReason  string
+
+	// ghostSeen 记录「本地在持、但 OKX 实时持仓列表里看不到」的连续轮次。
+	//
+	// 只由 reconcilePositions 读写，且它的两个调用方（engineRunBars / exitPass）
+	// 都在 eng.mu 里，所以不用再单独加锁。
+	ghostSeen map[string]int
 }
 
 var eng = &engineState{}
@@ -86,13 +92,56 @@ func (e *engineState) pause(d time.Duration, reason string) {
 // 主入口
 // ---------------------------------------------------------------------------
 
-// EngineRun 跑一轮。minute 取值与 OKX 一致：1m 3m 5m 15m 30m 1H 2H 4H 6H 12H 1D
+// EngineRun 跑一轮**单个周期**。minute 取值与 OKX 一致：1m 3m 5m 15m 30m 1H 2H 4H 6H 12H 1D
+//
+// 单个周期是给 CLI / 手工触发用的；实时引擎走 EngineRunEnabled（见下），
+// 一轮把所有启用周期都扫掉，只做一次出场巡检与加仓判定。
 func EngineRun(minute string) error {
+	return engineRunBars([]string{normalizeBar(minute)})
+}
+
+// EngineRunEnabled 跑一轮「所有启用周期」的扫描：出场 + 加仓只做一次，扫描逐个周期做。
+//
+// ★ 2026-10-01 二期 ★
+// 用户口径：「四个周期（1m/3m/5m/15m）都参与开仓」，而不是只让 15m 交易。
+//
+// 为什么不直接循环调 EngineRun(bar)：
+//   每次 EngineRun 都会重新拉一次账户余额 + 持仓（约 300~400ms 的 OKX RTT）、
+//   重新读一遍在持仓与当日统计、重跑一遍出场巡检与加仓判定。
+//   四个周期各调一次 = 这些工作白做 4 遍，等于每轮多打 6~8 次 OKX 接口
+//   —— 在「2 核 / 限频 20 次每秒」的机器上，这是纯粹的浪费与排队。
+//   所以改成：**公共部分（账户/持仓/出场/加仓）做一次，只有扫描按周期循环。**
+//   效果与「四次 EngineRun」在交易语义上等价，但外部请求数不变。
+//
+// 周期顺序取 cfg.BarsEnabled 的书写顺序（配置文件里是 1m,3m,5m,15m）。
+func EngineRunEnabled() error {
 	cfg := conf.LoadConfig()
 	if cfg == nil || !cfg.Enabled {
 		return nil
 	}
-	bar := normalizeBar(minute)
+	bars := make([]string, 0, len(cfg.BarsEnabled))
+	for _, b := range cfg.BarsEnabled {
+		if s := normalizeBar(b); s != "" {
+			bars = append(bars, s)
+		}
+	}
+	if len(bars) == 0 {
+		bars = []string{normalizeBar(cfg.Bar)}
+	}
+	return engineRunBars(bars)
+}
+
+// engineRunBars 一轮引擎的完整实现，bars 里每个周期各跑一次「扫描 + 开仓」。
+func engineRunBars(bars []string) error {
+	cfg := conf.LoadConfig()
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+	if len(bars) == 0 {
+		return nil
+	}
+	// bar 只作「默认周期」用：超时平仓的根数口径、日志前缀都读它。
+	bar := bars[0]
 
 	eng.mu.Lock()
 	defer eng.mu.Unlock()
@@ -149,14 +198,22 @@ func EngineRun(minute string) error {
 	pAcct := ph("eng.account")
 	var account *Account
 	markPrices := map[string]float64{}
+	// 对账依据：两个接口都成功才算「OKX 侧信息可信」
+	//   · 只信余额成功而持仓失败 → 会把「持仓接口挂了」误读成「OKX 上没仓」
+	//   · 反过来同理
+	balOK, posOK := false, false
+	liveIDs := map[string]bool{}
 	if hasKeys(cfg) {
 		if acc, aerr := cli.Balance(); aerr == nil {
 			account = acc
+			balOK = true
 		} else {
 			eng.apiErrStreak++
 			logx.Logf("WARN", "取账户余额失败：%v", aerr)
 		}
 		if ps, perr := cli.Positions(); perr == nil {
+			posOK = true
+			liveIDs = livePositionIDs(ps)
 			account = accountOrNew(account)
 			account.PosCount = len(ps)
 			account.PositionList = ps
@@ -171,6 +228,11 @@ func EngineRun(minute string) error {
 	}
 	pAcct()
 
+	// 对账：剔除「本地在持、OKX 上已经没了」的幽灵仓。
+	// 必须在出场巡检之前 —— 否则出场会继续对着不存在的仓位发平仓单，
+	// 一路 All operations failed 白吃限频令牌（见 reconcilePositions 注释）。
+	openPos = reconcilePositions(cfg, store, balOK && posOK, liveIDs, markPrices, openPos)
+
 	// 本地库读能力：出场巡检、加仓判定、入场扫描三处共用一份。
 	// 拿不到就传 nil —— 三处都会退回原来的纯网络行为，DB 挂了只是慢，不会不动。
 	kdb := klineReaderOf(store)
@@ -181,11 +243,16 @@ func EngineRun(minute string) error {
 	openPos = dropClosed(openPos, closedIDs)
 	pExits()
 
-	// ①.5 加仓（浮亏补仓）：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3
-	//      必须在出场之后（刚平的仓不加）、入场之前（总保证金按新值算）
+	// ①.5 加仓（摊薄均价）：条件与买入**完全一致** ——
+	//      该仓位自己周期上最后一根已收盘 K 线 8 因子全中（score ≥ score_threshold）
+	//      → 补原持仓保证金的 1/3（ratio）。次数不限（max_times = 0）。
+	//      必须在出场之后（刚平的仓不加）、入场之前（总保证金按新值算）。
 	//
-	//      加满 3 次之后信号再来 → 这一轮直接把仓位平掉（不设止损下唯一的离场通道），
-	//      返回的 closedIDs 要并回本轮平仓集合，后面的入场闸门才不会把额度算错。
+	//      ★ 旧的「15m 先跌 0.5% 后转涨」口径已于 2026-10-01 二期下线；
+	//        「加满 N 次就强制平仓」那条规则也已删除 —— 出场只剩
+	//        +1% 止盈 / 6 小时超时 / 布林上轨，没有任何一条看加仓次数。
+	//        所以 runAddons 的第二个返回值（本轮平掉的仓位）**恒为空**，
+	//        这里保留合并动作只是为了不动调用结构。
 	pAddons := ph("eng.addons")
 	added, addonClosed := runAddons(cfg, cli, store, kdb, openPos, markPrices)
 	closed += len(addonClosed)
@@ -193,15 +260,29 @@ func EngineRun(minute string) error {
 	closedIDs = mergeIDs(closedIDs, addonClosed)
 	pAddons()
 
-	// ② 入场
-	pScan := ph("eng.scan")
-	scanInfo := fmt.Sprintf("周期 %s 未启用扫描（bars_enabled 未包含）", bar)
-	if cfg.BarEnabled(bar) {
-		res, serr := Scan(cfg, cli, bar, kdb)
+	// ② 入场：**逐个启用周期**扫一遍
+	//
+	//    账户 / 持仓 / 出场巡检 / 加仓判定都在上面做完了，这里只剩「扫描 + 下单」
+	//    按周期重复 —— 这是「四个周期都参与开仓」的落地点。
+	//
+	//    ★ 新开的仓必须立刻并进 openPos 再喂给下一个周期 ★
+	//    否则同一个合约会在同一轮里被 4 个周期各开一次（1m 开了、3m 又开、
+	//    5m 再开、15m 再来一遍）—— 那不是「四个周期共振」，是重复下单。
+	//    同时 ctr.OrdersToday 也要跟着加，后面的周期看到的当日笔数才是真的。
+	openedTotal := 0
+	lines := make([]string, 0, len(bars))
+	for _, b := range bars {
+		if !cfg.BarEnabled(b) {
+			lines = append(lines, fmt.Sprintf("周期 %s 未启用扫描（bars_enabled 未包含）", b))
+			continue
+		}
+
+		pScan := ph("eng.scan")
+		res, serr := Scan(cfg, cli, b, kdb)
 		if serr != nil {
+			pScan()
 			eng.apiErrStreak++
 			eng.maybePauseOnErrors(cfg)
-			pScan()
 			return serr
 		}
 		eng.apiErrStreak = 0
@@ -225,23 +306,32 @@ func EngineRun(minute string) error {
 		pScan()
 
 		pEntries := ph("eng.entries")
-		opened, updates := runEntries(cfg, cli, store, res, ctr, openPos, account, bar)
+		n, updates, extra := runEntries(cfg, cli, store, res, ctr, openPos, account, b)
 		if len(updates) > 0 {
 			if err := store.Ingest(repo.StorePayload{SignalUpdate: updates}); err != nil {
 				logx.Logf("WARN", "更新信号状态失败：%v", err)
 			}
 		}
 		pEntries()
-		scanInfo = fmt.Sprintf("全市场 %d / 候选 %d / 实算 %d / 信号 %d / 开仓 %d / K线本地 %d 网络 %d",
-			res.Universe, res.Candidates, res.Scanned, len(res.Signals), opened, res.FromDB, res.FromNet)
-	} else {
-		pScan()
+
+		// 本周期新开的仓 → 立刻让后面的周期看见（防重复开仓 + 当日笔数准确）
+		openPos = append(openPos, extra...)
+		ctr.OrdersToday += n
+		openedTotal += n
+
+		lines = append(lines, fmt.Sprintf("%s：全市场 %d / 候选 %d / 实算 %d / 信号 %d / 开仓 %d / K线本地 %d 网络 %d",
+			b, res.Universe, res.Candidates, res.Scanned, len(res.Signals), n, res.FromDB, res.FromNet))
 	}
+	scanInfo := strings.Join(lines, "；")
+	opened := openedTotal
 
 	pTail := ph("eng.tail")
-	if closed > 0 || added > 0 || cfg.BarEnabled(bar) {
-		logx.Logf("INFO", "[%s] %s；在持 %d 仓，本轮平仓 %d、加仓 %d，用时 %s",
-			bar, scanInfo, len(openPos), closed, added, time.Since(start).Round(time.Millisecond))
+	// 只要这一轮至少扫了一个周期就记一行 —— 日志前缀列出实际参与扫描的周期，
+	// 这样「1m/3m/5m/15m 到底在不在跑」看一眼日志就知道，不用去翻配置。
+	if closed > 0 || added > 0 || len(lines) > 0 {
+		logx.Logf("INFO", "[%s] %s；在持 %d 仓，本轮开仓 %d、平仓 %d、加仓 %d，用时 %s",
+			strings.Join(bars, ","), scanInfo, len(openPos), opened, closed, added,
+			time.Since(start).Round(time.Millisecond))
 	}
 
 	// ③ 权益快照
@@ -421,6 +511,174 @@ func closeOne(cfg *conf.Config, cli *OKXClient, store *repo.Store,
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// 持仓对账：OKX 实时持仓 ↔ 本地「在持仓」
+// ---------------------------------------------------------------------------
+
+// ghostConfirmRounds 连续几轮在 OKX 持仓列表里看不到，才认定本地那行是「幽灵仓」。
+//
+// 出场巡检 3 秒一次 → 3 轮 ≈ 9 秒。宁可多等两轮，也不能把真仓位误判掉。
+const ghostConfirmRounds = 3
+
+// ghostDecision 纯判定（不碰网络、不碰库，方便单测）。
+//
+// 输入：上一轮遗留的缺席计数 seen、本轮 OKX 持仓集合 liveIDs、本地在持仓 openPos。
+// 输出：本轮仍要保留的仓位、已确认的幽灵仓、更新后的缺席计数。
+//
+// 计数规则：
+//   - 出现在 liveIDs 里 → 计数清零（仓位回来了，或本来就活着）
+//   - 不在 → 计数 +1；累计到 ghostConfirmRounds 就判为幽灵并**从计数里移除**。
+//     外层写库失败会把它放回 openPos，下一轮从 0 重新数 —— 这是刻意的：
+//     写库一直失败时宁可从零再等 3 轮，也不要每轮都重复判一次、把 WARN 刷爆。
+//
+// 这个函数决定了「什么样的仓位会被引擎放弃管理」，是全链路里风险最不对称的一段，
+// 所以单独抽出来用单测覆盖（见 reconcile_test.go）。
+func ghostDecision(seen map[string]int, liveIDs map[string]bool,
+	openPos []repo.OpenPos) (keep, ghosts []repo.OpenPos, next map[string]int) {
+
+	next = make(map[string]int, len(seen))
+	for k, v := range seen {
+		next[k] = v
+	}
+	// 已经不在 openPos 里的陈旧计数顺手清掉，别让它无限长。
+	alive := make(map[string]bool, len(openPos))
+	for _, p := range openPos {
+		alive[p.InstID] = true
+	}
+	for k := range next {
+		if !alive[k] {
+			delete(next, k)
+		}
+	}
+
+	keep = make([]repo.OpenPos, 0, len(openPos))
+	for _, p := range openPos {
+		if liveIDs[p.InstID] {
+			delete(next, p.InstID)
+			keep = append(keep, p)
+			continue
+		}
+		next[p.InstID]++
+		if next[p.InstID] < ghostConfirmRounds {
+			keep = append(keep, p)
+			continue
+		}
+		delete(next, p.InstID)
+		ghosts = append(ghosts, p)
+	}
+	return keep, ghosts, next
+}
+
+// reconcilePositions 用 OKX 的实时持仓列表校对本地「在持仓」，剔除幽灵仓。
+//
+// ★ 为什么必须做 ★
+//
+// 本地 trade 表是「开仓时插入、平仓时改写 closed=1」的。只要出现过一次
+// 「OKX 侧其实已经没这个仓了，但本地没改」的情形，本地就会**永远**留着一行在持仓：
+//
+//	· 在 OKX App 里手工平掉 / 被强平；
+//	· 平仓在 OKX 侧成功、但写回本地库失败（DB 抖动、进程被杀）；
+//	· 早期 dry_run 期留下的空仓。
+//
+// 之后引擎每 3 秒去平一个**不存在**的仓位 → OKX 回
+// `code=1 All operations failed` → 无限重试。实测后果：
+// 日志每 3 秒刷一条 ERROR、白吃限频令牌（20 次/2 秒是扫描/回补/刷新/出场**共用**的
+// 一把闸门）、出场巡检被拖到 24 秒 —— 直接饿死四个周期的入场扫描。
+//
+// ★ 判据保守到近乎多疑，因为误判的代价不对称 ★
+//
+//	误判成幽灵（真仓位其实还开着）→ 本地不再管它，**等于没有任何出场保护**，
+//	在「不设止损」的策略下就是敞口裸奔；
+//	漏判（继续重试）→ 只是浪费几次接口调用。
+//
+// 所以三个条件**同时**满足才认定：
+//
+//	① OKX 持仓接口调用成功（失败就什么都不动，并清空计数）；
+//	② 账户余额接口也成功（能证明 key / 网络是活的，不是半死状态返回空列表）；
+//	③ 同一个合约**连续 ghostConfirmRounds 轮**都不在 OKX 持仓列表里。
+//
+// 另外 dry_run 必须整段跳过 —— 模拟模式下本来就一个真仓都不会有，
+// 不挡的话对账会把所有 dry_run 持仓当成幽灵清掉，dry_run 就没法用了。
+//
+// 本函数**只改本地库，绝不向 OKX 发任何交易请求**。
+//
+// 返回：剔除幽灵仓之后的在持仓列表。
+func reconcilePositions(cfg *conf.Config, store *repo.Store,
+	okxAlive bool, liveIDs map[string]bool, markPrices map[string]float64,
+	openPos []repo.OpenPos) []repo.OpenPos {
+
+	if eng.ghostSeen == nil {
+		eng.ghostSeen = map[string]int{}
+	}
+	// dry_run / 没配 key：没有任何可对账的依据，原样返回。
+	if cfg == nil || cfg.DryRun || !hasKeys(cfg) || store == nil {
+		return openPos
+	}
+	// 接口没成功：清空计数并原样返回。**不清计数最危险** ——
+	// 偶尔一次空返回 + 上一轮的计数会把真仓位凑够 3 轮给误判掉。
+	if !okxAlive {
+		eng.ghostSeen = map[string]int{}
+		return openPos
+	}
+	if len(openPos) == 0 {
+		eng.ghostSeen = map[string]int{}
+		return openPos
+	}
+
+	keep, ghosts, next := ghostDecision(eng.ghostSeen, liveIDs, openPos)
+	eng.ghostSeen = next
+	if len(ghosts) == 0 {
+		return keep
+	}
+
+	for _, p := range ghosts {
+		px := markPrices[p.InstID]
+		if px <= 0 {
+			px = p.EntryPx
+		}
+		// 盈亏**故意记 0**：真实成交价本地无从得知，硬套标记价会往
+		// totalPnl / winRate 里灌假数据（用户会拿三方流水核对，宁缺勿假）。
+		// 真实盈亏以 OKX 账单 / 仓位历史为准，这里只负责把本地状态收干净。
+		const reason = "OKX 侧已无此持仓 · 本地对账平仓（盈亏以 OKX 账单为准）"
+		row := repo.CloseRow{
+			ID: p.ID, ExitPx: px, Pnl: 0, PnlPct: 0,
+			Reason: reason, CloseTs: time.Now().UnixMilli(),
+			OrdID: "(reconcile)",
+		}
+		if err := store.Ingest(repo.StorePayload{
+			CloseTrade: &row,
+			Event: []repo.TradeEventRow{{
+				InstID: p.InstID, Kind: "close", Ts: row.CloseTs, Px: px,
+				Sz: p.Sz, Margin: p.Margin, Leverage: p.Leverage,
+				Pnl: 0, PnlPct: 0, Reason: reason, OrdID: row.OrdID, TradeID: p.ID,
+			}},
+		}); err != nil {
+			// 写失败就把这行留下，下一轮重试 —— 绝不能「本地删了、OKX 也没有」两头不着。
+			logx.Logf("WARN", "对账平仓写库失败（%s，下一轮重试）：%v", p.InstID, err)
+			keep = append(keep, p)
+			continue
+		}
+		logx.Logf("WARN", "对账平仓 %s：连续 %d 轮不在 OKX 持仓列表，本地记为已平（张数=%s 开仓价=%.6f 保证金=%.4fU）",
+			p.InstID, ghostConfirmRounds, fmtSz(p.Sz, 10), p.EntryPx, p.Margin)
+	}
+	return keep
+}
+
+// livePositionIDs 把 OKX 持仓列表压成「合约 → 是否有仓」的集合。
+//
+// 只认张数非 0 的那条：OKX 在双向持仓下会对「已平的腿」回一条 pos=0 的记录，
+// 那种不算有仓。
+func livePositionIDs(ps []Position) map[string]bool {
+	out := make(map[string]bool, len(ps))
+	for _, p := range ps {
+		if toF(p.Pos) == 0 {
+			continue
+		}
+		out[p.InstID] = true
+	}
+	return out
+}
+
 // mergeIDs 把 b 里的 ID 并进 a（a 为空时直接返回 b）。
 //
 // 一轮里可能有两条路同时平仓：常规出场（止盈/超时/布林上轨）和
@@ -459,12 +717,21 @@ func dropClosed(pos []repo.OpenPos, closedIDs map[int64]bool) []repo.OpenPos {
 // 入场（对应文案 §7.6 的判定顺序）
 // ---------------------------------------------------------------------------
 
+// runEntries 对某个周期的扫描结果过闸门并下单。
+//
+// 返回值第三个 extra 是本轮**新开的仓**（只带 InstID/Margin 这两个下游会用到的字段）。
+// 调用方（engineRunBars）会把它并进 openPos 再喂给下一个周期 —— 不这么做的话，
+// 1m 刚开的仓在 3m/5m/15m 那几轮里还是「没持仓」，同一个合约会被开 4 次。
+//
+// 注意 runEntries 内部也会就地维护 openSet 与 ctr.LastEntryTs（同周期内不重复开），
+// 但那两份是**按周期重建**的，跨周期不共享，所以必须靠 extra 传出去。
 func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanResult, ctr *repo.Counters,
-	openPos []repo.OpenPos, account *Account, bar string) (int, []repo.SignalUpdate) {
+	openPos []repo.OpenPos, account *Account, bar string) (int, []repo.SignalUpdate, []repo.OpenPos) {
 
 	updates := []repo.SignalUpdate{}
+	extra := []repo.OpenPos{}
 	if len(res.Signals) == 0 {
-		return 0, updates
+		return 0, updates, extra
 	}
 
 	insts, ierr := cli.Instruments(false)
@@ -474,7 +741,7 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 			updates = append(updates, repo.SignalUpdate{InstID: s.InstID, Bar: s.Bar, Ts: s.Ts,
 				Acted: 2, Reason: "取合约信息失败"})
 		}
-		return 0, updates
+		return 0, updates, extra
 	}
 
 	openSet := map[string]bool{}
@@ -622,11 +889,13 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 		openSet[s.InstID] = true
 		ctr.LastEntryTs[s.InstID] = s.Ts
 		opened++
-		logx.Logf("SIGNAL", "开仓 %s 张数=%s 开仓价=%.6f 共振 %d/8 [%s] 订单=%s",
-			s.InstID, fmtSz(sz, ins.LotSzDec), s.Close, s.Score, s.HitList, ordID)
+		// 传给下一个周期：只需要 InstID（防重复开仓）与 Margin（总保证金口径）
+		extra = append(extra, repo.OpenPos{InstID: s.InstID, Margin: marginUsed, EntryPx: s.Close, Bar: s.Bar})
+		logx.Logf("SIGNAL", "开仓 %s 张数=%s 开仓价=%.6f 共振 %d/8 [%s] 周期=%s 订单=%s",
+			s.InstID, fmtSz(sz, ins.LotSzDec), s.Close, s.Score, s.HitList, s.Bar, ordID)
 	}
 
-	return opened, updates
+	return opened, updates, extra
 }
 
 // ---------------------------------------------------------------------------

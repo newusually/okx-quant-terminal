@@ -1,9 +1,10 @@
 package service
 
-// backfill.go —— 历史数据回补（至少一个月）+ 实时数据保存
+// backfill.go —— 历史数据回补（默认 10 天）+ 实时数据保存
 //
 // 三件事：
-//   1. 回补：把每个 (合约, 周期) 的 K 线从 OKX 拉到本地 SQLite，默认覆盖 30 天
+//   1. 回补：把每个 (合约, 周期) 的 K 线从 OKX 拉到本地 MySQL，默认覆盖 10 天
+//      （四个周期 1m/3m/5m/15m 都补，保留窗口由 kline_retain_days 决定）
 //   2. 实时：每 N 秒拉一次全市场 tickers 落库，同时把最新一根 K 线续上
 //   3. 进度：每个任务的状态都写 backfill_job 表，前端可以直接看
 
@@ -34,15 +35,17 @@ type BackfillConfig struct {
 	FocusAll bool
 
 	// Scope 决定启动时回补多少东西：
-	//   "plan"      默认。先给「全部 live 合约」补 15m/1H/4H（便宜，图先能用），
-	//               再给「可交易合约」补 5m/3m/1m。约 1.4 GB 磁盘，图最快可用。
+	//   "plan"      默认。先给「全部 live 合约」各拉一次最新 300 根（Light），
+	//               再逐个往前翻满 Days 天；四个周期（1m/3m/5m/15m）一起补，
+	//               1m 排最前。保留窗口 10 天 ⇒ 磁盘约 200 MB，图很快可用。
 	//   "tradeable" 可交易合约 × 全部周期
-	//   "live"      全部 live 合约 × 全部周期（约 3.6 GB，磁盘不够会自动暂停）
+	//   "live"      全部 live 合约 × 全部周期（约 480 合约，磁盘自动守卫）
 	//   "focus"     只回补 FocusN 个焦点合约（旧行为）
 	Scope string
 
 	// MinFreeMB 剩余磁盘低于这个数就暂停回补（默认 800MB）。
-	// 数据量算得出来：一行约 107 字节，171 合约 × 6 周期 × 30 天 ≈ 1200 万行 ≈ 1.3 GB。
+	// 数据量算得出来：一行约 107 字节；10 天窗口下 480 合约 × 4 周期
+	// ≈ 110 万行 ≈ 120 MB，远低于一期的「15m 留一年」1041 万行。
 	MinFreeMB int
 	// RootDir 用来查所在卷的剩余空间
 	RootDir string
@@ -50,15 +53,37 @@ type BackfillConfig struct {
 	Workers     int // 并发回补协程数，默认 6
 	MaxPages    int // 单个 (合约,周期) 最多翻多少页，默认 2000（防跑飞）
 	RealtimeSec int // 实时行情落库间隔（秒），默认 5
+
+	// RefreshTopNFn 返回「续最新一根」只做前 N 个合约（0 / nil = 不限）。
+	//
+	// ★ 为什么必须截断 ★
+	//
+	// OKX /market/*-candles 限 20 次 / 2 秒，且**全进程共用一把闸门**
+	// （internal/ratelimit）。四周期（1m/3m/5m/15m）下，需要续的
+	// (合约,周期) 条数 ≈ 可交易合约数 × 4。169 个可交易合约 = 676 条，
+	// 单轮最少 67.6 秒 —— **已经超过 1m K 线的一分钟**。
+	//
+	// 而扫描读本地的判据是「本地最新一根 ≥ 刚收盘那根」（见 scanner.localCandlesFresh），
+	// 于是 1m 永远不达标 → 每轮都回退网络（80 次请求）→ 和续 K 线抢同一把闸门
+	// → 续 K 线更慢 → 本地更不新鲜 …… 死循环。
+	// 实测这一循环把 eng.scan 顶到 101.7s、live.exitWait（出场巡检等锁）顶到 35.4s。
+	//
+	// 截到「扫描真正会用的那批」（= 策略 top_n_by_volume，默认 80）后，
+	// 一轮只有 320 条 ≈ 32 秒 < 60 秒，1m 本地能真正转热，扫描回落本地，
+	// 省下的闸门还给回补 —— 这是打破死循环的唯一办法（加大并发没用，闸门是地板）。
+	//
+	// 做成回调而不是定值：top_n_by_volume 在策略 JSON 里是热插拔的，
+	// 启动时读一次会跟 JSON 脱节。
+	RefreshTopNFn func() int
 }
 
 // DefaultBackfillConfig 默认配置
 func DefaultBackfillConfig() BackfillConfig {
 	return BackfillConfig{
-		// 默认回补 1 年，和 K 线保留窗口（kline_retain_days=365）对齐。
-		// 第一次跑要拉 479 合约 × 117 页 ≈ 5.6 万次 history-candles 调用，
-		// 全局令牌桶压到 9 次/秒，实测约 2 小时跑完；期间不影响实时行情。
-		Days:          365,
+		// 默认回补 10 天，和 K 线保留窗口（kline_retain_days=10）对齐。
+		// cmd/okxweb 会用 resolveBackfillDays 再覆写一次（跟随配置真源），
+		// 这里的 10 只是「没人传参时」的兜底，避免又出现「拉一年只留十天」。
+		Days:          10,
 		Bars:          append([]string{}, SupportedBars...),
 		FocusN:        8,
 		OnlyTradeable: true,
@@ -262,20 +287,23 @@ func (m *BackfillManager) buildPlan() []BackfillTask {
 	// 默认 plan：两遍走。
 	//
 	//	第一遍 Light：每个 (合约,周期) 只拉最新 300 根 —— 全部任务合起来
-	//	  不到三千个请求，几分钟就能让每个合约的每个周期都有近期 K 线。
+	//	  几千个请求，几分钟就能让每个合约的每个周期都有近期 K 线。
 	//	  历史信号要 200 根暖机，之前 1m/3m/5m 一条信号都没有，就是连
 	//	  这段近期的 K 线都还没铺。
 	//	第二遍 Full：再逐个往前翻满 Days 天（已铺够的走轻量路径秒过）。
 	//
-	// 周期顺序：5m 排最前 —— 它是唯一还需要 30 天历史的短周期。
+	// ★ 四周期一起回补（2026-10-01 口径变更）★
+	//   用户要求「1 分钟 / 3 分钟 / 5 分钟 / 15 分钟选项卡重新生成并且补充数据」，
+	//   并且四个周期都参与开仓，所以 1m/3m/5m 从「已下线」恢复为必补。
+	//   周期顺序直接沿用 cfg.Bars（= model.EnabledBars = 1m,3m,5m,15m）：
+	//   数据量最大的 1m 排最前 —— 它的图最空、最缺，先补先能用。
 	//
-	// ★ 全库只回补 15m（2026-10-01 用户口径）：
-	//   「把 4H / 1H / 5m 全部删除，只保留 15 分钟的信号和买卖点」。
-	//   更早砍掉的 1m/3m 占过全表 69% 的行，且 1m 全量回补要二十多万次请求
-	//   （五六个小时），把要用的周期全堵在后面。
+	//   请求量（保留窗口 10 天）：1m 每合约翻约 10 页、3m 约 5 页、
+	//   5m 约 3 页、15m 约 1 页 ⇒ 480 个 live 合约全量约 1.1 万次
+	//   history-candles 调用，令牌桶 20 次/2 秒 ⇒ 约 20 分钟跑完；
+	//   期间实时行情与下单不受影响。
 	pick := func(dst []BackfillTask) []BackfillTask {
-		dst = appendAll(dst, all, "15m")
-		return dst
+		return appendAll(dst, all, m.cfg.Bars...)
 	}
 
 	full := pick([]BackfillTask{})
@@ -313,6 +341,54 @@ func (m *BackfillManager) tradeableIDs() []string {
 		out = append(out, it.InstID)
 	}
 	return out
+}
+
+// pickRefreshInsts 从「已按成交额降序排好的可交易合约」里取前 n 个，做成集合。
+//
+// 纯函数、单独抽出来是有意为之：它决定「要不要给某个合约续最新 K 线」，
+// 一旦挑错就是「扫到的没续、续了的没扫」的静默退化，必须有单测钉住。
+//
+// 判据（返回 nil = 不限）：
+//   - n <= 0            → nil（不限，退回老行为）
+//   - 列表为空          → nil（**宁可不限也不误杀全部**：查库失败时全截断会让所有图都停更）
+//   - n >= len(list)    → nil（截了等于没截，省一次 map 分配）
+func pickRefreshInsts(ordered []string, n int) map[string]bool {
+	if n <= 0 || len(ordered) == 0 || n >= len(ordered) {
+		return nil
+	}
+	out := make(map[string]bool, n)
+	for _, id := range ordered[:n] {
+		out[id] = true
+	}
+	return out
+}
+
+// refreshScope 返回「值得续最新一根」的合约集合（nil = 不限）。
+//
+// ★ 口径必须和 scanner 的候选完全一致 ★
+//
+// 两处都走 inst 表：tradeable=1，按 quote_vol24h DESC 取前 N。
+// scanner 是「FilterUniverse 过滤 → 按成交额排序 → 截 TopNByVolume」，
+// 而 tradeable 这个标记正是 FilterUniverse 自己写进 inst 的（UpdateTradeable），
+// 所以两边挑出来的是同一批。**各写一份口径 = 必然对不上**（本项目已踩过多次）。
+func (m *BackfillManager) refreshScope() map[string]bool {
+	if m.cfg.RefreshTopNFn == nil {
+		return nil
+	}
+	n := m.cfg.RefreshTopNFn()
+	if n <= 0 {
+		return nil
+	}
+	ts, err := m.db.ListTradeableInstruments()
+	if err != nil || len(ts) == 0 {
+		// 查库失败就不限流：宁可多打几次 OKX，也不能让所有合约的图一起停更
+		return nil
+	}
+	ordered := make([]string, 0, len(ts))
+	for _, it := range ts {
+		ordered = append(ordered, it.InstID)
+	}
+	return pickRefreshInsts(ordered, n)
 }
 
 // diskOK 剩余磁盘是否够用（守卫，防止把系统盘写爆）
@@ -888,6 +964,11 @@ func (m *BackfillManager) refreshLatestKlines() {
 	}
 
 	// ---- ① 筛到期任务（纯内存，串行）----
+	//
+	// allow 是「只续这些合约」（nil = 不限）。截断的理由见 RefreshTopNFn 的注释：
+	// 不截，四周期 × 可交易合约数就会顶穿 OKX 的 20 次/2 秒闸门，
+	// 1m 永远不新鲜，扫描和续 K 线互相抢闸门形成死循环。
+	allow := m.refreshScope()
 	type refreshJob struct {
 		instID string
 		bar    string
@@ -901,6 +982,9 @@ func (m *BackfillManager) refreshLatestKlines() {
 		}
 		instID, bar, ok := splitJobKey(k)
 		if !ok {
+			continue
+		}
+		if allow != nil && !allow[instID] {
 			continue
 		}
 		// 最新一根还没走完（离下根开盘还早）就跳过，省一次请求
@@ -978,8 +1062,12 @@ func (m *BackfillManager) refreshLatestKlines() {
 		if stopped {
 			tail = "（收到停止信号，提前收尾）"
 		}
-		m.logf("续最新 K 线：到期 %d 条，成功 %d，失败 %d，跳过 %d，并发 %d，耗时 %.1fs%s",
-			len(jobs), ok, fail, atomic.LoadInt64(&skipN), workers, elapsed.Seconds(), tail)
+		scopeText := "全部"
+		if allow != nil {
+			scopeText = fmt.Sprintf("Top%d（共 %d 个合约有数据）", len(allow), len(known))
+		}
+		m.logf("续最新 K 线：范围 %s，到期 %d 条，成功 %d，失败 %d，跳过 %d，并发 %d，耗时 %.1fs%s",
+			scopeText, len(jobs), ok, fail, atomic.LoadInt64(&skipN), workers, elapsed.Seconds(), tail)
 	}
 }
 

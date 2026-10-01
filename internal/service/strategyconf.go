@@ -42,13 +42,13 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径：加仓最多 3 次（只限制继续补仓，与出场无关）。
+//	用户口径（2026-10-01 二期）：加仓次数**不限**，触发条件与买入完全一致（8 指标全中）。
 type StrategyAddon struct {
 	Enabled  bool    `json:"enabled"`
 	Ratio    float64 `json:"ratio"`
-	DropPct  float64 `json:"drop_pct"`
-	RiseBar  string  `json:"rise_bar"`
-	MaxTimes int     `json:"max_times"`
+	DropPct  float64 `json:"drop_pct"` // 已废弃（旧「先跌 N%」口径），保留只为读兼容
+	RiseBar  string  `json:"rise_bar"` // auto = 用该仓位自己的周期
+	MaxTimes int     `json:"max_times"` // 0 = 不限
 }
 
 // StrategyConfig 只取前端要展示的字段
@@ -94,8 +94,9 @@ type StrategyLive struct {
 func LoadStrategy(path string) (*StrategyConfig, error) {
 	def := &StrategyConfig{
 		Enabled: true, DryRun: true, Bar: "15m",
-		BarsEnabled: []string{"15m"}, SignalBars: []string{"15m"},
-		ScoreThreshold: 6,
+		BarsEnabled: []string{"1m", "3m", "5m", "15m"},
+		SignalBars:  []string{"1m", "3m", "5m", "15m"},
+		ScoreThreshold: 8,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		ExcludeStockETF: true, ExcludeNewListingDays: 30, ExcludeDelisting: true,
 		// ↑↓ 这些数字全是「配置文件缺失 / 解析失败」时的兜底，
@@ -104,11 +105,12 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
 			// ★ 0 = 不限（用户口径「取消限制」）。这里只是「配置文件读不到」时的兜底，
 			//   与 conf.DefaultConfig 保持一致，免得兜底值把限制偷偷放回来。
-			MarginUSDT: 1.0, Leverage: 20, MaxConcurrentPositions: 0,
-			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.5},
+			MarginUSDT: 0.01, Leverage: 20, MaxConcurrentPositions: 0,
+			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0},
 		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 360},
+		// ★ MaxTimes: 0 = 不限；RiseBar "auto" = 用该仓位自己的周期。
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
-			RiseBar: "15m", MaxTimes: 3},
+			RiseBar: conf.AddonAutoBar, MaxTimes: 0},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,
 	}
@@ -170,9 +172,11 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	if cfg.Live.EntrySec < 5 {
 		cfg.Live.EntrySec = 5
 	}
-	// 加仓口径归一化：「最多 3 次」是用户硬口径，配置里写 0/负数一律回默认。
-	if cfg.Addon.MaxTimes <= 0 {
-		cfg.Addon.MaxTimes = def.Addon.MaxTimes
+	// 加仓口径归一化：**<= 0 = 不限**（2026-10-01 二期，用户口径「加仓没有任何限制」）。
+	// 原来这里写的是「<= 0 → 回默认值 3」，与 entry 那两个计数器是同一类坑：
+	// 配置里写 0 会被反压回 3，看起来改了实际还在拦。负数归 0，0 保持 0。
+	if cfg.Addon.MaxTimes < 0 {
+		cfg.Addon.MaxTimes = 0
 	}
 	if cfg.Addon.Ratio <= 0 {
 		cfg.Addon.Ratio = def.Addon.Ratio

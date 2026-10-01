@@ -10,8 +10,9 @@ package main
 //
 // 干三件事：
 //   1. 连上本机 MySQL 并把表建好（不需要装 Python，也不需要 CGO）
-//   2. 从 OKX 回补至少一个月的 K 线（5m/15m/1H/4H）到 MySQL，并持续增量更新
-//      （1m/3m 已于 2026-10-01 下线：这两个周期占 kline 表 69% 的行，磁盘扛不住）
+//   2. 从 OKX 回补 K 线（1m/3m/5m/15m 四个周期，默认 10 天）到 MySQL，并持续增量更新
+//      （2026-10-01 二期：1m/3m/5m 已恢复 —— 四个周期都参与开仓，
+//       保留窗口统一收到 10 天，由每日凌晨任务 DROP PARTITION 清理）
 //   3. 起一个网页服务，用 AJAX + TradingView 图表把行情、持仓、盈亏、历史都展示出来
 //
 // 端口约定：
@@ -59,14 +60,17 @@ import (
 var (
 	addr    = flag.String("addr", "127.0.0.1:8090", "网页监听地址（Apache 反代到这里）")
 	proxy   = flag.String("proxy", "", "HTTP/SOCKS5 代理，如 http://127.0.0.1:7890；留空直连")
-	days    = flag.Int("days", 365, "K 线回补天数（与 kline_retain_days 对齐，默认 1 年）")
+	// ★ 2026-10-01 二期：默认天数改成 0 = 「跟着 kline_retain_days 走」（当前 10 天）。
+	//   写死 365 会让首次回补去拉一年 —— 而库里只留 10 天，
+	//   拉回来的 355 天转头就被每日任务删掉，纯属白烧 OKX 限频与磁盘 IO。
+	days    = flag.Int("days", 0, "K 线回补天数（0 = 用配置里的 kline_retain_days，当前 10 天）")
 	focus   = flag.String("focus", "", "启动即回补的合约，逗号分隔；留空 = 按成交额取 TopN")
 	focusN  = flag.Int("focusn", 8, "focus 留空时取成交额前 N 名")
 	workers = flag.Int("workers", 10, "回补并发数（受 OKX 限频约束，10 已接近上限）")
-	bars    = flag.String("bars", "15m", "要回补的周期，逗号分隔（全库只保留 15m：4H/1H/5m、更早的 1m/3m 都已下线）")
+	bars    = flag.String("bars", "", "要回补的周期，逗号分隔；留空 = 用 model.EnabledBars（1m,3m,5m,15m）")
 	rtSec   = flag.Int("rt", 5, "实时行情落库间隔（秒）")
 	scope   = flag.String("backfill-scope", "plan",
-		"回补范围：plan（默认，全部live×15m/1H/4H + 可交易×5m）| tradeable | live（约3.6GB，看磁盘）| focus | none")
+		"回补范围：plan（默认，全部 live 合约 × 四个周期）| tradeable | live（看磁盘）| focus | none")
 	minFree = flag.Int("min-free-mb", 800, "剩余磁盘低于此值就暂停回补（0=不检查）")
 
 	// 性能诊断：pprof 火焰图。单开端口、只绑回环，**绝不能挂在 8090 上**
@@ -113,6 +117,12 @@ var (
 	//   少了它，任何「先预演、再确认」的批处理都会把预演那一步变成真删。
 	maintYearlyDry = flag.Bool("maint-yearly-dry", false, "预演年度清理：只报告会 DROP 哪些分区，不删任何东西")
 
+	// ---- 每日 K 线清理（2026-10-01 二期新增）----
+	//   bin\okxweb.exe -maint-daily-dry  预演：只报告会 DROP 哪些日分区
+	//   bin\okxweb.exe -maint-daily      真删（常驻服务里每天凌晨也会自动跑）
+	maintDaily    = flag.Bool("maint-daily", false, "立即执行一次每日 K 线清理（删除早于 kline_retain_days 的 K 线），然后退出")
+	maintDailyDry = flag.Bool("maint-daily-dry", false, "预演每日 K 线清理：只报告会 DROP 哪些分区，不删任何东西")
+
 	// ---- 月度归档导出 ----
 	//   bin\okxweb.exe -archive 2026-09          导出到默认 archive/ 目录
 	//   bin\okxweb.exe -archive 2026-09 -archive-dir D:\bak
@@ -132,7 +142,7 @@ var (
 	partition = flag.Bool("partition", false, "一次性把 kline 改造成分区表（重建整表，务必先停引擎）")
 	// 分区方案从「纯按月」升级成「冷区按月 + 热区按周」时要强制重建。
 	// 已经建过月度分区的库，-partition 会因为「已是分区表」直接跳过。
-	repartition = flag.Bool("repartition", false, "强制重建分区方案为「冷区按月 + 热区按周」（重建整表，务必先停引擎）")
+	repartition = flag.Bool("repartition", false, "强制重建分区方案为「冷区按月 + 热区按天」（重建整表，务必先停引擎）")
 
 	// 注册服务时 CreateService 会带上 -service；这里必须显式认领，
 	// 否则 flag.Parse() 会当成未知参数直接打 usage 退出。
@@ -186,6 +196,22 @@ func main() {
 		}
 		if *maintDry {
 			fmt.Println("（预演模式：什么都没删。去掉 -maint-dry 才会真跑）")
+		}
+		return
+	}
+
+	// ---- 每日 K 线清理：删掉早于 KlineRetainDays（当前 10 天）的 K 线 ----
+	//  用户口径「只能查询保存最近 10 天数据 + 自动每天凌晨删除数据一次」。
+	//  常驻服务里每天凌晨自动跑一次，这两个开关是给手工核对用的。
+	if *maintDaily || *maintDailyDry {
+		rep, err := service.RunDailyMaintenance(*maintDailyDry)
+		fmt.Print(service.MaintenanceText(rep))
+		if err != nil {
+			fmt.Printf("✘ %v\n", err)
+			os.Exit(1)
+		}
+		if *maintDailyDry {
+			fmt.Println("（预演模式：什么都没删。去掉 -maint-daily-dry 才会真删）")
 		}
 		return
 	}
@@ -252,14 +278,15 @@ func main() {
 		return
 	}
 
-	// ---- 一次性：把大表改造成按月分区 ----
+	// ---- 一次性：把大表改造成分区表 ----
 	//
-	// 这不是启动路径上的动作：把 788MB 的 kline 从「无分区」变成「有分区」，
-	// MySQL 只能 ALGORITHM=COPY，全程 LOCK=SHARED 禁写。所以必须停机做：
+	// 这不是启动路径上的动作：把整张 kline 从「无分区」变成「有分区」，
+	// 或改分片粒度（按周 → 按天），MySQL 只能 ALGORITHM=COPY，
+	// 全程 LOCK=SHARED 禁写。所以必须停机做：
 	//     net stop OKXWeb
-	//     bin\okxweb.exe -partition
+	//     bin\okxweb.exe -repartition
 	//     net start OKXWeb
-	// 之后每个月的「补新分区」是 INPLACE/LOCK=NONE，由启动流程自动完成。
+	// 之后每天的「补新分区」是 INPLACE/LOCK=NONE，由启动流程自动完成。
 	if *partition || *repartition {
 		mcfg := repo.DefaultMySQLConfig()
 		applyMySQLFlags(&mcfg)
@@ -274,7 +301,7 @@ func main() {
 
 		mode := "按需分区（已是分区表则跳过）"
 		if *repartition {
-			mode = "强制重建分区方案（冷区按月 + 热区按周）"
+			mode = "强制重建分区方案（冷区按月 + 热区按天）"
 		}
 		fmt.Printf("== 分区改造：%s ==\n", mode)
 		ok := true
@@ -291,8 +318,9 @@ func main() {
 				continue
 			}
 			names, _ := s["names"].([]string)
-			fmt.Printf("  · %-14s 分区 %d 个（月 %v / 周 %v）：%s\n",
-				s["table"], len(names), s["monthly"], s["weekly"], strings.Join(names, " "))
+			fmt.Printf("  · %-14s 分区 %d 个（日 %v / 月 %v / 老周分区 %v / 兜底 %v）：%s\n",
+				s["table"], len(names), s["daily"], s["monthly"], s["legacyWeeks"], s["old"],
+				strings.Join(names, " "))
 		}
 		fmt.Println("-- 各分区占用 --")
 		for _, t := range repo.PartitionedTables {
@@ -354,8 +382,8 @@ func runApp(ctx context.Context) error {
 	if mcfg.Password == "" {
 		fmt.Printf("\n%s\n\n", repo.MySQLHint())
 	}
-	fmt.Printf(" 回补天数   : %d\n", *days)
-	fmt.Printf(" 回补周期   : %s\n", *bars)
+	fmt.Printf(" 回补天数   : %d%s\n", resolveBackfillDays(*days), daysNote(*days))
+	fmt.Printf(" 回补周期   : %s\n", backfillBarsText(*bars))
 	fmt.Printf(" 回补并发   : %d\n", *workers)
 	fmt.Printf(" 网页地址   : http://%s\n", *addr)
 	fmt.Printf(" 对外入口   : http://<本机IP>/（由 Apache 80 反代）\n")
@@ -446,13 +474,22 @@ func runApp(ctx context.Context) error {
 	feed := service.NewDataFeed(*proxy)
 
 	cfg := service.DefaultBackfillConfig()
-	cfg.Days = *days
+	cfg.Days = resolveBackfillDays(*days)
 	cfg.Workers = *workers
 	cfg.RealtimeSec = *rtSec
 	cfg.FocusN = *focusN
 	cfg.Scope = *scope
 	cfg.MinFreeMB = *minFree
 	cfg.RootDir = root
+	// 「续最新一根」只做扫描真正会用的那批（top_n_by_volume，默认 80）。
+	//
+	// 不截的话，四周期 × 169 个可交易合约 = 676 条/轮，最少 67.6 秒
+	// —— 超过 1m K 线的一分钟，1m 本地永远不新鲜，扫描只能一直回退网络，
+	// 和续 K 线抢同一把 OKX 闸门，把 eng.scan 顶到 100 秒以上、出场巡检饿死。
+	// 详见 service.BackfillConfig.RefreshTopNFn 的注释。
+	//
+	// 走回调而不是取一次定值：top_n_by_volume 是热插拔的，启动读一次会跟 JSON 脱节。
+	cfg.RefreshTopNFn = func() int { return strategyStore.Get().TopNByVolume }
 	if *focus != "" {
 		for _, s := range strings.Split(*focus, ",") {
 			if s = strings.TrimSpace(s); s != "" {
@@ -490,7 +527,7 @@ func runApp(ctx context.Context) error {
 	//   不买美股/ETF/商品 + 不买刚上线 + 不买要下线 + 最小一手保证金 ≤ 准入上限
 	//   （上限来自 configs/okx_strategy.json 的 max_order_margin_usdt）
 	service.SetAnnounceCacheDB(db)
-	applyUniverseFilter(db, bf, strategyStore, *days)
+	applyUniverseFilter(db, bf, strategyStore, resolveBackfillDays(*days))
 
 	if *initOnly {
 		fmt.Println("[DB] -init-only：建库建表 + 准入过滤完成，退出")
@@ -984,4 +1021,42 @@ func walkUpToRoot(dir string, max int) string {
 		dir = parent
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// 回补参数解析（2026-10-01 二期）
+// ---------------------------------------------------------------------------
+
+// resolveBackfillDays 把 -days 解析成真正要回补的天数。
+//
+//	-days > 0  → 用它（运维想临时多拉几天历史时用）
+//	-days <= 0 → 用配置里的 kline_retain_days（当前 10 天）
+//
+// 为什么要这个函数而不是把 flag 默认值写成 10：
+// 保留窗口的唯一真源是 configs/okx_strategy.json，写死两份迟早走岔
+// ——「回补 365 天、只留 10 天」那种自相矛盾的组合就是这么来的。
+func resolveBackfillDays(flagVal int) int {
+	if flagVal > 0 {
+		return flagVal
+	}
+	if d := repo.KlineRetainDays(); d > 0 {
+		return d
+	}
+	return 10
+}
+
+// daysNote 打印时标注这个天数是从哪来的，方便排查「为什么只补了 10 天」
+func daysNote(flagVal int) string {
+	if flagVal > 0 {
+		return "（-days 指定）"
+	}
+	return "（跟随 kline_retain_days）"
+}
+
+// backfillBarsText 打印实际要回补的周期（-bars 留空 = model.EnabledBars）
+func backfillBarsText(flagVal string) string {
+	if strings.TrimSpace(flagVal) == "" {
+		return strings.Join(model.EnabledBars, ",") + "（全部，来自 model.EnabledBars）"
+	}
+	return flagVal
 }

@@ -344,11 +344,27 @@ func (s *Server) klineWindow(inst, bar string, days int, beforeTs int64, limit i
 // /api/kline
 // ---------------------------------------------------------------------------
 
+// clampQueryDays 把查询窗口夹在 K 线保留窗口内。
+//
+// ★ 2026-10-01 二期：用户口径「只能查询保存最近 10 天数据，不能多」★
+//
+// 库里本来就只留 10 天（每日任务删超期的），这里再夹一层是为了：
+//   ① 前端传 days=30/365 时不会去算一个「跨越不存在的历史」的窗口；
+//   ② 接口语义与保留策略一致 —— 写进文档的口径就是接口强制的口径，
+//      不依赖调用方自觉。
+// KlineRetainDays() <= 0（配置写坏）时不夹，宁可多查也不要变成查不到。
+func clampQueryDays(days int) int {
+	if cap := repo.KlineRetainDays(); cap > 0 && days > cap {
+		return cap
+	}
+	return days
+}
+
 func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error) {
 	q := r.URL.Query()
 	inst := q.Get("inst")
 	bar := q.Get("bar")
-	days := atoiDefault(q.Get("days"), s.bf.Config().Days)
+	days := clampQueryDays(atoiDefault(q.Get("days"), s.bf.Config().Days))
 	limit := atoiDefault(q.Get("limit"), 0)
 	before := int64(atoiDefault(q.Get("before"), 0))
 	auto := q.Get("auto") != "0" // 默认自动按需回补
@@ -412,7 +428,7 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 	q := r.URL.Query()
 	inst := q.Get("inst")
 	bar := q.Get("bar")
-	days := atoiDefault(q.Get("days"), s.bf.Config().Days)
+	days := clampQueryDays(atoiDefault(q.Get("days"), s.bf.Config().Days))
 	limit := atoiDefault(q.Get("limit"), DefaultKlinePage)
 	before := int64(atoiDefault(q.Get("before"), 0))
 	if inst == "" || !service.IsSupportedBar(bar) {

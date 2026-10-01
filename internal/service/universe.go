@@ -37,6 +37,7 @@ import (
 	"sort"
 	"time"
 
+	"finally-main/internal/conf"
 	"finally-main/internal/model"
 )
 
@@ -79,7 +80,7 @@ type UniversePolicy struct {
 //
 // ★ 这不是「要求」—— 真正生效的口径来自 configs/okx_strategy.json
 //   （`max_order_margin_usdt` / `entry.*` / `min_quote_volume_24h` 等），
-//   改完热生效。这个函数只在调用方没给策略时兜底，当前生产路径不使用它。
+//   改完热生效。这个函数只在调用方没给策略时兜底。
 func DefaultUniversePolicy() UniversePolicy {
 	return UniversePolicy{
 		ExcludeStockETF:       true,
@@ -91,6 +92,51 @@ func DefaultUniversePolicy() UniversePolicy {
 		MaxMarginUSDT:         0.5,
 		MinQuoteVolume24h:     0,
 	}
+}
+
+// UniversePolicyFromConfig 从策略配置（真源 configs/okx_strategy.json）拼出准入策略。
+//
+// ★★ 准入策略只能从这里造，不要在调用点手写 UniversePolicy 字面量 ★★
+//
+// 踩过的坑（2026-10-01 二期，静默失效，没有任何报错）：
+//
+//	Scan() 里原来手写了一个字面量。新增 `margin_policy` 字段时**漏填了 MarginPolicy**，
+//	它一空，OrderMarginCap() 就跳过了 min_one 分支、掉回 MarginUSDT：
+//
+//	    min_one → MaxMarginUSDT = 1.0U   （应该走这里，全市场 170 个都能买）
+//	    掉回后 → MarginUSDT     = 0.01U  （实际走这里，只剩 33 个候选）
+//
+//	表现是日志里「合约准入过滤：480 → 33（… 资金不够 -137 …）」，
+//	而配置、README、网页面板全都写着「准入上限 1U / 170 个合约」——
+//	**同一个量被两条路算过，口径不一致**，属于最阴的一类 bug：
+//	不崩、不报错、日志干净，只是策略悄悄只做 1/5 的币。
+//
+// 所以把构造收成一个函数：以后加/删字段只改这一处，调用点不可能漏填。
+func UniversePolicyFromConfig(cfg *conf.Config) UniversePolicy {
+	if cfg == nil {
+		return DefaultUniversePolicy()
+	}
+	p := DefaultUniversePolicy()
+	p.ExcludeStockETF = cfg.ExcludeStockETF
+	p.ExcludeNewListingDays = cfg.ExcludeNewListingDays
+	p.ExcludeDelisting = cfg.ExcludeDelisting
+	p.MinQuoteVolume24h = cfg.MinQuoteVolume24h
+	p.ExtraExclude = cfg.ExcludeInst
+	if cfg.Entry != nil {
+		p.MarginUSDT = cfg.Entry.MarginUSDT
+		p.Leverage = cfg.Entry.Leverage
+		p.MarginPolicy = cfg.Entry.MarginPolicy
+	}
+	// 上限统一走 Config.OrderMarginCap()：max_order_margin_usdt 与
+	// entry.max_margin_usdt 的优先级已经在那边理清了，别在这里再判一次
+	// （两处各判一次 = 又是「同一个量两条路算」）。
+	p.MaxMarginUSDT = cfg.OrderMarginCap()
+	// 老配置里没有 margin_policy 这个键：归一化会补成 min_one，
+	// 这里再兜一次，保证「字段为空」永远不会被解读成「严格 0.01U」。
+	if p.MarginPolicy == "" {
+		p.MarginPolicy = "min_one"
+	}
+	return p
 }
 
 // OrderMarginCap 放宽后的单笔保证金天花板。

@@ -1,14 +1,27 @@
 package service
 
-// addon_test.go —— 加仓规则（15m 先跌 0.5% 后转涨 → 补 1/3）的实测验证
+// addon_test.go —— 加仓规则的实测验证
 //
-// 用真实形状的 15m K 线跑四类场景：
-//   A. 标准的「先跌 0.6% → 收阳转涨」      → 必须加仓
-//   B. 只跌 0.2%（没跌够）                  → 不加
-//   C. 跌够了但最后一根是阴线（还没转涨）    → 不加
-//   D. 跌够 + 转涨，但已经是第 2 次（上限 2）→ 不加
+// ★ 2026-10-01 二期口径变更 ★
+//   旧口径：15m 先跌 0.5% 后转涨 → 补 1/3
+//   新口径：**与买入条件完全一致** —— 8 因子共振（score ≥ cfg.ThresholdFor）
+//           且次数不限（max_times = 0）
 //
-// 另外校验：加仓额 ≈ 原保证金 1/3、合并后的加权均价算得对。
+// 所以这个文件整体重写，覆盖的场景：
+//   A. 8/8 全中 + 晚于开仓那根            → 必须加仓，金额 = 原保证金 1/3
+//   B. 只有 7/8（差一个因子）              → 不加（这正是「条件与买入一致」的意义）
+//   C. 指标暖机不足（Ready=false）         → 不加
+//   D. 信号就是开仓那一根（同一根）        → 不加（否则开仓瞬间重复下单）
+//   E. 间隔未到 min_gap_bars               → 不加
+//   F. max_times = 0（不限）+ 已加过 99 次 → **仍然加**（二期核心变更）
+//   G. max_times = 3 + 已加 3 次           → 不加（写了正数才限制）
+//   H. 开关关闭                            → 不加
+//   I. 金额口径：预算 = 原保证金 × 1/3
+//   J. 合并后的加权均价 / 张数 / 保证金
+//   K. 「auto」周期解析：用仓位自己的周期
+//
+// 另外校验：加仓阈值与买入阈值是**同一个函数**（cfg.ThresholdFor），
+// 否则「加仓条件与买入一致」就只是句话。
 
 import (
 	"testing"
@@ -19,7 +32,7 @@ import (
 
 const barMs = 15 * 60 * 1000
 
-// mkAddonCfg 一套最小可用的配置：0.1U/笔、20x、准入上限 0.5U
+// mkAddonCfg 一套最小可用的配置（用内置兜底值，再按需覆盖）
 func mkAddonCfg() *conf.Config {
 	return conf.DefaultConfig()
 }
@@ -32,185 +45,233 @@ func mkIns() Instrument {
 	}
 }
 
-// candles 按 (o,h,l,c) 造一批连续的 15m 已收盘 K 线
-func candles(startTs int64, rows ...[4]float64) []Candle {
-	out := make([]Candle, 0, len(rows))
-	for i, r := range rows {
-		out = append(out, Candle{
-			Ts: startTs + int64(i)*barMs,
-			O:  r[0], H: r[1], L: r[2], C: r[3], V: 1000,
-			Confirm: true,
-		})
+// mkSignal 造一个「已收盘那根」的共振结果
+//
+// score 直接决定能不能过阈值；hitList 只用于日志/原因文本。
+func mkSignal(score int, ts int64) *Signal {
+	return &Signal{
+		InstID: "TEST-USDT-SWAP", Bar: "15m", Ts: ts,
+		Close: 1.5950, Mask: (1 << uint(score)) - 1, Score: score,
+		HitList: "势能,摩擦,动能,RSI,布林,MACD,TD9,放量", Ready: true,
 	}
-	return out
 }
 
+// basePos 一个 15m 开的仓：0.1U 保证金、20x、开仓价 1.6、开仓时间 barMs*10
 func basePos(entryPx float64) repo.OpenPos {
 	return repo.OpenPos{
 		ID: 1, InstID: "TEST-USDT-SWAP", Sz: 1, EntryPx: entryPx,
-		Margin: 0.1, Leverage: 20, OpenTs: 1000, Bar: "15m",
+		Margin: 0.1, Leverage: 20, OpenTs: barMs * 10, Bar: "15m",
 	}
 }
 
-func TestAddon_FiresOnDropThenRise(t *testing.T) {
+// ---------------------------------------------------------------------------
+// A. 满共振 → 加仓
+// ---------------------------------------------------------------------------
+
+func TestAddon_FiresOnFullResonance(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
 	cfg.Entry.MaxMarginUSDT = 0.5
 
 	ins := mkIns()
 	p := basePos(1.6000)
-	// 开仓价 1.6000；跌到 1.5904（-0.60%）；最后一根 1.5904→1.5950 收阳且高于前一根
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5990, 1.5995},
-		[4]float64{1.5995, 1.5998, 1.5904, 1.5910}, // 低点 1.5904
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950}, // 阳线，收盘 > 前一根
-	)
-	mark := 1.5950
+	sig := mkSignal(8, barMs*11) // 比开仓那根（barMs*10）晚一根
 
-	d := decideAddon(cfg, p, mark, win, barMs, ins)
+	d := decideAddon(cfg, p, 1.5950, sig, barMs, ins)
 	if !d.Add {
-		t.Fatalf("应当加仓，但判定为不加")
+		t.Fatalf("8/8 共振 + 晚于开仓那根 → 应当加仓，实际不加")
 	}
-	// 加仓额应 = 0.1 × 1/3 = 0.03333U；20x → 0.6667U 名义
-	// 每张名义 = 1×1×1.5950 = 1.595U > 0.6667U → min_one 放大到刚好 1 张
-	if d.Margin <= 0 {
-		t.Fatalf("加仓保证金应 > 0，实际 %.6f", d.Margin)
+	if d.Margin <= 0 || d.Sz <= 0 {
+		t.Fatalf("加仓保证金/张数应 > 0，实际 margin=%.6f sz=%v", d.Margin, d.Sz)
 	}
 	if d.Margin > cfg.Entry.MaxMarginUSDT+1e-9 {
 		t.Fatalf("加仓保证金 %.4f 超过上限 %.4f", d.Margin, cfg.Entry.MaxMarginUSDT)
 	}
-	if d.Sz <= 0 {
-		t.Fatalf("加仓张数应 > 0")
+	if d.Count != p.AddonCount+1 {
+		t.Fatalf("加仓次数应为 %d，实际 %d", p.AddonCount+1, d.Count)
 	}
-	// 合并后：sz 1+1=2，均价 = (1×1.6 + 1×1.595)/2
-	wantAvg := (1*1.6000 + d.Sz*1.5950) / (1 + d.Sz)
-	if diff := d.NewAvgPx - wantAvg; diff > 1e-9 || diff < -1e-9 {
+	if d.Ts != sig.Ts {
+		t.Fatalf("加仓时间应用信号那根 K 线的时间 %d，实际 %d", sig.Ts, d.Ts)
+	}
+	wantAvg := (p.Sz*p.EntryPx + d.Sz*1.5950) / (p.Sz + d.Sz)
+	if !almostEq(d.NewAvgPx, wantAvg, 1e-9) {
 		t.Fatalf("合并均价算错：got %.8f want %.8f", d.NewAvgPx, wantAvg)
 	}
 	if d.NewMargin <= p.Margin {
 		t.Fatalf("合并保证金应增加")
 	}
-	if d.Count != 1 {
-		t.Fatalf("加仓次数应为 1，实际 %d", d.Count)
-	}
-	t.Logf("✓ 场景A 加仓 %s 张 保证金=%.4fU 新均价=%.6f（%s）",
+	t.Logf("✓ 场景A 8/8 共振 → 加仓 %s 张 保证金=%.4fU 新均价=%.6f（%s）",
 		fmtSz(d.Sz, 0), d.Margin, d.NewAvgPx, d.Reason)
 }
 
-func TestAddon_SkipWhenNotDroppedEnough(t *testing.T) {
-	cfg := mkAddonCfg()
-	cfg.Addon.Enabled = true
-	p := basePos(1.6000)
-	// 只跌到 1.5968 = -0.20%，不够 0.5%
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5980, 1.5985},
-		[4]float64{1.5985, 1.5990, 1.5968, 1.5980},
-		[4]float64{1.5980, 1.5995, 1.5975, 1.5990}, // 阳线但没跌够
-	)
-	d := decideAddon(cfg, p, 1.5990, win, barMs, mkIns())
-	if d.Add {
-		t.Fatalf("只跌 0.20%%，不该加仓，却判定为加")
-	}
-	t.Log("✓ 场景B 未跌够 0.5% → 不加")
-}
-
-func TestAddon_SkipWhenLastCandleBearish(t *testing.T) {
-	cfg := mkAddonCfg()
-	cfg.Addon.Enabled = true
-	p := basePos(1.6000)
-	// 跌够了（低点 1.5904 = -0.60%），但最后一根是阴线
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5930, 1.5900, 1.5920},
-		[4]float64{1.5920, 1.5925, 1.5880, 1.5890}, // 阴线，收盘 1.5890
-	)
-	d := decideAddon(cfg, p, 1.5890, win, barMs, mkIns())
-	if d.Add {
-		t.Fatalf("最后一根是阴线（没转涨），不该加仓")
-	}
-	t.Log("✓ 场景C 跌够但未转涨 → 不加")
-}
-
-// TestAddon_SkipAtMaxTimes 加满之后只「不再补仓」，绝不平仓。
+// TestAddon_SkipWhenScoreBelowThreshold 7/8 → 不加。
 //
-// ★ 2026-10-01 口径变更：用户要求取消「加仓次数」这条出场条件。
-//   加满 max_times 之后信号再次成立 → 什么也不做，仓位继续等
-//   +1% 止盈 / 6 小时超时 / 布林上轨。出场通道里没有一条看加仓次数。
+// 这是二期最重要的一条：用户口径「加仓条件也是和买入条件一样」，
+// 买入是 8 个全中，加仓就必须也是 8 个全中，差一个都不行。
+func TestAddon_SkipWhenScoreBelowThreshold(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(7, barMs*11), barMs, mkIns()); d.Add {
+		t.Fatalf("7/8 < 阈值 8，不该加仓")
+	}
+	// 阈值降到 7 之后，同样的信号就该加 —— 证明「阈值真的是同一个入口」
+	cfg.ScoreThreshold = 7
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(7, barMs*11), barMs, mkIns()); !d.Add {
+		t.Fatalf("阈值 7 时 7/8 应当加仓（说明加仓读的确实是 cfg.ThresholdFor）")
+	}
+	t.Log("✓ 场景B 7/8 不加；阈值降到 7 后加 —— 加仓与买入共用同一个阈值入口")
+}
+
+// TestAddon_SkipWhenNotReady 暖机不足 → 不加。
+func TestAddon_SkipWhenNotReady(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	sig := mkSignal(8, barMs*11)
+	sig.Ready = false
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); d.Add {
+		t.Fatalf("指标暖机不足（Ready=false）时不该加仓")
+	}
+	t.Log("✓ 场景C Ready=false → 不加")
+}
+
+// TestAddon_SkipOnSameBarAsEntry 信号就是开仓那一根 → 不加。
+//
+// 开仓时 trade.open_ts 写的就是触发开仓那根 K 线的时间戳，
+// 所以「sig.Ts <= p.OpenTs」正好挡住「同一根再补一次」。
+func TestAddon_SkipOnSameBarAsEntry(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000) // OpenTs = barMs*10
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, p.OpenTs), barMs, mkIns()); d.Add {
+		t.Fatalf("信号与开仓同一根 K 线时不该加仓（会变成重复下单）")
+	}
+	t.Log("✓ 场景D 同一根 K 线 → 不加")
+}
+
+// TestAddon_SkipWhenGapNotReached 距上次加仓不足 min_gap_bars → 不加。
+func TestAddon_SkipWhenGapNotReached(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.MinGapBars = 2
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	p.LastAddonTs = barMs * 11
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*12), barMs, mkIns()); d.Add {
+		t.Fatalf("距上次加仓只隔 1 根（要求 2 根）时不该加仓")
+	}
+	p.LastAddonTs = barMs * 10
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*12), barMs, mkIns()); !d.Add {
+		t.Fatalf("隔 2 根了，应当加仓")
+	}
+	t.Log("✓ 场景E 间隔 1 根不加 / 2 根加")
+}
+
+// ---------------------------------------------------------------------------
+// F/G. 次数：0 = 不限（二期核心变更）
+// ---------------------------------------------------------------------------
+
+// TestAddon_MaxTimesZeroIsUnlimited max_times=0 时加过 99 次仍然继续加。
+//
+// ★ 这是「count 类配置必须三处同改」的守门测试 ★
+// 一期在两个计数器（max_concurrent_positions / daily_max_entries）上踩过坑：
+// 归一化把 0 反压回默认值，配置里写 0 完全没用。加仓次数是同一类字段。
+func TestAddon_MaxTimesZeroIsUnlimited(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.MaxTimes = 0 // 不限
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	p.AddonCount = 99 // 已经加了 99 次
+	p.AddonMargin = 9.9
+
+	d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, mkIns())
+	if !d.Add {
+		t.Fatalf("max_times=0 = 不限，加了 99 次也应继续加，却被拦下")
+	}
+	if d.Count != 100 {
+		t.Fatalf("合并后次数应为 100，实际 %d", d.Count)
+	}
+	t.Log("✓ 场景F max_times=0（不限）→ 第 100 次照样加")
+}
+
+// TestAddon_SkipAtMaxTimes 写了正数才限制：max_times=3 且已加 3 次 → 不加。
+//
+// ★ 2026-10-01：加满之后只「不再补仓」，绝不平仓。
+//   出场只剩 +1% 止盈 / 6 小时超时 / 布林上轨，没有一条看加仓次数。
 func TestAddon_SkipAtMaxTimes(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
 	cfg.Addon.MaxTimes = 3
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
 	p := basePos(1.6000)
-	p.AddonCount = 3 // 已经加满 3 次
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950},
-	)
-	d := decideAddon(cfg, p, 1.5950, win, barMs, mkIns())
-	if d.Add {
+	p.AddonCount = 3
+
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, mkIns()); d.Add {
 		t.Fatalf("已达 max_times=3，不该再加仓")
 	}
-	t.Log("✓ 场景D 加仓次数已满 → 不加仓、也不平仓（出场不再看加仓次数）")
-}
-
-// TestAddon_MaxTimesNotReachedStillAdds 确认「没加满就照常加」没被上面的规则误伤。
-func TestAddon_MaxTimesNotReachedStillAdds(t *testing.T) {
-	cfg := mkAddonCfg()
-	cfg.Addon.Enabled = true
-	cfg.Addon.MaxTimes = 3
-	p := basePos(1.6000)
-	p.AddonCount = 2 // 加过 2 次，还剩 1 次
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950},
-	)
-	d := decideAddon(cfg, p, 1.5950, win, barMs, mkIns())
-	if !d.Add {
+	p.AddonCount = 2
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, mkIns()); !d.Add {
 		t.Fatalf("只加过 2 次（上限 3），条件成立就该继续加")
 	}
-	if d.Count != 3 {
-		t.Fatalf("合并后加仓次数应为 3，实际 %d", d.Count)
-	}
-	t.Log("✓ 场景D2 未加满 → 正常加仓，count=3")
+	t.Log("✓ 场景G 3 次已满不加 / 2 次未满继续加（且不会触发平仓）")
 }
 
 func TestAddon_SkipWhenDisabled(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = false
+	cfg.ScoreThreshold = 8
 	p := basePos(1.6000)
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950},
-	)
-	if d := decideAddon(cfg, p, 1.5950, win, barMs, mkIns()); d.Add {
+
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, mkIns()); d.Add {
 		t.Fatalf("开关关闭时不该加仓")
 	}
-	t.Log("✓ 场景E 加仓开关关闭 → 不加")
+	t.Log("✓ 场景H 加仓开关关闭 → 不加")
 }
 
+// ---------------------------------------------------------------------------
+// I/J. 金额与合并
+// ---------------------------------------------------------------------------
+
+// TestAddon_RatioIsOneThird 加仓预算 = 原持仓保证金 × 1/3（用户口径「仓位为本金的三分之一」）。
 func TestAddon_RatioIsOneThird(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
 	cfg.Addon.MarginUSDT = 0 // 走 ratio 口径
+	cfg.ScoreThreshold = 8
 	if cfg.Addon.Ratio < 0.3332 || cfg.Addon.Ratio > 0.3334 {
 		t.Fatalf("默认 ratio 应为 1/3，实际 %.6f", cfg.Addon.Ratio)
 	}
 
 	// 造一个「每张名义 0.30U」的小合约：0.0333U×20x = 0.6667U 名义 → 能买 2 张
 	ins := Instrument{InstID: "T", CtVal: 0.3, CtMult: 1, LotSz: 1, MinSz: 1, LotSzDec: 0}
-	p := basePos(1.0000)
-	win := candles(barMs*1,
-		[4]float64{1.0000, 1.0005, 0.9940, 0.9950},
-		[4]float64{0.9950, 0.9960, 0.9950, 0.9960},
-		[4]float64{0.9960, 0.9990, 0.9955, 0.9985},
-	)
-	d := decideAddon(cfg, p, 0.9985, win, barMs, ins)
+	p := basePos(1.0000) // Margin 0.1 → 预算 0.03333U
+	d := decideAddon(cfg, p, 0.9985, mkSignal(8, barMs*11), barMs, ins)
 	if !d.Add {
 		t.Fatalf("应当加仓")
 	}
@@ -218,30 +279,28 @@ func TestAddon_RatioIsOneThird(t *testing.T) {
 	if d.Sz != 2 {
 		t.Logf("张数 = %v（每张名义 %.4f）", d.Sz, 0.3*0.9985)
 	}
-	t.Logf("✓ 场景F 按 1/3 预算下单：%s 张 · 保证金 %.4fU · 均价 %.6f",
+	t.Logf("✓ 场景I 按 1/3 预算下单：%s 张 · 保证金 %.4fU · 均价 %.6f",
 		fmtSz(d.Sz, 0), d.Margin, d.NewAvgPx)
 }
 
 func TestAddon_WeightedAverage(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 8
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
 	ins := mkIns()
 	p := basePos(1.6000)
 	p.Sz = 2
 	p.Margin = 0.2
 
-	win := candles(barMs*1,
-		[4]float64{1.6000, 1.6005, 1.5904, 1.5910},
-		[4]float64{1.5910, 1.5920, 1.5900, 1.5905},
-		[4]float64{1.5905, 1.5952, 1.5903, 1.5950},
-	)
-	mark := 1.5950
-	d := decideAddon(cfg, p, mark, win, barMs, ins)
+	d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, ins)
 	if !d.Add {
 		t.Fatalf("应当加仓")
 	}
 	expSz := p.Sz + d.Sz
-	expAvg := (p.Sz*p.EntryPx + d.Sz*mark) / expSz
+	expAvg := (p.Sz*p.EntryPx + d.Sz*1.5950) / expSz
 	expMargin := p.Margin + d.Margin
 	if d.NewSz != expSz {
 		t.Fatalf("合并张数 got %v want %v", d.NewSz, expSz)
@@ -252,8 +311,47 @@ func TestAddon_WeightedAverage(t *testing.T) {
 	if !almostEq(d.NewMargin, expMargin, 1e-9) {
 		t.Fatalf("合并保证金 got %.8f want %.8f", d.NewMargin, expMargin)
 	}
-	t.Logf("✓ 场景G 2 张@1.6000 + %s 张@%.4f → 均价 %.6f（原 1.6000，摊薄 %.4f%%）",
-		fmtSz(d.Sz, 0), mark, d.NewAvgPx, (1-d.NewAvgPx/1.6000)*100)
+	t.Logf("✓ 场景J 2 张@1.6000 + %s 张@%.4f → 均价 %.6f（原 1.6000，摊薄 %.4f%%）",
+		fmtSz(d.Sz, 0), 1.5950, d.NewAvgPx, (1-d.NewAvgPx/1.6000)*100)
+}
+
+// ---------------------------------------------------------------------------
+// K. 周期解析
+// ---------------------------------------------------------------------------
+
+// TestAddon_AutoBarUsesPositionBar rise_bar="auto" 时按「该仓位自己的周期」判定。
+//
+// 一期四个周期都参与开仓之后，这条必须成立：
+// 1m 开的仓要按 1m 判加仓，15m 开的仓按 15m 判 —— 否则「加仓条件与买入一致」
+// 在短周期仓位上是假的（拿 15m 的信号去加 1m 的仓）。
+func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Bar = "15m"
+
+	cases := []struct {
+		name    string
+		riseBar string
+		posBar  string
+		want    string
+	}{
+		{"auto + 1m 仓", conf.AddonAutoBar, "1m", "1m"},
+		{"auto + 5m 仓", conf.AddonAutoBar, "5m", "5m"},
+		{"auto + 15m 仓", conf.AddonAutoBar, "15m", "15m"},
+		{"auto + 老仓（bar 为空）→ 退回主周期", conf.AddonAutoBar, "", "15m"},
+		{"显式写 15m → 忽略仓位周期", "15m", "1m", "15m"},
+		// 空串与 "auto" 等价：fillDefaults 本来就会把空串补成 auto，
+		// 这里再认一次是为了「配置块缺失 / 手写漏了字段」时行为一致。
+		{"空串等价于 auto", "", "1m", "1m"},
+		{"空串 + 老仓 → 退回主周期", "", "", "15m"},
+	}
+	for _, tc := range cases {
+		got := addonBarFor(tc.riseBar, cfg.Bar, tc.posBar)
+		if got != tc.want {
+			t.Errorf("%s：addonBarFor(%q, %q, %q) = %q，期望 %q",
+				tc.name, tc.riseBar, cfg.Bar, tc.posBar, got, tc.want)
+		}
+	}
+	t.Log("✓ 场景K auto 用仓位自己的周期；老仓 / 空值退回主周期")
 }
 
 func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }

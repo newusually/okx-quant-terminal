@@ -8,7 +8,10 @@ const state = {
   curInst: '',
   curBar: '15m',
   days: 30,
-  bars: ['15m'],   // 全库只保留 15m：4H/1H/5m（以及更早的 1m/3m）已彻底下线
+  // ★ 2026-10-01 二期：1m/3m/5m 重新上线，共 4 个周期（选项卡由 /api/state 的
+  //   bars 字段渲染，这里只是首屏兜底 —— 真源是 model.EnabledBars）。
+  //   四个周期都参与扫描开仓，K 线只保留最近 10 天（每天凌晨清一次）。
+  bars: ['1m', '3m', '5m', '15m'],
   marginText: '',
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
   universe: null,       // 准入统计 {total,kept,dropped,byReason}
@@ -128,7 +131,7 @@ function renderPager(key, total, onGo) {
 }
 
 // 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
-const BAR_MS = { '15m': 900e3 };
+const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3 };
 
 // 币安配色：涨绿跌红
 const C_UP = '#0ecb81', C_DOWN = '#f6465d';
@@ -1231,7 +1234,7 @@ async function loadKline(reset) {
 }
 
 // 各周期的轮询间隔：短周期勤一点，长周期没必要
-const REFRESH_MS = { '15m': 8000 };
+const REFRESH_MS = { '1m': 3000, '3m': 4000, '5m': 6000, '15m': 8000 };
 
 function scheduleKlineRefresh() {
   if (klineTimer) clearTimeout(klineTimer);

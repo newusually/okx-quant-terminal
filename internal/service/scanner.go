@@ -209,16 +209,11 @@ func Scan(cfg *conf.Config, cli *OKXClient, bar string, kdb KlineReader) (*ScanR
 		delistSet = DelistSymbolSet(LoadDelistList(cli.AnnouncementFetcher(), nil, uni, cfg.ExcludeNewListingDays+30))
 	}
 
-	policy := UniversePolicy{
-		ExcludeStockETF:       cfg.ExcludeStockETF,
-		ExcludeNewListingDays: cfg.ExcludeNewListingDays,
-		ExcludeDelisting:      cfg.ExcludeDelisting,
-		MarginUSDT:            cfg.Entry.MarginUSDT,
-		Leverage:              cfg.Entry.Leverage,
-		MaxMarginUSDT:         cfg.OrderMarginCap(),
-		MinQuoteVolume24h:     cfg.MinQuoteVolume24h,
-		ExtraExclude:          cfg.ExcludeInst,
-	}
+	// ★ 准入策略必须由 UniversePolicyFromConfig 统一构造 ★
+	//   这里以前手写了一个字面量，新增 margin_policy 时漏填了 MarginPolicy，
+	//   导致准入上限从 1U 悄悄掉成 0.01U（480 → 33 个候选，日志报「资金不够 -137」）。
+	//   详见该函数的注释。
+	policy := UniversePolicyFromConfig(cfg)
 	kept, fst := FilterUniverse(mList, mTickers, delistSet, policy)
 	if fst.DroppedCategory+fst.DroppedNew+fst.DroppedDelist+fst.DroppedNotional > 0 {
 		logx.Logf("INFO", "合约准入过滤：%d → %d（美股ETF -%d，新上线 -%d，待下线 -%d，资金不够 -%d，非live -%d）",

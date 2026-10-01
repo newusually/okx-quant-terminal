@@ -55,34 +55,49 @@ type ExitCfg struct {
 	StopLossPct float64 `json:"stop_loss_pct"`
 }
 
-// AddonCfg 加仓（浮亏补仓 / 摊薄均价）。
+// AddonAutoBar RiseBar 的取值：用「该仓位自己的周期」。
 //
-// 现行口径（用户指定）：
+// 加仓条件已改成与买入一致（8 指标共振），而买入是按某个周期扫出来的，
+// 所以加仓也应该按「这笔仓位当初是哪个周期开的」去判 —— 1m 开的仓按 1m 判、
+// 15m 开的仓按 15m 判。写 "auto" 就是让引擎去读 p.Bar。
+const AddonAutoBar = "auto"
+
+// AddonCfg 加仓（补仓 / 摊薄均价）。
+//
+// 现行口径（2026-10-01 二期，用户指定）：
 //
 //	加仓额 = 原持仓保证金 × Ratio（Ratio 默认 1/3）
-//	触发  = 15m 周期上「先跌 DropPct%（默认 0.5%）」然后「K 线重新转涨」
+//	触发   = **与买入条件完全一致**：该周期最后一根已收盘 K 线 8 个因子全中
+//	次数   = **不限**（MaxTimes = 0）
 //
-// 也就是：开仓后价格先跌够 0.5%，等 15m 收出一根阳线且高于前一根收盘价，
-// 才补 1/3 的仓位进去。不抄底、不追跌，只做反转确认后的一次加仓。
+// ★ 原来的「15m 先跌 DropPct% 后转涨」口径已下线（用户：「加仓条件也是和买入条件一样」）。
+//   DropPct / LookbackBars / OnlyWhenPriceUp 三个字段保留只为读兼容旧配置，
+//   新逻辑不再读它们。
 type AddonCfg struct {
 	Enabled bool `json:"enabled"`
 
 	// Ratio 加仓额 = 原持仓保证金 × Ratio。默认 1/3。
 	Ratio float64 `json:"ratio"`
 
-	// DropPct 先要跌这么多（%）才算「跌过」。默认 0.5。
+	// DropPct 【已废弃】旧口径「先跌 N%」；加仓条件已改成与买入一致的 8 因子共振，
+	//   本字段只为读兼容旧配置保留，新逻辑不读。
 	DropPct float64 `json:"drop_pct"`
 
-	// RiseBar 用哪个周期判断「转涨」。默认 15m。
+	// RiseBar 用哪个周期判断 8 因子共振。默认 AddonAutoBar（"auto"）=
+	//   用「该仓位自己的周期」（1m 开的按 1m 判、15m 开的按 15m 判）；
+	//   老仓（库 bar 列为空）退回配置里的主周期 cfg.Bar。
 	RiseBar string `json:"rise_bar"`
 
-	// LookbackBars 回看多少根 RiseBar 找「先跌」的低点。默认 24（15m × 24 = 6 小时）。
+	// LookbackBars 【已废弃】旧口径「回看多少根找先跌的低点」；
+	//   「只取开仓之后那根已收盘 K 线」现在由 decideAddon 里 sig.Ts > p.OpenTs 保证。
 	LookbackBars int `json:"lookback_bars"`
 
-	// MaxTimes 每个仓位最多加几次。默认 3。
+	// MaxTimes 每个仓位最多加几次。**<= 0 = 不限**（默认 0）。
 	//
 	// ★ 注意：这只限制「还能不能继续补仓」，**不是**出场条件。
-	//   2026-10-01 起「加满就自动平仓」那条规则已删除（用户要求取消）。
+	//   2026-10-01 起「加满就自动平仓」那条规则已删除（用户要求取消），
+	//   runAddons 的第二个返回值恒为空。
+	//   ★ 判定处必须带 `MaxTimes > 0` 前置，否则 0 会被当成「已达上限 0」第一笔就拦掉。
 	MaxTimes int `json:"max_times"`
 
 	// MinGapBars 两次加仓之间至少隔多少根 RiseBar。默认 1。
@@ -374,9 +389,12 @@ func defaultConfig() *Config {
 		Enabled:           true,
 		DryRun:            true,
 		OrderVia:          "go",
-		Bar:               "15m",
-		BarsEnabled:       []string{"15m"},
-		SignalBars:        []string{"15m"},
+		Bar: "15m",
+		// ★ 2026-10-01 二期：1m/3m/5m 重新上线（用户口径「选项卡重新生成并补充数据」）。
+		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威，
+		//   这里只是「配置块缺失」时的兜底。
+		BarsEnabled:       []string{"1m", "3m", "5m", "15m"},
+		SignalBars:        []string{"1m", "3m", "5m", "15m"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -393,41 +411,47 @@ func defaultConfig() *Config {
 		Workers:               4,
 		CandleLimit:           300,
 		HistoryPages:          2,
-		ScoreThreshold:        6,
-		ScoreThresholdMap:     map[string]int{"BTC-USDT-SWAP": 7, "ETH-USDT-SWAP": 7},
+		// ★ 2026-10-01 二期：阈值 6 → 8（用户口径「8 个同时共振指标才买入」）。
+		//   兜底里也不给 BTC/ETH 单独放宽 —— 用户要的是「全市场一律 8 个全中」。
+		ScoreThreshold:        8,
+		ScoreThresholdMap:     map[string]int{},
 		SignalTimeoutSec:      900,
 		RequestTimeoutSec:     20,
 		Entry: &EntryCfg{
 			TdMode: "isolated", PosSide: "net", OrdType: "market",
-			MarginUSDT: 1.0, Leverage: 20,
+			MarginUSDT: 0.01, Leverage: 20,
 			// ★ 2026-10-01：MaxConcurrentPositions / DailyMaxEntries 用 **0 = 不限**
 			// （用户口径「取消限制」）。这两个的兜底值也刻意设成 0，
 			// 免得「entry 块缺失 / 键名写错」时限制悄悄复活 —— 那正是用户这次反馈的现象。
 			// 真正的兜底是账户可用余额与 risk.* 那几条，不是这里。
 			MaxConcurrentPositions: 0, CooldownBars: 6, DailyMaxEntries: 0,
-			// ★ 2026-10-01 起单笔口径 0.1U → 1U（用户：「改成 1 美金每次交易」）。
-			// 目标每笔 1 U 保证金；合约准入要求「最小一手保证金 ≤ max_order_margin_usdt」，
-			// 后者在 configs/okx_strategy.json 里配（当前 1.5U），改完热生效。
-			// 1U 买不起 1 张的合约会放大到刚好买 1 张来下单，绝不超过 MaxMarginUSDT。
-			MarginPolicy: "min_one", MaxMarginUSDT: 1.5,
+			// ★ 2026-10-01 二期：单笔口径 1U → **0.01U**（用户：「买入金额是 0.01 美金」）。
+			//   0.01U × 20x = 0.2U 名义，绝大多数合约连最小一手都买不起，
+			//   所以配 min_one 口径：买得起就买 0.01U，买不起就放大到「刚好 1 张」，
+			//   硬顶 MaxMarginUSDT = 1U（与准入上限 max_order_margin_usdt 同值）。
+			//   实测 170 个可交易合约里 32 个能真按 0.01U 成交，其余落在 0.01~0.73U。
+			MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
 		},
 		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
 			MaxHoldBars: 0, MaxHoldMinutes: 360, StopLossPct: 0},
-		// 加仓：15m 先跌 0.5% 再转涨 → 补原仓位的 1/3（不超过 max_margin_usdt）
+		// 加仓：触发条件**与买入完全一致**（8 指标全中），金额 = 原持仓保证金 × 1/3
 		//
-		// ★ 「加满就自动平仓」已删除（用户要求取消加仓次数这条出场条件）。
-		//   MaxTimes 只限制还能补几次，加满后仓位继续等止盈 / 超时 / 布林上轨。
+		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
+		//   用户口径「加仓条件也是和买入条件一样」。
+		// ★ MaxTimes = 0 = **不限**（用户口径「加仓没有任何限制」）；
+		//   RiseBar = "auto" = 用「该仓位自己的周期」（p.Bar），
+		//   这样 1m 开的仓按 1m 判、15m 开的仓按 15m 判。
 		Addon: &AddonCfg{
-			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: "15m",
-			LookbackBars: 24, MaxTimes: 3, MinGapBars: 1,
+			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: AddonAutoBar,
+			LookbackBars: 24, MaxTimes: 0, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
 		Risk: &RiskCfg{
 			// 小资金口径（账户就几毛到几 U）：
 			//   百分比类的保护要按笔算，不能用「5U 可用余额」「30% 总保证金」这种大账户默认值。
-			//   ★ 单笔已是 1U，可用余额门槛同步抬到 1U，否则会在保证金不足时白试下单。
+			//   ★ 单笔已降到 0.01U，可用余额门槛同步降到 0.1U。
 			AccountEquityStop: 0, DailyLossStopPct: 50, MaxTotalMarginPct: 100,
-			MinAvailableUSDT: 1.0, ConsecutiveLossPause: 5, PauseOnAPIError: 10,
+			MinAvailableUSDT: 0.1, ConsecutiveLossPause: 5, PauseOnAPIError: 10,
 		},
 		AI: &AICfg{
 			Enabled: true, Provider: "openai_compatible",
@@ -444,8 +468,17 @@ func defaultConfig() *Config {
 			Host: "127.0.0.1", Port: 3306,
 			User: MySQLUser(), Password: mysqlPass, Database: DefaultMySQLDatabase,
 			MaxOpenConns: 64, MaxIdleConns: 32, BatchSize: 500,
-			// K 线留 1 年（用户口径），记录表 30 天，日志 30 天 —— 三者独立。
-			KeepKlineDays: 30, KlineRetainDays: 365, RetainDays: 30, LogRetainDays: 30,
+			// ★ 2026-10-01 二期：K 线保留 365 天 → **10 天**（用户口径
+			//   「只能查询保存最近 10 天数据，不能多，多出来就删除」）。
+			//   记录表仍是独立的 30 天红线，两者互不影响。
+			//
+			// ★ KeepKlineDays（废弃的老键）的兜底值也顺手改成 0 ★
+			//   原来它是 30，而归一化的顺序是「先把 KeepKlineDays 兜成 30，
+			//   再让 KlineRetainDays 去沿用 KeepKlineDays」——
+			//   于是「两个键都没写」时拿到的是 30 而不是 10，
+			//   真实口径被一个废弃字段的默认值劫持。改成 0 之后，
+			//   只有老配置文件里**显式写了** keep_kline_days 才会被沿用。
+			KeepKlineDays: 0, KlineRetainDays: 10, RetainDays: 30, LogRetainDays: 30,
 			ArchiveDir: "archive", ArchiveMinFreeGB: 10,
 			LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
 		},
@@ -684,10 +717,14 @@ func fillDefaults(c *Config) {
 		c.Exit.MaxHoldMinutes = d.Exit.MaxHoldMinutes
 	}
 
-	// 加仓上限归一化：默认 3 次。0 或负数一律回到默认值，
-	// 否则「最多加几次」这条限制会因为 MaxTimes=0 而永远不生效。
-	if c.Addon != nil && c.Addon.MaxTimes <= 0 {
-		c.Addon.MaxTimes = d.Addon.MaxTimes
+	// 加仓次数归一化：**<= 0 = 不限**（2026-10-01 二期，用户口径「加仓没有任何限制」）。
+	//
+	// 这里原来写的是「<= 0 → 兜底回默认值 3」—— 那是同一个坑的第三次：
+	// 配置里写 0 会被归一化反压回 3，看起来改了实际还在拦。
+	// 语义与 entry.max_concurrent_positions / daily_max_entries 完全一致：
+	// 0 或负数 = 不限，判定处（internal/service/addon.go）用 `> 0` 前置。
+	if c.Addon != nil && c.Addon.MaxTimes < 0 {
+		c.Addon.MaxTimes = 0
 	}
 	if c.Addon == nil {
 		c.Addon = d.Addon
@@ -705,8 +742,8 @@ func fillDefaults(c *Config) {
 		if a.LookbackBars <= 0 {
 			a.LookbackBars = da.LookbackBars
 		}
-		if a.MaxTimes <= 0 {
-			a.MaxTimes = da.MaxTimes
+		if a.MaxTimes < 0 {
+			a.MaxTimes = 0
 		}
 		if a.MinGapBars < 0 {
 			a.MinGapBars = da.MinGapBars
@@ -787,7 +824,11 @@ func fillDefaults(c *Config) {
 			}
 		}
 		// KlineRetainDays 优先；没写就沿用老的 keep_kline_days，
-		// 再没有才用默认 365。这样老配置文件升级上来不会突然砍到 30 天。
+		// 再没有才用默认值（2026-10-01 二期起是 10 天，原来是 365）。
+		//
+		// ⚠ 顺序陷阱：上面那几行会先把 KeepKlineDays 兜成默认值，
+		//   所以它的默认值必须是 0 —— 否则「两个键都没写」时，
+		//   KlineRetainDays 会沿用那个默认值，真实口径被废弃字段劫持。
 		if s.KlineRetainDays <= 0 {
 			if s.KeepKlineDays > 0 {
 				s.KlineRetainDays = s.KeepKlineDays
