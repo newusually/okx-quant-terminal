@@ -866,6 +866,16 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 		}
 
 		reason := fmt.Sprintf("8因子共振 %d/8（%s）", s.Score, s.HitList)
+		// ★ EntryPx 这里只是「乐观初值」= 信号 K 线的收盘价，不是真实成交均价 ★
+		//
+		// 从信号收盘到市价单真成交往往隔几十秒，流动性差的小币能差 0.5%~0.8%
+		// （实测 GRASS 0.7089 → 0.7145，USELESS 0.23756 → 0.23882）。
+		// 而止盈判据是 (标记价 ÷ entry_px − 1)，基准价偏低会造成
+		// 「一开仓就成了浮盈 0.79% → 秒判止盈 → 实际倒亏手续费」。
+		//
+		// 真正的成交均价在下一轮 exitPass 里由 syncEntryPx 用 OKX 持仓的 avgPx
+		// 覆盖回来（live.go，零额外 HTTP）。所以这里写 s.Close 是可以的，
+		// **但改这个字段的任何逻辑都要记得：数据库里的 entry_px 最终会被校正。**
 		if err := store.Ingest(repo.StorePayload{
 			Trade: []repo.TradeRow{{
 				InstID: s.InstID, Side: "buy", Sz: sz, EntryPx: s.Close,

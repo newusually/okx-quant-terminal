@@ -340,6 +340,33 @@ func (s *Store) OpenPositions() ([]OpenPos, error) {
 	return out, rows.Err()
 }
 
+// SetEntryPx 用 OKX 的**真实持仓均价**覆盖本地开仓价。
+//
+// 为什么必须校正：下单时本地只能先记一个「乐观初值」——
+// trader.go 里写的是信号 K 线的收盘价（`EntryPx: s.Close`）。
+// 从信号收盘到市价单真成交往往隔几十秒，流动性差的小币能差 0.5%~0.8%。
+// 而止盈判据是 (标记价 ÷ entry_px − 1)，基准价偏低就会「一开仓就假浮盈到止盈线」
+// → 立刻市价平掉 → 实际是倒亏手续费（实测 GRASS：开仓 26 秒后平，
+// 标记「止盈 +0.79%」，OKX 真实账单 −3.68%）。
+//
+// ★ 故意**不做 round6** ★：本项目价格跨度极大（BTC 84821 与 0.0000067 的小币同库），
+// 保留 6 位小数会把后者的相对误差放大到百分之几，直接污染止盈判据。
+// 列本身是 DOUBLE，存原值即可。
+//
+// 只动 entry_px，**不动 margin** —— margin 是下单前按预算算出来、已参与
+// 当日保证金累计与风控口径的，改它会把「占用保证金」这个数弄脏。
+func (s *Store) SetEntryPx(instID string, px float64) error {
+	if instID == "" || px <= 0 {
+		return nil
+	}
+	db, err := s.open()
+	if err != nil {
+		return err
+	}
+	_, err = db.sql.Exec(`UPDATE trade SET entry_px=? WHERE inst_id=? AND status='open'`, px, instID)
+	return err
+}
+
 // ApplyAddon 把一次加仓「合并」进原持仓行。
 //
 // 加仓不新开一条持仓记录，就地更新张数 / 加权均价 / 保证金，

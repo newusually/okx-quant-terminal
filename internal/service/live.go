@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,6 +390,15 @@ func exitPass() (int, *Account, error) {
 	// 都会去发一张注定被拒的平仓单，并吃掉一个限频令牌。
 	openPos = reconcilePositions(cfg, store, balOK && posOK, liveIDs, markPrices, openPos)
 
+	// ★ 六期（2026-10-02）：用 OKX 的真实持仓均价覆盖本地 entry_px ★
+	//
+	// 必须在 runExits **之前**：开仓时本地先记的是信号 K 线收盘价（乐观初值），
+	// 与真实成交均价能差 0.5%~0.8%，直接导致「一开仓就假浮盈 → 秒判止盈 → 实际亏手续费」。
+	// 这一轮本来就拉过 Positions，所以校正零额外 HTTP 成本。
+	if posOK && account != nil {
+		openPos = syncEntryPx(store, account.PositionList, openPos)
+	}
+
 	// 标记价没拿到的，用行情最新价补
 	//
 	// ★ 注意这里和 runExits 里各有一份一模一样的兜底（2026-10-01 记录）：
@@ -429,4 +439,86 @@ func exitPass() (int, *Account, error) {
 		}}})
 	}
 	return closed, account, nil
+}
+
+// entryPxTolerance 开仓均价的相对容差（0.02%）。差异小于它就认为本来就对，不写库 ——
+// exitPass 3 秒一轮，不设容差会造成无意义的写放大。
+const entryPxTolerance = 0.0002
+
+// syncEntryPx 用 OKX 的**真实持仓均价**覆盖本地 entry_px（只改本地库与内存，不发任何交易请求）。
+//
+// ★ 为什么必须做（2026-10-02 六期，实测事故）★
+//
+// 开仓时本地只能先记一个「乐观初值」—— trader.go 写的是 `EntryPx: s.Close`，
+// 也就是**信号 K 线的收盘价**。但市价单是几十秒后才真成交的：
+//
+//	GRASS    信号价 0.708900 → 真实成交均价 0.714500（+0.79%）
+//	USELESS  信号价 0.237560 → 真实成交均价 0.238820（+0.53%）
+//
+// 而止盈判据是 (标记价 ÷ entry_px − 1) ≥ 止盈线。基准价偏低 0.79%，
+// 等于**开仓那一刻就已经"浮盈 0.79%"** → 下一轮 3 秒巡检立刻判「止盈」→ 市价平掉 →
+// 可价格其实没动，只剩手续费，账面就是亏的。用户看到的现象正是
+// 「明明写着止盈 +0.79%，怎么是亏的」。
+//
+// 这一轮本来就拉过 Positions（幽灵仓对账要用），所以校正是**零额外 HTTP** 的。
+//
+// 两个刻意的设计：
+//
+//	① 内存里的 p.EntryPx 一起改 —— 让**同一轮**的 runExits 立刻按真实均价判止盈。
+//	   只改库的话要等下一轮（3 秒），对「秒级误平」来说 3 秒足够致命。
+//	② 用 p.Pos 张数非 0 过滤 —— 双向持仓下 OKX 会给「已平的腿」回一条 pos=0 的记录，
+//	   那种均价不能用来覆盖。
+//
+// 返回更新后的 openPos。
+// realEntryPxByInst 从 OKX 持仓列表里筛出「可以拿来当开仓成本」的均价。
+//
+// 只认**张数非 0 且均价 > 0** 的那些：双向持仓下 OKX 会给「已平的腿」回一条
+// pos=0 的记录，它的 avgPx 是上一轮的成本，拿来覆盖会把开仓价改歪。
+func realEntryPxByInst(ps []Position) map[string]float64 {
+	out := make(map[string]float64, len(ps))
+	for _, p := range ps {
+		if toF(p.Pos) == 0 {
+			continue
+		}
+		if v := toF(p.AvgPx); v > 0 {
+			out[p.InstID] = v
+		}
+	}
+	return out
+}
+
+// needSyncEntryPx 判断本地开仓价是否该被真实均价覆盖。
+//
+//	oldPx / realPx 任一非正 → false（数据不全，宁可不动）
+//	相对差 < entryPxTolerance → false（本来就对，避免 3 秒一轮的写放大）
+func needSyncEntryPx(oldPx, realPx float64) bool {
+	if oldPx <= 0 || realPx <= 0 {
+		return false
+	}
+	return math.Abs(realPx-oldPx)/oldPx >= entryPxTolerance
+}
+
+func syncEntryPx(store *repo.Store, ps []Position, openPos []repo.OpenPos) []repo.OpenPos {
+	if store == nil || len(ps) == 0 || len(openPos) == 0 {
+		return openPos
+	}
+	real := realEntryPxByInst(ps)
+	if len(real) == 0 {
+		return openPos
+	}
+	for i := range openPos {
+		p := &openPos[i]
+		px, ok := real[p.InstID]
+		if !ok || !needSyncEntryPx(p.EntryPx, px) {
+			continue
+		}
+		if err := store.SetEntryPx(p.InstID, px); err != nil {
+			logx.Logf("WARN", "%s 校正开仓均价失败（下一轮重试）：%v", p.InstID, err)
+			continue
+		}
+		logx.Logf("SIGNAL", "%s 开仓均价校正：信号价 %.6f → 真实成交均价 %.6f（%+.2f%%）",
+			p.InstID, p.EntryPx, px, (px/p.EntryPx-1)*100)
+		p.EntryPx = px
+	}
+	return openPos
 }
