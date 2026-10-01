@@ -102,8 +102,10 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		//    真正生效的口径永远来自 configs/okx_strategy.json（热插拔）。
 		MaxOrderMarginUSDT: 1.0,
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
-			MarginUSDT: 1.0, Leverage: 20, MaxConcurrentPositions: 8,
-			CooldownBars: 6, DailyMaxEntries: 30, MarginPolicy: "min_one", MaxMarginUSDT: 1.5},
+			// ★ 0 = 不限（用户口径「取消限制」）。这里只是「配置文件读不到」时的兜底，
+			//   与 conf.DefaultConfig 保持一致，免得兜底值把限制偷偷放回来。
+			MarginUSDT: 1.0, Leverage: 20, MaxConcurrentPositions: 0,
+			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.5},
 		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 360},
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
 			RiseBar: "15m", MaxTimes: 3},

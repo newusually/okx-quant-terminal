@@ -400,7 +400,11 @@ func defaultConfig() *Config {
 		Entry: &EntryCfg{
 			TdMode: "isolated", PosSide: "net", OrdType: "market",
 			MarginUSDT: 1.0, Leverage: 20,
-			MaxConcurrentPositions: 8, CooldownBars: 6, DailyMaxEntries: 30,
+			// ★ 2026-10-01：MaxConcurrentPositions / DailyMaxEntries 用 **0 = 不限**
+			// （用户口径「取消限制」）。这两个的兜底值也刻意设成 0，
+			// 免得「entry 块缺失 / 键名写错」时限制悄悄复活 —— 那正是用户这次反馈的现象。
+			// 真正的兜底是账户可用余额与 risk.* 那几条，不是这里。
+			MaxConcurrentPositions: 0, CooldownBars: 6, DailyMaxEntries: 0,
 			// ★ 2026-10-01 起单笔口径 0.1U → 1U（用户：「改成 1 美金每次交易」）。
 			// 目标每笔 1 U 保证金；合约准入要求「最小一手保证金 ≤ max_order_margin_usdt」，
 			// 后者在 configs/okx_strategy.json 里配（当前 1.5U），改完热生效。
@@ -640,14 +644,20 @@ func fillDefaults(c *Config) {
 		if e.Leverage <= 0 {
 			e.Leverage = de.Leverage
 		}
-		if e.MaxConcurrentPositions <= 0 {
-			e.MaxConcurrentPositions = de.MaxConcurrentPositions
-		}
+		// ★ 2026-10-01：这两个字段的语义改成「<= 0 = 不限」★
+		//
+		// 用户口径：「持仓和当日买入数量太少了，取消限制」。
+		//
+		// 之前这里写的是「<= 0 → 兜底回默认值（8 / 30）」，后果是**配置文件里写 0 完全没用**：
+		// 会被这几行反压回 8 / 30 —— 看起来改了，实际还在拦。所以只改 JSON 是不够的，
+		// 归一化必须一起改，并且判定处要加 `> 0` 前置条件
+		// （见 internal/service/trader.go 的开仓闸门）。
+		//
+		// 语义与同文件其它字段一致：`risk.max_total_margin_pct = 0` = 不启用、
+		// `exit.max_hold_bars = 0` = 不启用、`exit.stop_loss_pct = 0` = 关闭。
+		// 想恢复限制就在 configs/okx_strategy.json 里写正数，热加载即刻生效。
 		if e.CooldownBars < 0 {
 			e.CooldownBars = de.CooldownBars
-		}
-		if e.DailyMaxEntries <= 0 {
-			e.DailyMaxEntries = de.DailyMaxEntries
 		}
 		if e.MarginPolicy == "" {
 			e.MarginPolicy = de.MarginPolicy
@@ -656,6 +666,17 @@ func fillDefaults(c *Config) {
 			e.MaxMarginUSDT = de.MaxMarginUSDT
 		}
 	}
+
+	// 负数一律归 0（这两个字段的 0 就是「不限」）。
+	// 归一化成 0 而不是留着负数，是为了让 /api/state 和日志里显示的值干净
+	// —— 交易逻辑两处都只看 `> 0`，负数与 0 等价，但显示 -3 会让人以为写错了。
+	if c.Entry.MaxConcurrentPositions < 0 {
+		c.Entry.MaxConcurrentPositions = 0
+	}
+	if c.Entry.DailyMaxEntries < 0 {
+		c.Entry.DailyMaxEntries = 0
+	}
+
 	if c.Exit == nil {
 		c.Exit = d.Exit
 	} else if c.Exit.MaxHoldMinutes <= 0 && c.Exit.MaxHoldBars <= 0 {

@@ -511,7 +511,11 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 			skip("策略暂停：" + why)
 			continue
 		}
-		if len(openPos)+opened >= cfg.Entry.MaxConcurrentPositions {
+		// ★ 下面两条上限都是「<= 0 = 不限」（2026-10-01，用户口径「取消限制」）★
+		// 所以判定必须先 `> 0` 再看有没有超 —— 不然 0 会变成「已达上限 0」，
+		// 第一笔信号就被拦掉，症状跟用户反馈的「买得太少」一模一样。
+		if cfg.Entry.MaxConcurrentPositions > 0 &&
+			len(openPos)+opened >= cfg.Entry.MaxConcurrentPositions {
 			skip(fmt.Sprintf("持仓数已达上限 %d", cfg.Entry.MaxConcurrentPositions))
 			continue
 		}
@@ -524,7 +528,7 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 			skip(fmt.Sprintf("冷却中（距上次开仓不足 %d 根）", cfg.Entry.CooldownBars))
 			continue
 		}
-		if ctr.OrdersToday+opened >= cfg.Entry.DailyMaxEntries {
+		if cfg.Entry.DailyMaxEntries > 0 && ctr.OrdersToday+opened >= cfg.Entry.DailyMaxEntries {
 			skip(fmt.Sprintf("当日开仓已达上限 %d", cfg.Entry.DailyMaxEntries))
 			continue
 		}
@@ -553,11 +557,19 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 				ordID = "(legacy)"
 			}
 		} else if cfg.DryRun {
+			// 杠杆打「真实生效」的那个（合约上限可能低于配置），
+			// 否则 10x 上限的合约在日志里会显示成 20x。
 			logx.Logf("INFO", "[dry_run] 应开仓 %s 张数=%s 保证金=%.2fU 杠杆=%dx 价格=%.6f 共振=%d/8",
 				s.InstID, fmtSz(sz, ins.LotSzDec), marginUsed,
-				cfg.Entry.Leverage, s.Close, s.Score)
+				effLever(ins.Lever, cfg.Entry.Leverage), s.Close, s.Score)
 		} else {
-			if err := cli.SetLeverage(s.InstID, cfg.Entry.Leverage, cfg.Entry.TdMode); err != nil {
+			// 杠杆收敛到合约上限（见 calcSizeWith 的注释）：
+			// 对 10x 上限的合约调 20x 会被 OKX 拒（59102），然后下单直接失败。
+			if lev := effLever(ins.Lever, cfg.Entry.Leverage); lev != cfg.Entry.Leverage {
+				logx.Logf("INFO", "%s 合约最高 %dx < 配置 %dx，按 %dx 下单",
+					s.InstID, ins.Lever, cfg.Entry.Leverage, lev)
+			}
+			if err := cli.SetLeverage(s.InstID, effLever(ins.Lever, cfg.Entry.Leverage), cfg.Entry.TdMode); err != nil {
 				logx.Logf("WARN", "%s 设杠杆失败（继续下单）：%v", s.InstID, err)
 			}
 			ord, err := cli.PlaceOrder(s.InstID, cfg.Entry.TdMode, "buy", cfg.Entry.PosSide,
@@ -692,7 +704,18 @@ func calcSizeWith(cfg *conf.Config, ins Instrument, price, margin, cap float64,
 		unit = math.Ceil(ins.MinSz/lot) * lot
 	}
 
-	lev := float64(cfg.Entry.Leverage)
+	// ★ 杠杆必须与「准入过滤」用同一个口径（2026-10-01）。
+	//
+	// universe.go 算「这笔买不买得起」时用的是 effLever(合约上限, 策略杠杆)，
+	// 但这里原来直接用 cfg.Entry.Leverage —— 两条路不一致，后果是：
+	// 有一批合约 OKX 上限只有 10x（成交额前 80 里就有 4 个：USELESS / CAP / ONE / PROS），
+	// 准入按 10x 算「买得起」放行，下单却按 20x 去 set-leverage → code=59102 被拒 →
+	// 紧接着下单 code=1 全失败。**这些合约永远买不进来，而且日志里只是一条 WARN。**
+	// 现象正是用户反馈的「买得太少」。
+	//
+	// 收敛之后张数按真实杠杆算：单笔保证金仍然按 margin 口径（1U），
+	// 只是名义价值随杠杆变小、风险更小，不会超买。
+	lev := float64(effLever(ins.Lever, cfg.Entry.Leverage))
 	if lev <= 0 {
 		lev = 1
 	}

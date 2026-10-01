@@ -77,9 +77,12 @@
     "ord_type": "market",       // market=市价（信号出现就要立刻进）
     "margin_usdt": 1.0,         // ★ 每笔目标保证金（U）—— 用户口径：1 美金每次交易
     "leverage": 20,             // 杠杆
-    "max_concurrent_positions": 8,  // 最多同时持仓的合约数
-    "cooldown_bars": 6,         // 同一个合约两次开仓至少间隔多少根 K 线
-    "daily_max_entries": 30,    // 每天最多开几笔
+    // ★ 下面两条上限的语义是「0 = 不限」（2026-10-01 按用户要求取消限制）。
+    //   注意：光把这里改成 0 是不够的，internal/conf/config.go 的归一化与
+    //   internal/service/trader.go 的判定都一起改过，两处配合才真正生效。
+    "max_concurrent_positions": 0,  // ★ 最多同时持仓的合约数。0 = **不限**
+    "cooldown_bars": 6,         // 同一个合约两次开仓至少间隔多少根 K 线（15m×6 = 90 分钟）
+    "daily_max_entries": 0,     // ★ 每天最多开几笔。0 = **不限**
 
     // ↓★ OKX 永续的 sz 单位是「张」，不是 U。每张名义价值 = ctVal × ctMult × 价格。
     //   BTC 一张≈600U、ETH 一张≈300U、小币种一张可能只有 0.5U。
