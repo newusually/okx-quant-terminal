@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>验收报告 · 三期（品类放开 + 同根标记合并 + score&gt;3 且涨幅&gt;1% + 0.1U）2026-10-02</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --sub:#5b6673; --line:#e3e6ea;
+    --ok:#0a7d4c; --warn:#a8620a; --bad:#b3261e; --accent:#0b62c4;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 24px 72px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+  .lead{color:var(--sub);margin:0 0 28px;font-size:14px}
+  h2{font-size:18px;margin:38px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;font-weight:600;color:var(--sub);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code,pre{font-family:var(--mono);font-size:12.5px}
+  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+  pre{background:#1c2128;color:#d6dde6;padding:14px 16px;border-radius:8px;overflow-x:auto;line-height:1.55}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:21px;letter-spacing:-.3px;margin-bottom:2px}
+  .kpi span{font-size:12px;color:var(--sub)}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:99px;
+        border:1px solid currentColor;vertical-align:1px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  blockquote{margin:12px 0;padding:10px 16px;background:#fff;border-left:3px solid var(--accent);
+             border-radius:0 8px 8px 0;color:#333;font-size:14px}
+  .foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>验收报告 · 三期：品类放开 / 同根标记合并 / score&gt;3 且涨幅&gt;1% / 0.1U</h1>
+  <p class="lead">
+    OKX 全合约量化终端 · <code>C:\Users\Administrator\Documents\finally</code> ·
+    2026-10-01 23:57 – 2026-10-02 00:27 · 运行时 <code>bin\okxweb.exe</code> = 9,022,976 字节（<code>-trimpath -ldflags "-s -w"</code>）
+  </p>
+
+  <div class="grid">
+    <div class="kpi"><b class="ok">6 / 6</b><span>三期口径全部落地并实测</span></div>
+    <div class="kpi"><b class="ok">480 → 239</b><span>可交易合约（二期 170）</span></div>
+    <div class="kpi"><b class="ok">0</b><span>同根同类型重复标记（24 组校验）</span></div>
+    <div class="kpi"><b class="ok">5 / 5</b><span>单测包全绿（conf/handler/repo/service/cmd）</span></div>
+  </div>
+
+  <blockquote>
+    本报告是三期唯一验收口径。二期报告
+    <code>docs/验收报告-自动维护与四周期.html</code> 中的口径（<code>0.01U/笔</code>、
+    <code>score_threshold=8</code>、<code>480 → 170</code>、规则 1 排除美股/ETF/商品）
+    <b>已被本轮覆盖</b>，那份文档保留为历史快照，勿再引用其策略数字。
+  </blockquote>
+
+  <h2>一、三期要求 → 落地位置</h2>
+  <table>
+    <thead><tr><th>#</th><th>要求（用户原话）</th><th>落点</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>「取消美股 ETF 不做的功能」</td>
+          <td><code>exclude_stock_etf: false</code> —— <b>四处默认值同改</b>：JSON、<code>conf.defaultConfig()</code>、<code>DefaultUniversePolicy()</code>、<code>LoadStrategy()</code> 兜底</td>
+          <td class="ok">✔ 美股ETF -0（此前 -194），多出 69 个合约</td></tr>
+      <tr><td>2</td><td>「只要买入上限小于 1U 就做」</td>
+          <td>规则 5 成为<b>唯一</b>品类无关判据：<code>minSz×ctVal×ctMult×价÷杠杆 ≤ max_order_margin_usdt=1.0</code></td>
+          <td class="ok">✔ 239 个全部满足，<code>资金不够 -0</code></td></tr>
+      <tr><td>3</td><td>「同一根 K 线不能重复画，只能一笔，金额叠加」</td>
+          <td><code>handler.aggregateEvents()</code>：按 <b>对齐后的秒级时间 + kind</b> 分组，金额/盈亏累加、<code>count</code> 记笔数、价格取时间最晚一笔</td>
+          <td class="ok">✔ 24 组实例校验，重复 = 0，合并出 29 个多笔标记</td></tr>
+      <tr><td>4</td><td>「平仓也是如此」</td>
+          <td>同一聚合函数，平仓的 <code>pnl</code> 累加，多笔时收益率<b>按保证金加权</b>重算</td>
+          <td class="ok">✔ 实测 <code>平仓 +0.08U×2</code> → <code>pnlPct=16.436</code></td></tr>
+      <tr><td>5</td><td>「<b>score &gt; 3</b> + 有信号那根必须涨 &gt; 1%」</td>
+          <td><code>score_threshold: 4</code>（整数下 ≡ &gt;3）+ <code>entry.min_bar_rise_pct: 1.0</code>；唯一判据 <code>service.SignalQualified()</code></td>
+          <td class="ok">✔ 买入 / 加仓 / 信号入库三处共用同一函数</td></tr>
+      <tr><td>6</td><td>「买入 0.1 美金，最高封顶 1 美金；加仓原来的三分之一」</td>
+          <td><code>entry.margin_usdt: 0.1</code>、<code>max_margin_usdt: 1.0</code>、<code>addon.ratio: 0.3333</code></td>
+          <td class="ok">✔ 239 个合约最小一手 0.01~0.73U，<b>无一被放大</b></td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、★ 判据统一：三处必须调同一个函数 ★</h2>
+  <p>
+    用户说「加仓与买入条件一致」。二期是「两边各写一遍相似代码」，三期把它收成一个函数：
+  </p>
+  <pre>func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
+    if sig == nil || !sig.Ready      { return false }
+    if threshold &lt;= 0                 { return false }
+    if sig.Score &lt; threshold          { return false }
+    if minRisePct &gt; 0 &amp;&amp; !(sig.RisePct &gt; minRisePct) { return false }
+    return true
+}</pre>
+  <table>
+    <thead><tr><th>调用点</th><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>买入扫描</td><td><code>internal/service/scanner.go</code> <code>Scan()</code></td><td>决定 <code>res.Signals</code></td></tr>
+      <tr><td>加仓判定</td><td><code>internal/service/addon.go</code> <code>decideAddon()</code></td><td>纯函数、可单测</td></tr>
+      <tr><td>信号入库回算</td><td><code>internal/service/sigbackfill.go</code></td><td>决定 K 线图上的 🚀 与实盘一致</td></tr>
+    </tbody>
+  </table>
+  <blockquote>
+    <b>为什么写 4 而不是把符号改成 <code>&gt;</code>：</b><code>score = popcount(mask)</code> 是 0~8 的整数，
+    <code>score &gt; 3</code> 与 <code>score ≥ 4</code> <b>逐值等价</b>。
+    用 <code>≥ 4</code> 可以让判定式始终保持 <code>&gt;= threshold</code> 一种形式，
+    不给历史口径引入无意义的符号漂移。等价性由
+    <code>TestThresholdFourIsExactlyScoreGreaterThanThree</code> 对 0~8 全枚举钉住。
+  </blockquote>
+  <p>
+    <code>NaN</code> 用 <code>!(a &gt; b)</code> 判为<b>不合格</b>（保守）—— 开盘价为 0 或数据缺失时不冒进下单。
+  </p>
+
+  <h2>三、★ 指针三态：为什么 <code>min_bar_rise_pct</code> 必须是 <code>*float64</code> ★</h2>
+  <table>
+    <thead><tr><th>JSON 里写的</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td>不写（<code>nil</code>）</td><td>用默认 <b>1.0</b></td></tr>
+      <tr><td><code>0</code></td><td><b>显式关闭</b>该条件（只按 score 判）</td></tr>
+      <tr><td><code>-1</code> 等负数</td><td>视为写错 → 回落 <b>1.0</b></td></tr>
+      <tr><td>正数</td><td>原值生效</td></tr>
+    </tbody>
+  </table>
+  <blockquote>
+    <b>值类型下「没写」和「写 0」都是零值，语义完全相反。</b>
+    二期 <code>max_concurrent_positions</code> 正是栽在这上面 —— 用户写的 0 被
+    <code>if X &lt;= 0 { X = 默认 }</code> 反压回默认值，配置「改了没用」。
+    指针的 <code>nil</code> 才承载「没写」这一态。
+    单测 <code>TestMinBarRisePctThreeStates</code> 覆盖 5 条。
+  </blockquote>
+
+  <h2>四、★ 同根标记合并 ★</h2>
+  <p>
+    加仓 <code>max_times=0</code> 不限次数，1m 一根里可能补好几次 —— 原来图上会在一根 K 线下面叠一排箭头。
+    现在 <code>aggregateEvents()</code> 做三件事：
+  </p>
+  <ul>
+    <li><b>分组键</b> = 「按该周期对齐后的<b>秒级</b>时间」+ <code>kind</code>。不同类型不互相合并（买入 / 加仓 / 平仓各一笔）。</li>
+    <li><b>累加</b> <code>sz</code> / <code>margin</code> / <code>pnl</code>，<code>count</code> 记原始笔数；价格取<b>时间最晚</b>那一笔
+        （实现里显式比较 <code>e.Ts &gt;= c.Ts</code>，而不是依赖调用方传入顺序 —— 这是被单测逼出来的修正）。</li>
+    <li><b>收益率重算</b>：多笔时 <code>pnlPct = 合计盈亏 ÷ 合计保证金 × 100</code>。
+        直接把各笔百分比相加没有意义（分母被重复计入）。</li>
+  </ul>
+  <p>前端 tooltip 显示「合计 XU（N 笔）」，标记文本带 <code>×N</code> 后缀。</p>
+  <div class="card">
+    <b>实例（ETH-USDT-SWAP 15m 真实返回）：</b>
+    <pre>{ "kind":"open", "count":3, "margin":0.536179, "sz":0.04,
+  "price":2681.01, "text":"买入 0.54U×3", "time":1790869500 }
+
+{ "kind":"addon", "count":1, "margin":0.1340595,
+  "text":"加仓 0.13U", "time":1790869500 }   ← 与上一笔同根，但类型不同 → 不合并</pre>
+  </div>
+
+  <h2>五、实测证据</h2>
+
+  <h3>5.1 准入放开生效（日志原文）</h3>
+  <pre>2026-10-02 00:18:54 [INFO] 合约准入过滤：480 → 239（美股ETF -0，新上线 -38，
+                          待下线 -1，成交额 -202，资金不够 -0，非live -0）</pre>
+  <p>
+    账面核对：239 + 38 + 1 + 202 = <b>480</b>，各项相加对得上总数。
+    （二期这里漏打「成交额」一项，导致账目差 201 个查不出原因 —— 三期补上。）
+  </p>
+  <table>
+    <thead><tr><th>口径</th><th>数值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>可交易总数</td><td class="ok">239</td><td>二期 170 → 三期 239</td></tr>
+      <tr><td>按品类（<code>inst_category</code>）</td><td class="ok">加密 169 · 美股ETF 64 · 商品 6</td><td>后两类正是本轮新放开的</td></tr>
+      <tr><td>排除原因分布</td><td><code>low_volume 202 · new_listing 38 · delisting 1</code></td><td><code>notional</code> = 0 → 无一因买不起被排除</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.2 新品类真实成交流水（日志原文）</h3>
+  <pre>2026-10-02 00:00:10 [SIGNAL] 加仓 QQQ-USDT-SWAP    周期=3m 第 1 次 保证金=0.3694U 新均价=738.870000
+2026-10-02 00:03:04 [SIGNAL] 加仓 QQQ-USDT-SWAP    周期=3m 第 2 次 保证金=0.3696U 新均价=738.990000
+2026-10-02 00:04:04 [SIGNAL] 加仓 SAMSUNG-USDT-SWAP 周期=1m 第 1 次 保证金=0.0990U 新均价=197.975000
+2026-10-02 00:00:11 [SIGNAL] 开仓 MU-USDT-SWAP     张数=0.01 开仓价=1051.500000 共振 4/8 周期=5m
+2026-10-02 00:01:14 [SIGNAL] 开仓 SKHY-USDT-SWAP   张数=0.01 开仓价=185.430000 共振 4/8 周期=5m
+2026-10-02 00:01:13 [SIGNAL] 开仓 XAG-USDT-SWAP    张数=3    开仓价=60.690000  共振 4/8 周期=1m</pre>
+  <p>
+    <code>QQQ</code>（纳指 ETF）/ <code>SAMSUNG</code> / <code>MU</code> / <code>SKHY</code> 是美股，
+    <code>XAG</code> 是白银商品。全部是<b>真实成交</b>，不是模拟。
+    所有开仓的共振数都是 <b>4/8</b>，与 <code>score_threshold=4</code> 吻合。
+  </p>
+
+  <h3>5.3 <code>/api/state</code> 三期口径逐项</h3>
+  <table>
+    <thead><tr><th>字段</th><th>值</th></tr></thead>
+    <tbody>
+      <tr><td><code>score_threshold</code></td><td class="ok">4</td></tr>
+      <tr><td><code>entry.margin_usdt</code> / <code>marginText</code></td><td class="ok">0.1 / <code>"0.1U/笔 · 20x"</code></td></tr>
+      <tr><td><code>entry.min_bar_rise_pct</code> / <code>minBarRisePct</code></td><td class="ok">1 / 1</td></tr>
+      <tr><td><code>exclude_stock_etf</code> / <code>excludeStockEtf</code></td><td class="ok">false / false</td></tr>
+      <tr><td><code>max_order_margin_usdt</code> / <code>maxOrderMarginUsdt</code></td><td class="ok">1 / 1</td></tr>
+      <tr><td><code>entry.max_margin_usdt</code></td><td class="ok">1</td></tr>
+      <tr><td><code>addon.ratio</code> / <code>addon.max_times</code> / <code>addon.rise_bar</code></td><td class="ok">0.3333333333 / 0 / auto</td></tr>
+      <tr><td><code>bars</code> / <code>klineRetainDays</code></td><td class="ok">["1m","3m","5m","15m"] / 10</td></tr>
+      <tr><td><code>exit.take_profit_pct</code> / <code>max_hold_minutes</code> / <code>stop_loss_pct</code></td><td class="ok">1 / 360 / 0</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.4 标记聚合全量校验（6 合约 × 4 周期 = 24 组）</h3>
+  <pre>ETH-USDT-SWAP    1m    markers=   4  同根同kind重复=0  合并多笔=1
+ETH-USDT-SWAP    5m    markers=  12  同根同kind重复=0  合并多笔=5
+ETH-USDT-SWAP    15m   markers=  34  同根同kind重复=0  合并多笔=4
+QQQ-USDT-SWAP    5m    markers=   7  同根同kind重复=0  合并多笔=2
+GOOGL-USDT-SWAP  3m    markers=   7  同根同kind重复=0  合并多笔=1
+XAG-USDT-SWAP    5m    markers=   1  同根同kind重复=0  合并多笔=1
+SAMSUNG-USDT-SWAP 15m  markers=   5  同根同kind重复=0  合并多笔=1
+                    ⋮  （24 组全部 重复=0）
+----
+总标记数 138 | 同根同类型重复组数 0 | 含多笔的标记 29
+按类型 { open: 67, addon: 20, close: 15, signal: 20, signal_only: 16 }</pre>
+  <p class="ok">判据：只要存在任何一组 <code>(time, kind)</code> 出现 &gt;1 次，就是「同一根 K 线画了多笔」—— 24 组全部为 0。</p>
+
+  <h3>5.5 扫描仍走本地库，未因放开品类退化</h3>
+  <pre>2026-10-02 00:19:57 [INFO] [1m,3m,5m,15m] 1m：全市场 480 / 候选 80 / 实算 80 / 信号 0 /
+  K线本地 80 网络 0；3m：… K线本地 80 网络 0；5m：… K线本地 80 网络 0；
+  15m：… K线本地 80 网络 0；在持 14 仓，本轮开仓 0、平仓 0、加仓 0，用时 3.568s</pre>
+  <p>四个周期 <b>网络回退全部为 0</b>，整轮用时 3.5 ~ 8.0 秒。品类放开只增加准入集合，不增加扫描成本（候选仍是成交额前 80）。</p>
+
+  <h2>六、回归门（单测）</h2>
+  <table>
+    <thead><tr><th>包</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td><code>go vet ./...</code></td><td class="ok">干净，无输出</td></tr>
+      <tr><td><code>internal/conf</code></td><td class="ok">ok 0.686s</td></tr>
+      <tr><td><code>internal/handler</code></td><td class="ok">ok 0.556s</td></tr>
+      <tr><td><code>internal/repo</code></td><td class="ok">ok 1.571s</td></tr>
+      <tr><td><code>internal/service</code></td><td class="ok">ok 18.155s</td></tr>
+      <tr><td><code>cmd/okxweb</code></td><td class="ok">ok 1.012s</td></tr>
+    </tbody>
+  </table>
+  <p>三期新增的守门用例：</p>
+  <ul>
+    <li><code>service</code>：<code>TestSignalQualified</code>（12 条边界）、
+        <code>TestThresholdFourIsExactlyScoreGreaterThanThree</code>（0~8 全枚举）、
+        <code>TestComputeSignalFillsRisePct</code>、<code>TestRisePctMatchesBetweenImplementations</code>、
+        <code>TestAddon_SkipWhenBarDidNotRise</code>（0.3%/0.99% 不加、1.2% 加、门槛写 0 后 0.3% 也加）、
+        <code>TestAddon_ThreePeriodDefaultScore</code>（默认阈值 4：score=4 加、score=3 不加）</li>
+    <li><code>handler</code>：<code>marker_agg_test.go</code> 9 例 ——
+        同根两笔买入合并 / open 与 addon 不互相合并 / 不同 K 线各自一笔 /
+        平仓盈亏累加 + 加权收益率 / 单笔保留原始 <code>pnl_pct</code> /
+        非法时间丢弃 / 空输入 / 价格取时间最晚一笔 / 输出按时间升序</li>
+    <li><code>conf</code>：<code>TestScoreThresholdDefaultsToFour</code>、
+        <code>TestEntryMarginDefaultsTo01USDT</code>、
+        <code>TestMinBarRisePctThreeStates</code>、<code>TestExcludeStockETFDefaultsOff</code></li>
+  </ul>
+
+  <h2>七、部署与产物</h2>
+  <table>
+    <thead><tr><th>项</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>可执行文件</td><td><code>bin\okxweb.exe</code> = <b>9,022,976</b> 字节 · md5 <code>4541ace87f86adef600d5a79d857dd1c</code>；备份 <code>bin\okxweb.exe.bak-20261002-{0010,0015,0025}</code></td></tr>
+      <tr><td>源码 ↔ 构建镜像</td><td class="ok">12 个关键文件 md5 逐一比对，全部 OK</td></tr>
+      <tr><td>服务状态</td><td class="ok">OKXMySQL / OKXWeb（显示名「OKX 全合约量化终端（网页 + 数据 + 策略）」/ OKXApache 全部 Running</td></tr>
+      <tr><td>端口</td><td class="ok">80（Apache 反代）/ 8090（回环）/ 8091（pprof，只回环）/ 3306</td></tr>
+      <tr><td>配置热更新</td><td class="ok">日志 <code>[CFG] 每笔保证金U 0.01 → 0.1；共振阈值 8 → 4</code>，无需重启</td></tr>
+      <tr><td>当日状态</td><td><code>signalsToday=35</code> · <code>ordersToday=2</code> · <code>posCount=14</code> · <code>klineRows=2,557,557</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>八、本轮踩到并修掉的两个「静默失效」</h2>
+  <div class="card">
+    <h3>① 同一个结构体有多个「构造入口」</h3>
+    <p>
+      <code>cmd/okxweb/main.go</code> 的 <code>applyUniverseFilter</code> 里<b>手写</b>了一份
+      <code>service.UniversePolicy{...}</code>，漏填 <code>ExtraExclude</code> ——
+      后果是手动黑名单 <code>exclude_inst</code> <b>只在下单扫描路径生效</b>，写回 <code>inst</code> 表那条路径完全不看。
+    </p>
+    <p>
+      这与二期 <code>Scan()</code> 漏填 <code>MarginPolicy</code>（准入上限静默 1U→0.01U）是<b>同一个坑的复现</b>。
+      <b>新字段加进结构体和构造器，绝不会自动进那个手写字面量，编译器也不报错（缺字段 = 零值）。</b>
+      现已统一走唯一构造入口 <code>service.UniversePolicyFromConfig(cfg)</code>。
+    </p>
+    <h3>② 报数不全会误导判断</h3>
+    <p>
+      准入日志原来只打 4 类排除原因，202 个被「成交额」滤掉的完全不显示，
+      各项相加对不上总数（480 − 39 ≠ 239）。三期补上 <code>成交额 -%d</code>，账目才闭合。
+    </p>
+  </div>
+
+  <h2>九、待办（不阻塞交付）</h2>
+  <ul>
+    <li><code>configs/okx_strategy.json</code> 里的历史注释仍留有二期「阈值 8 可能长期 0 单」的提醒，
+        保留作为决策痕迹，已在文件头标注三期结论。</li>
+    <li>美股 / ETF 合约的<i>交易时段</i>（非 24 小时连续）尚未特殊处理，信号可能落在流动性稀薄的时段；
+        当前按统一口径处理，观察中。</li>
+    <li>标记聚合对 <code>kind=signal_only</code>（只有信号、没成交）同样生效 —— 这是有意为之，
+        图上「有信号但没买」也要能一眼看到，不应被成交笔覆盖。</li>
+  </ul>
+
+  <div class="foot">
+    验收时间 2026-10-02 00:27（UTC+8）· 证据来源：<code>logs/okxbot.log</code>、
+    <code>/api/state</code>、<code>/api/mark</code>（6 合约 × 4 周期遍历）、
+    MySQL <code>inst</code> 表直查（<code>tradeable</code> / <code>inst_category</code> / <code>exclude_reason</code>）、
+    <code>go vet</code> 与 <code>go test ./internal/... ./cmd/...</code> 输出。<br>
+    本文档为三期唯一验收口径，与 <code>README.md</code>、<code>docs/架构说明.md</code>、
+    <code>docs/策略说明.md</code>、<code>docs/项目详情.md</code> 同步。
+  </div>
+
+</div>
+</body>
+</html>

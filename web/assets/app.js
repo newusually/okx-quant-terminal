@@ -389,16 +389,23 @@ function showTip(param, k) {
   const col = k.c >= k.o ? 'up' : 'down';
   const amp = k.l ? (k.h - k.l) / k.l * 100 : 0;
 
-  // 这一根上挂了哪些标记（买入 / 加仓 / 平仓 / 信号），一并显示在提示框底部
+  // 这一根上挂了哪些标记（买入 / 加仓 / 平仓 / 信号），一并显示在提示框底部。
+  //
+  // ★ 2026-10-02 三期：同一根 K 线上的多笔成交已在后端合并成一笔、金额累加
+  //   （见 aggregateEvents）。这里把「合并了几笔」也写出来 —— 否则用户会疑惑
+  //   「我只成交了 2 次，金额怎么变大了」。单笔时保持原来的简洁写法。
+  const amtOf = (v, d) => (m.count > 1
+    ? `合计 ${fmtNum(v, d)}U（${m.count} 笔）`
+    : `${fmtNum(v, d)}U`);
   const mk = markersAt(k.ts).map((m) => {
     if (m.kind === 'addon') {
-      return `<div class="tip-mk mk-addon">➕ 加仓 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
+      return `<div class="tip-mk mk-addon">➕ 加仓 ${fmtPrice(m.price)} · ${amtOf(m.margin, 3)}${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
     }
     if (m.kind === 'close') {
-      return `<div class="tip-mk mk-sell">🌿 平仓 ${fmtPrice(m.price)} · ${fmtNum(m.pnl, 4)}U（${fmtPct(m.pnlPct)}）${m.reason ? ' · ' + esc(m.reason) : ''}</div>`;
+      return `<div class="tip-mk mk-sell">🌿 平仓 ${fmtPrice(m.price)} · ${amtOf(m.pnl, 4)}（${fmtPct(m.pnlPct)}）${m.reason ? ' · ' + esc(m.reason) : ''}</div>`;
     }
     if (m.kind === 'open') {
-      return `<div class="tip-mk mk-buy">🚀 买入 ${fmtPrice(m.price)} · ${fmtNum(m.margin, 3)}U${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
+      return `<div class="tip-mk mk-buy">🚀 买入 ${fmtPrice(m.price)} · ${amtOf(m.margin, 3)}${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
     }
     return `<div class="tip-mk mk-sig">🚀 买入信号 ${m.score}/8${m.hitList ? ' · ' + esc(m.hitList) : ''}</div>`;
   }).join('');
@@ -694,11 +701,19 @@ function renderServiceInfo(st) {
     ['超时平仓', holdTxt],
     ['布林上轨平仓', sx.boll_upper_exit ? '开' : '关'],
     ['加仓', addonTxt],
-    ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8'],
-    // 三条独立红线（2026-10-01 起）：
-    //   记录表 30 天 → 月度任务里清；K 线 365 天 → 年度任务里清；日志 30 天 → 月度任务里清
+    // ★ 三期口径：score > 3 等价于「>= 4」，所以阈值显示成 4 时也把语义写出来。
+    ['共振阈值', String((st.strategy && st.strategy.score_threshold) || '--') + ' / 8' +
+      (Number(st.strategy && st.strategy.score_threshold) === 4 ? '（score > 3）' : '')],
+    // 三期新增的门槛：触发信号那根 K 线必须真涨。0 = 该条件已关闭。
+    ['K线涨幅要求', (st.minBarRisePct > 0
+      ? '> ' + fmtNum(st.minBarRisePct, 2) + '%（收盘 vs 开盘）'
+      : '已关闭')],
+    // 品类过滤（三期已取消）。显示出来，免得以后有人以为「美股/ETF 被排掉了」。
+    ['品类过滤', st.excludeStockEtf ? '只做加密（美股/ETF/商品排除）' : '不限（只看最小一手 ≤ 上限）'],
+    // 三条独立红线（2026-10-01 二期起）：
+    //   记录表 30 天 → 月度任务里清；K 线 10 天 → 每日任务里清；日志 30 天 → 月度任务里清
     ['记录保留', String(st.retainDays || 30) + ' 天（月度清理）'],
-    ['K线保留', String(st.klineRetainDays || 365) + ' 天（年度清理）'],
+    ['K线保留', String(st.klineRetainDays || 10) + ' 天（每日清理）'],
     ['日志保留', String(st.logRetainDays || 30) + ' 天（月度清理）'],
     ['磁盘守卫', (st.archiveMinFreeGB || 10) + ' GB 以下只留当月 · 当前可用 ' +
       (st.freeDiskGB != null ? st.freeDiskGB.toFixed(1) : '--') + ' GB'],

@@ -36,6 +36,25 @@ type EntryCfg struct {
 	//   "min_one" —— 自动把保证金放大到刚好能买 1 张，但不超过 MaxMarginUSDT
 	MarginPolicy  string  `json:"margin_policy"`
 	MaxMarginUSDT float64 `json:"max_margin_usdt"`
+
+	// MinBarRisePct 触发信号的那根 K 线必须涨过这个百分比（收盘 vs 开盘），
+	// 否则即使共振达标也不下单。**买入与加仓共用同一个判据**
+	// （service.SignalQualified），所以它天然满足「加仓条件与买入一致」。
+	//
+	//	> 0  严格大于该值才通过（默认 1.0，即「必须大于 1% 涨幅」）
+	//	= 0  显式关闭这个条件（只看 score）
+	//	nil  没写这个键 → 用默认 1.0
+	//
+	// ⚠ 语义是「严格大于」：用户口径原话是「必须大于 1% 涨幅才行」。
+	//
+	// ★ 为什么用指针而不是 float64 ★
+	//   值类型下「没写」和「写了 0」都是 0，两者语义完全相反：
+	//     没写 → 应当用默认 1.0（漏配时条件仍在，不会静默放开全市场下单）
+	//     写 0 → 应当真的关掉这个条件
+	//   二期在 MaxConcurrentPositions / DailyMaxEntries 上正是栽在
+	//   「0 被 `<= 0` 反压回默认值」这一步（用户写了 0 想取消限制，配置却静默失效）。
+	//   指针是唯一能不歧义表达三态的写法。读取一律走 Config.MinBarRisePct()。
+	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
 }
 
 type ExitCfg struct {
@@ -260,7 +279,9 @@ type Config struct {
 	RequestTimeoutSec int            `json:"request_timeout_sec"`
 
 	// ---- 合约准入（「哪些能买」）----
-	// ExcludeStockETF 不买美股 / ETF / 商品，只做加密（OKX instCategory=1）
+	// ExcludeStockETF 不买美股 / ETF / 商品，只做加密（OKX instCategory=1）。
+	// ★ 2026-10-02 三期默认 false（用户「取消美股 etf 不做的功能」）——
+	//   现在只看「最小一手保证金 ≤ max_order_margin_usdt」。
 	ExcludeStockETF bool `json:"exclude_stock_etf"`
 	// ExcludeNewListingDays 上市不足这么多天的不买（0 = 不排除）
 	ExcludeNewListingDays int `json:"exclude_new_listing_days"`
@@ -404,37 +425,48 @@ func defaultConfig() *Config {
 		// ★ 下面这些数字全是**兜底值**，只在 configs/okx_strategy.json
 		//   缺失或解析失败时才会被用到。真正生效的口径一律来自那个 JSON
 		//   （改完即刻生效，热插拔，不用重启服务、更不用改代码）。
-		ExcludeStockETF:       true,
+		// ★ 2026-10-02 三期：默认关闭品类过滤（用户「取消美股 etf 不做的功能，
+		//   只要买入上限小于 1U 就做」）。这是兜底值，与 universe.go 的
+		//   DefaultUniversePolicy 必须一致 —— 两处都开着，任何一处漏改都会让
+		//   「已取消的规则」在配置缺失时悄悄复活。
+		ExcludeStockETF:       false,
 		ExcludeNewListingDays: 30,
 		ExcludeDelisting:      true,
 		MaxOrderMarginUSDT:    1.0,
 		Workers:               4,
 		CandleLimit:           300,
 		HistoryPages:          2,
-		// ★ 2026-10-01 二期：阈值 6 → 8（用户口径「8 个同时共振指标才买入」）。
-		//   兜底里也不给 BTC/ETH 单独放宽 —— 用户要的是「全市场一律 8 个全中」。
-		ScoreThreshold:        8,
+		// ★ 2026-10-02 三期：阈值 8 → **4**（用户口径「score > 3」）。
+		//   判定处是 sig.Score >= threshold，而 Score 是 0~8 的整数，
+		//   所以「> 3」与「>= 4」完全等价 —— 用 4 表达，既忠于口径，
+		//   又不必把判定从 >= 改成 >（改了会让所有历史测试口径漂移）。
+		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
+		//     4 会有大量信号，靠下面的「这根 K 线必须真涨」把关。
+		ScoreThreshold:        4,
 		ScoreThresholdMap:     map[string]int{},
 		SignalTimeoutSec:      900,
 		RequestTimeoutSec:     20,
 		Entry: &EntryCfg{
 			TdMode: "isolated", PosSide: "net", OrdType: "market",
-			MarginUSDT: 0.01, Leverage: 20,
+			MarginUSDT: 0.1, Leverage: 20,
 			// ★ 2026-10-01：MaxConcurrentPositions / DailyMaxEntries 用 **0 = 不限**
 			// （用户口径「取消限制」）。这两个的兜底值也刻意设成 0，
 			// 免得「entry 块缺失 / 键名写错」时限制悄悄复活 —— 那正是用户这次反馈的现象。
 			// 真正的兜底是账户可用余额与 risk.* 那几条，不是这里。
 			MaxConcurrentPositions: 0, CooldownBars: 6, DailyMaxEntries: 0,
-			// ★ 2026-10-01 二期：单笔口径 1U → **0.01U**（用户：「买入金额是 0.01 美金」）。
-			//   0.01U × 20x = 0.2U 名义，绝大多数合约连最小一手都买不起，
-			//   所以配 min_one 口径：买得起就买 0.01U，买不起就放大到「刚好 1 张」，
+			// ★ 2026-10-02 三期：单笔口径 0.01U → **0.1U**（用户：「买入价格 0.1 美金就行，
+			//   最高封顶 1 美金」）。0.1U × 20x = 2U 名义，比二期好买得多。
+			//   min_one 口径不变：买得起就按 0.1U 成交，买不起就放大到「刚好 1 张」，
 			//   硬顶 MaxMarginUSDT = 1U（与准入上限 max_order_margin_usdt 同值）。
-			//   实测 170 个可交易合约里 32 个能真按 0.01U 成交，其余落在 0.01~0.73U。
 			MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
+			// ★ 2026-10-02 三期新增：触发信号的那根 K 线必须**真涨**超过这个百分比，
+			//   买入与加仓共用同一判据（service.SignalQualified）。
+			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
+			MinBarRisePct: f64ptr(1.0),
 		},
 		Exit: &ExitCfg{TakeProfitPct: 1.0, BollUpperExit: true,
 			MaxHoldBars: 0, MaxHoldMinutes: 360, StopLossPct: 0},
-		// 加仓：触发条件**与买入完全一致**（8 指标全中），金额 = 原持仓保证金 × 1/3
+		// 加仓：触发条件**与买入完全一致**（score ≥ 4 且触发那根涨幅 > 1%），金额 = 原持仓保证金 × 1/3
 		//
 		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
 		//   用户口径「加仓条件也是和买入条件一样」。
@@ -449,7 +481,7 @@ func defaultConfig() *Config {
 		Risk: &RiskCfg{
 			// 小资金口径（账户就几毛到几 U）：
 			//   百分比类的保护要按笔算，不能用「5U 可用余额」「30% 总保证金」这种大账户默认值。
-			//   ★ 单笔已降到 0.01U，可用余额门槛同步降到 0.1U。
+			//   ★ 单笔 0.1U，可用余额门槛 0.1U。
 			AccountEquityStop: 0, DailyLossStopPct: 50, MaxTotalMarginPct: 100,
 			MinAvailableUSDT: 0.1, ConsecutiveLossPause: 5, PauseOnAPIError: 10,
 		},
@@ -947,6 +979,32 @@ func StripJSONComments(b []byte) []byte {
 // ---------------------------------------------------------------------------
 // 派生口径
 // ---------------------------------------------------------------------------
+
+// DefaultMinBarRisePct 「K 线必须真涨」条件的默认门槛（%）。
+const DefaultMinBarRisePct = 1.0
+
+// f64ptr 取一个 float64 的指针（配置里的「三态」字段用）。
+func f64ptr(v float64) *float64 { return &v }
+
+// MinBarRisePct 触发信号的那根 K 线至少要涨多少（%）才允许下单。
+//
+//	Entry.MinBarRisePct == nil → 默认 1.0（键没写：条件仍然生效）
+//	Entry.MinBarRisePct == 0   → 0（显式关闭：只看 score）
+//	Entry.MinBarRisePct > 0    → 原值（严格大于）
+//	Entry.MinBarRisePct < 0    → 视为写错，按默认 1.0（负数没有物理含义）
+//
+// 买入扫描与加仓判定都必须走这个方法，不要各自解指针
+// ——「同一个量两条路算」是本项目反复踩的坑。
+func (c *Config) MinBarRisePct() float64 {
+	if c == nil || c.Entry == nil || c.Entry.MinBarRisePct == nil {
+		return DefaultMinBarRisePct
+	}
+	v := *c.Entry.MinBarRisePct
+	if v < 0 {
+		return DefaultMinBarRisePct
+	}
+	return v
+}
 
 // OrderMarginCap 单笔保证金硬上限（USDT）。
 // 「不要买多，超过太多不好」—— 任何下单路径都不得突破这个数。

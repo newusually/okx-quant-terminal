@@ -284,7 +284,14 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 			continue
 		}
 		sig := series.At(i)
-		if sig == nil || !sig.Ready || sig.Score < th {
+		// ★ 入库判据必须与买入/加仓**同一个函数**（2026-10-02 三期）★
+		//
+		// 改之前这里只判 `sig == nil || !sig.Ready || sig.Score < th`，
+		// 三期给买入加了「这根 K 线必须真涨 > min_bar_rise_pct」之后，
+		// 若这里不跟着改，图上标的 🚀 会包含「分数够但没真涨、实盘根本不会下单」
+		// 的根 —— 图和实盘口径不一致，而且没有任何报错。
+		// （SignalQualified 内部已含 nil / Ready 判断。）
+		if !SignalQualified(sig, th, cfg.MinBarRisePct()) {
 			continue
 		}
 		batch = append(batch, repo.EngineSignalRow{

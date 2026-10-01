@@ -4,9 +4,12 @@ package service
 //
 // 三条规则，全部在这里落地，网页侧和引擎侧共用同一份逻辑：
 //
-//   规则 1  不买美股 / ETF / 商品
+//   规则 1  不买美股 / ETF / 商品  —— ★ 2026-10-02 三期已按用户要求关闭 ★
 //           OKX 的 instCategory：1=加密  3=美股/ETF  4=商品(黄金/原油/白银…)
-//           只留 category=1。
+//           原口径是「只留 category=1」。三期用户明确：「取消美股 etf 不做的功能，
+//           只要买入上限小于 1U 就做」—— 于是默认改成不做品类区分，
+//           能不能做只看下面规则 5（最小一手保证金 ≤ 上限）。
+//           想恢复：把 configs/okx_strategy.json 的 exclude_stock_etf 改回 true。
 //
 //   规则 2  不买「刚上线」的
 //           合约的 listTime 距今不足 N 天（默认 30 天）直接排除。
@@ -83,7 +86,11 @@ type UniversePolicy struct {
 //   改完热生效。这个函数只在调用方没给策略时兜底。
 func DefaultUniversePolicy() UniversePolicy {
 	return UniversePolicy{
-		ExcludeStockETF:       true,
+		// ★ 2026-10-02 三期：默认关闭品类过滤（用户：「取消美股 etf 不做的功能，
+		//   只要买入上限小于 1U 就做」）。它是「兜底默认值」，只在
+		//   configs/okx_strategy.json 缺失时用到 —— 兜底也必须是关的，
+		//   否则配置文件一旦读不到，被取消的那条规则会悄悄复活。
+		ExcludeStockETF:       false,
 		ExcludeNewListingDays: 30,
 		ExcludeDelisting:      true,
 		MarginUSDT:            0.1,
@@ -266,16 +273,22 @@ func FilterUniverse(
 			continue
 		}
 
-		// ---- 规则 1：美股 / ETF / 商品 ----
-		if p.ExcludeStockETF {
-			cat := it.InstCategory
-			if cat != "" {
-				st.ByCategory[cat]++
-			}
-			if cat != "" && cat != "1" {
-				st.DroppedCategory++
-				continue
-			}
+		// ---- 规则 1：美股 / ETF / 商品（★ 2026-10-02 三期：默认已关闭）----
+		//
+		// 用户口径：「取消美股 etf 不做的功能，只要买入上限小于 1U 就做」。
+		// 关上之后这条不再排除任何品类，真正的准入约束只剩
+		//   状态 live / 非新上线 / 非待下线 / 成交额达标 / 最小一手 ≤ 上限。
+		//
+		// ⚠ 品类统计刻意留在 if 外面：原来它写在开关里面，
+		//   开关一关 `-universe` 诊断的「分类分布」会变成空 map，
+		//   看起来像「合约列表没拉到」。统计是诊断用的，与开关无关。
+		cat := it.InstCategory
+		if cat != "" {
+			st.ByCategory[cat]++
+		}
+		if p.ExcludeStockETF && cat != "" && cat != "1" {
+			st.DroppedCategory++
+			continue
 		}
 
 		// ---- 状态：只做 live ----

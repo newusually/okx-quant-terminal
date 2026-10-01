@@ -141,6 +141,12 @@ func (s *indicatorScratch) signalAt(instID, bar string, candles []Candle, idx in
 	out.Low = cur.L
 	out.Vol = cur.V
 
+	// 这一根自己的涨跌幅（三期新增，见 Signal.RisePct）。
+	// 开价为 0 是脏数据 → 保持 0，这样它过不了「必须涨过 N%」的门槛（偏保守）。
+	if cur.O > 0 {
+		out.RisePct = (cur.C - cur.O) / cur.O * 100
+	}
+
 	c := s.c
 	v := s.v
 	i := idx

@@ -281,13 +281,15 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 		return AddonDecision{}
 	}
 
-	// ③ 8 因子共振：与买入用同一个阈值（cfg.ThresholdFor，当前 8 = 全中）。
-	//    注意**不区分**是哪个周期 —— 阈值是同一个，信号来源不同而已。
-	th := cfg.ThresholdFor(p.InstID)
-	if th <= 0 {
-		th = 8
-	}
-	if sig.Score < th {
+	// ③ 共振判据：**与买入扫描调同一个函数**（service.SignalQualified）。
+	//
+	//    2026-10-02 三期口径：score > 3（即 threshold = 4）
+	//    + 这根 K 线必须真涨过 min_bar_rise_pct（默认 1%）。
+	//
+	//    ★ 刻意不再在这里手写 `sig.Score < th`：买入那边已经改调同一个函数，
+	//      这里若继续自己判，两个条件（分数 + 涨幅）就会各自只在一半路径上生效，
+	//      「加仓条件与买入一致」立刻变成假的 —— 而且不报错。
+	if !SignalQualified(sig, cfg.ThresholdFor(p.InstID), cfg.MinBarRisePct()) {
 		return AddonDecision{}
 	}
 
@@ -355,13 +357,19 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if a.MaxTimes > 0 {
 		timesTxt = fmt.Sprintf("上限 %d 次", a.MaxTimes)
 	}
+	// 原因文本里把两个条件都写出来（分数门槛 + 这根必须真涨），
+	// 否则事后查「为什么加了这一笔」只看到一个数字，看不出三期多出来的那个条件。
+	riseTxt := ""
+	if mr := cfg.MinBarRisePct(); mr > 0 {
+		riseTxt = fmt.Sprintf("、触发那根涨 %.2f%% ＞ %.2f%%", sig.RisePct, mr)
+	}
 
 	return AddonDecision{
 		Add: true, AddPx: markPx, Sz: sz, Margin: used,
 		NewSz: newSz, NewAvgPx: newAvg, NewMargin: newMargin,
 		Count: p.AddonCount + 1, AllMargin: p.AddonMargin + used,
 		Ts: sig.Ts,
-		Reason: fmt.Sprintf("8 因子共振 %d/%d（%s）与买入同条件 → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
-			sig.Score, th, sig.HitList, dropFromEntry, timesTxt),
+		Reason: fmt.Sprintf("共振 %d/%d（%s）与买入同条件%s → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
+			sig.Score, cfg.ThresholdFor(p.InstID), sig.HitList, riseTxt, dropFromEntry, timesTxt),
 	}
 }

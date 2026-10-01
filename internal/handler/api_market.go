@@ -69,6 +69,10 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		"marginText":   scfg.MarginText(),
 		// 准入上限：前端「服务信息」直接显示，方便确认 JSON 改了有没有生效
 		"maxOrderMarginUsdt": scfg.MaxOrderMarginUSDT,
+		// 品类过滤开关（三期已默认关闭）与「这根 K 线必须真涨」的门槛，
+		// 同样给前端显示 —— 口径改了看不见才是真的容易出问题。
+		"excludeStockEtf": scfg.ExcludeStockETF,
+		"minBarRisePct":   scfg.MinBarRisePct(),
 		"configPath":         s.strategy.Path(),
 		"bars":               service.SupportedBars,
 		"dbPath":             s.db.Path(),
@@ -566,44 +570,71 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 			}
 		}
 
-		// ② 交易事件流水：开仓 / 加仓 / 平仓，一次一笔
+		// ② 交易事件流水：开仓 / 加仓 / 平仓
 		//
 		//    这里读的是 trade_event 而不是 trade —— trade 表「一个仓位一行」，
 		//    加仓是就地合并进原行的（张数/均价/保证金被覆盖），所以它**根本
 		//    没有「加仓」这个时间点**，图上自然也就标不出加仓。
 		//
+		//    ★ 2026-10-02 三期：同一根 K 线只画一笔，金额累加 ★
+		//
+		//    用户口径：「买入同一根 K 线的时候不能重复在 K 线图上画出来，只能
+		//    显示买入一笔，但是买入金额可以叠加多次，加起来显示买入金额。
+		//    平仓也是如此」。
+		//
+		//    为什么真的会重复：同一根 K 线内可能成交多笔 —— 加仓次数不限
+		//    （max_times = 0），1m 这种短周期一根里能补好几次；换壳重启后的
+		//    补记也会落到同一根。不合并的话图上就是「一根 K 线下面叠一排箭头」，
+		//    看着像重复下单。
+		//
+		//    合并键 = (对齐到 K 线的秒级时间, kind)：
+		//      · margin / sz / pnl **累加** —— 这就是用户要的「加起来显示」
+		//      · count 记笔数，>1 时文字里带 ×n
+		//      · 价格取最后一笔（更接近这根收盘时的价位）
+		//      · 盈亏率：单笔用原始值；多笔用「合计盈亏 ÷ 合计保证金」
+		//        （直接把各笔的百分比相加没有意义 —— 分母被重复计入了）
+		//
+		//    kind 仍然分开画：开仓（金🚀）/ 加仓（蓝⬆）/ 平仓（绿🌿）语义不同，
+		//    合成一条就没法看。而且加仓判定本身要求「这根 K 线必须晚于开仓那根」，
+		//    同一根上不会同时出现 open 与 addon。
+		//
 		//    标记文字直接写金额，鼠标扫一眼就知道这笔买了多少钱：
-		//      开仓 = 金色火箭「买入 0.10U」
+		//      开仓 = 金色火箭「买入 0.10U」（多笔合并 → 「买入 0.30U×3」）
 		//      加仓 = 蓝色箭头「加仓 0.03U」
 		//      平仓 = 绿叶「平仓 +0.02U」（亏损用灰，因为红在图上代表涨）
 		if evs, eerr := s.db.EventsInRange(inst, fromTs, toTs); eerr == nil {
-			for _, e := range evs {
-				switch e.Kind {
+			for _, c := range aggregateEvents(evs, snap) {
+				suffix := ""
+				if c.Count > 1 {
+					suffix = "×" + strconv.Itoa(c.Count)
+				}
+				switch c.Kind {
 				case "open":
 					push(map[string]any{
-						"time": snap(e.Ts), "position": "belowBar", "shape": "arrowUp",
-						"color": "#fcd535", "text": "买入 " + fmtUSDT(e.Margin), "size": 2,
-						"kind": "open", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
-						"leverage": e.Leverage, "score": e.Score, "id": e.ID, "ts": e.Ts,
+						"time": c.Time, "position": "belowBar", "shape": "arrowUp",
+						"color": "#fcd535", "text": "买入 " + fmtUSDT(c.Margin) + suffix, "size": 2,
+						"kind": "open", "price": c.Px, "sz": c.Sz, "margin": c.Margin,
+						"count": c.Count, "leverage": c.Leverage, "score": c.Score,
+						"id": c.ID, "ts": c.Ts,
 					})
 				case "addon":
 					push(map[string]any{
-						"time": snap(e.Ts), "position": "belowBar", "shape": "arrowUp",
-						"color": "#3b82f6", "text": "加仓 " + fmtUSDT(e.Margin), "size": 1,
-						"kind": "addon", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
-						"leverage": e.Leverage, "id": e.ID, "ts": e.Ts,
+						"time": c.Time, "position": "belowBar", "shape": "arrowUp",
+						"color": "#3b82f6", "text": "加仓 " + fmtUSDT(c.Margin) + suffix, "size": 1,
+						"kind": "addon", "price": c.Px, "sz": c.Sz, "margin": c.Margin,
+						"count": c.Count, "leverage": c.Leverage, "id": c.ID, "ts": c.Ts,
 					})
 				case "close":
 					col := "#0ecb81" // 绿 = 赚了
-					if e.Pnl < 0 {
+					if c.Pnl < 0 {
 						col = "#848e9c" // 灰 = 亏了（别用红，红在图上表示涨）
 					}
 					push(map[string]any{
-						"time": snap(e.Ts), "position": "aboveBar", "shape": "arrowDown",
-						"color": col, "text": "平仓 " + fmtSignedUSDT(e.Pnl), "size": 2,
-						"kind": "close", "price": e.Px, "sz": e.Sz, "margin": e.Margin,
-						"pnl": e.Pnl, "pnlPct": e.PnlPct, "reason": e.Reason,
-						"id": e.ID, "ts": e.Ts,
+						"time": c.Time, "position": "aboveBar", "shape": "arrowDown",
+						"color": col, "text": "平仓 " + fmtSignedUSDT(c.Pnl) + suffix, "size": 2,
+						"kind": "close", "price": c.Px, "sz": c.Sz, "margin": c.Margin,
+						"pnl": c.Pnl, "pnlPct": c.PnlPct, "count": c.Count,
+						"reason": c.Reason, "id": c.ID, "ts": c.Ts,
 					})
 				}
 			}
@@ -648,3 +679,94 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 
 // DefaultKlinePage 前端一页默认加载多少根 K 线（向左翻页时每次也是这个数）
 const DefaultKlinePage = 1000
+
+// ---------------------------------------------------------------------------
+// 同一根 K 线上的多笔成交合并（2026-10-02 三期）
+// ---------------------------------------------------------------------------
+
+// eventCell 一根 K 线上合并后的「一笔」交易事件（由 aggregateEvents 产出）。
+type eventCell struct {
+	Kind     string
+	Time     int64 // 对齐到 K 线开盘时间的**秒级**时间戳（图表 time 用）
+	Ts       int64 // 合并后取最后一笔的原始毫秒时间戳
+	Px       float64
+	Sz       float64
+	Margin   float64
+	Pnl      float64
+	PnlPct   float64
+	Count    int // 这一根上合并了几笔
+	Leverage int
+	Score    int
+	Reason   string
+	ID       int64
+}
+
+// aggregateEvents 把交易事件流水按「同一根 K 线 + 同一类动作」合并成一笔。
+//
+//	用户口径（2026-10-02 三期）：「买入同一根 K 线的时候不能重复在 K 线图上
+//	画出来，只能显示买入一笔，但是买入金额可以叠加多次，加起来显示买入金额。
+//	平仓也是如此」。
+//
+// 参数 snap 负责把毫秒时间戳对齐到它所属 K 线的开盘时间并转成秒；
+// 返回 <= 0 的事件直接丢弃（时间脏数据，图表上也放不下）。
+//
+// 合并规则：
+//
+//	键   = (snap 后的时间, kind)。开仓 / 加仓 / 平仓各自成组，**不互相合并**
+//	       —— 语义不同，合成一条就没法看了。
+//	金额 = Margin / Sz / Pnl **累加**，Count 记笔数 —— 这就是「加起来显示」。
+//	价格 = 取时间上最后一笔（更接近这根 K 线收盘时的价位）。
+//	盈亏率 = 单笔保留原值；多笔改用 合计盈亏 ÷ 合计保证金 × 100。
+//	        （直接把各笔百分比相加没有意义 —— 每笔的分母被重复计入了；
+//	          按保证金加权正好还原「合并后这一笔的收益率」。）
+//	顺序 = 各组首次出现的顺序。输入按 ts 升序，所以输出也是时间升序。
+//
+// 抽成独立函数是为了能单测：图画错了不会报错、也没有日志，只能靠断言守住。
+func aggregateEvents(evs []repo.TradeEventPoint, snap func(int64) int64) []eventCell {
+	if len(evs) == 0 {
+		return nil
+	}
+	idxByKey := make(map[string]int, len(evs))
+	out := make([]eventCell, 0, len(evs))
+
+	for _, e := range evs {
+		t := snap(e.Ts)
+		if t <= 0 {
+			continue
+		}
+		key := strconv.FormatInt(t, 10) + "|" + e.Kind
+		i, ok := idxByKey[key]
+		if !ok {
+			out = append(out, eventCell{
+				Kind: e.Kind, Time: t, Ts: e.Ts, Px: e.Px,
+				PnlPct: e.PnlPct, Leverage: e.Leverage,
+				Score: e.Score, Reason: e.Reason, ID: e.ID,
+			})
+			i = len(out) - 1
+			idxByKey[key] = i
+		}
+		c := &out[i] // 每轮重新取址：append 可能搬移底层数组
+		c.Sz += e.Sz
+		c.Margin += e.Margin
+		c.Pnl += e.Pnl
+		c.Count++
+		// 价格取「时间上最晚」的那一笔：显式比较时间，不依赖调用方传进来的顺序。
+		// （repo.EventsInRange 是 ORDER BY ts ASC，但把正确性建立在调用方顺序上
+		//   太脆 —— 换个数据源顺序就会静默换成另一个价。）
+		// 用 >= 令同一毫秒的最后一笔胜出，符合「最后一笔成交价」的直觉。
+		if e.Px > 0 && e.Ts >= c.Ts {
+			c.Px = e.Px
+		}
+		if e.Ts > c.Ts {
+			c.Ts = e.Ts
+		}
+	}
+
+	for i := range out {
+		c := &out[i]
+		if c.Count > 1 && c.Margin > 0 {
+			c.PnlPct = c.Pnl / c.Margin * 100
+		}
+	}
+	return out
+}

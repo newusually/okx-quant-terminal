@@ -53,6 +53,11 @@ func mkSignal(score int, ts int64) *Signal {
 		InstID: "TEST-USDT-SWAP", Bar: "15m", Ts: ts,
 		Close: 1.5950, Mask: (1 << uint(score)) - 1, Score: score,
 		HitList: "势能,摩擦,动能,RSI,布林,MACD,TD9,放量", Ready: true,
+		// ★ 2026-10-02 三期：加仓判定与买入共用 SignalQualified，
+		//   默认还要求「这根 K 线必须真涨 > min_bar_rise_pct（1%）」。
+		//   这里造一根涨 2% 的 K 线，让「分数够 → 加仓」这条主路径仍然成立；
+		//   RisePct 不够的负例由 TestAddon_RejectedWhenBarDidNotRise 单独覆盖。
+		RisePct: 2.0,
 	}
 }
 
@@ -355,3 +360,79 @@ func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
 }
 
 func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }
+
+// ---------------------------------------------------------------------------
+// 三期（2026-10-01）：加仓也必须「触发那根 K 线真涨」
+// ---------------------------------------------------------------------------
+
+// TestAddon_SkipWhenBarDidNotRise 分数够、但触发那根 K 线没真涨 → 不加仓。
+//
+// 用户口径：「score >3 + 额外条件 有信号的那个 K 线必须大于 1% 涨幅才行，
+// 就买入和加仓」。加仓与买入共用 SignalQualified，所以这里也必须被拦住。
+//
+// 这条特别值得测：涨幅条件是在 SignalQualified 里判的。若哪天有人把加仓
+// 改回「自己判分数」，涨幅条件就会只在买入路径生效 —— 而加仓次数不限，
+// 会在一根下跌的 K 线上反复补仓。亏得最快的就是这种。
+func TestAddon_SkipWhenBarDidNotRise(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.ScoreThreshold = 4 // 三期默认（= score > 3）
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.Leverage = 20
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	ins := mkIns()
+	p := basePos(1.6000)
+
+	// 分数够（8/8），但这根只涨 0.3% → 不加
+	sig := mkSignal(8, barMs*11)
+	sig.RisePct = 0.3
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
+		t.Fatalf("触发那根只涨 0.3%%（< 1%%）不该加仓")
+	}
+
+	// 涨 0.99% 仍然不加（口径是**严格**大于 1%）
+	sig.RisePct = 0.99
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
+		t.Fatalf("涨 0.99%% 未超过 1%%，不该加仓（口径是严格大于）")
+	}
+
+	// 涨 1.2% → 加
+	sig.RisePct = 1.2
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("涨 1.2%% 且 8/8 共振 → 应当加仓")
+	}
+
+	// 把门槛显式关掉（写 0）之后，涨 0.3% 也能加 —— 证明这个开关真的接在判定上
+	zero := 0.0
+	cfg.Entry.MinBarRisePct = &zero
+	sig.RisePct = 0.3
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("min_bar_rise_pct=0 表示关闭该条件，应当加仓（0 不能被反压成 1.0）")
+	}
+}
+
+// TestAddon_ThreePeriodDefaultScore 三期默认口径（threshold=4）下 score=4 也要能加仓。
+//
+// 这是「加仓阈值默认值」与「买入阈值默认值」必须同一个入口的守门测试：
+// 两者都走 cfg.ThresholdFor，任何一边单独改默认值都会在这里露馅。
+func TestAddon_ThreePeriodDefaultScore(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.Leverage = 20
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	// 刻意不显式设置 ScoreThreshold：默认必须是 4（= 用户说的「score > 3」）
+	if got := cfg.ThresholdFor("TEST-USDT-SWAP"); got != 4 {
+		t.Fatalf("三期默认阈值应为 4（等价 score>3），实际 %d", got)
+	}
+	p := basePos(1.6000)
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(4, barMs*11), barMs, mkIns()); !d.Add {
+		t.Fatalf("score=4（>3）且涨 2%% → 应当加仓，说明默认阈值没落到 4")
+	}
+	// score=3 在「>3」的边界外侧 → 不加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(3, barMs*11), barMs, mkIns()); d.Add {
+		t.Fatalf("score=3 不满足「>3」，不该加仓")
+	}
+}

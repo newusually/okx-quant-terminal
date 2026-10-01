@@ -200,22 +200,25 @@ func TestBarsDefaultsCoverFourPeriods(t *testing.T) {
 	}
 }
 
-// TestScoreThresholdDefaultsToEight 买入/加仓阈值默认 8（用户口径
-// 「买入的要求是 8 个同时共振指标才买入」+「加仓条件也是和买入条件一样」）。
-func TestScoreThresholdDefaultsToEight(t *testing.T) {
+// TestScoreThresholdDefaultsToFour 买入/加仓阈值默认 4 —— 等价于用户说的「score > 3」。
+//
+// 判定处是 `score >= score_threshold`，而 Score 是 0~8 的整数，
+// 所以「> 3」与「>= 4」完全等价。用 4 表达就不必把判定改成严格大于
+// （改了会让所有历史口径跟着漂）。
+func TestScoreThresholdDefaultsToFour(t *testing.T) {
 	d := defaultConfig()
-	if d.ScoreThreshold != 8 {
-		t.Fatalf("默认 score_threshold 应为 8，实际 %d", d.ScoreThreshold)
+	if d.ScoreThreshold != 4 {
+		t.Fatalf("默认 score_threshold 应为 4（等价 score>3），实际 %d", d.ScoreThreshold)
 	}
-	// 兜底里不再给 BTC/ETH 单独放宽 —— 用户要的是「全市场一律 8 个全中」
+	// 兜底里不给 BTC/ETH 单独放宽 —— 用户要的是「全市场同一个阈值」
 	if len(d.ScoreThresholdMap) != 0 {
 		t.Fatalf("默认 score_threshold_map 应为空，实际 %v", d.ScoreThresholdMap)
 	}
-	// 没写阈值时走 8；显式写的仍然生效
+	// 没写阈值时走 4；显式写的仍然生效
 	c := &Config{}
 	fillDefaults(c)
-	if c.ThresholdFor("BTC-USDT-SWAP") != 8 {
-		t.Fatalf("阈值缺失时应为 8，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
+	if c.ThresholdFor("BTC-USDT-SWAP") != 4 {
+		t.Fatalf("阈值缺失时应为 4，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
 	}
 	c = &Config{ScoreThreshold: 6}
 	fillDefaults(c)
@@ -230,11 +233,11 @@ func TestScoreThresholdDefaultsToEight(t *testing.T) {
 	}
 }
 
-// TestEntryMarginDefaultsTo001USDT 单笔目标保证金默认 0.01U，硬顶 1U。
-func TestEntryMarginDefaultsTo001USDT(t *testing.T) {
+// TestEntryMarginDefaultsTo01USDT 单笔目标保证金默认 0.1U，硬顶 1U。
+func TestEntryMarginDefaultsTo01USDT(t *testing.T) {
 	d := defaultConfig()
-	if d.Entry.MarginUSDT != 0.01 {
-		t.Fatalf("默认 margin_usdt 应为 0.01，实际 %v", d.Entry.MarginUSDT)
+	if d.Entry.MarginUSDT != 0.1 {
+		t.Fatalf("默认 margin_usdt 应为 0.1，实际 %v", d.Entry.MarginUSDT)
 	}
 	if d.Entry.MaxMarginUSDT != 1.0 {
 		t.Fatalf("默认 max_margin_usdt 应为 1.0，实际 %v", d.Entry.MaxMarginUSDT)
@@ -242,10 +245,70 @@ func TestEntryMarginDefaultsTo001USDT(t *testing.T) {
 	if d.MaxOrderMarginUSDT != 1.0 {
 		t.Fatalf("默认 max_order_margin_usdt 应为 1.0，实际 %v", d.MaxOrderMarginUSDT)
 	}
-	// 0.01 是「有效的小正数」，不能被归一化当成「没填」而回落到别的值
-	c := &Config{Entry: &EntryCfg{MarginUSDT: 0.01, MaxMarginUSDT: 1.0}}
+	// 0.1 是「有效的小正数」，不能被归一化当成「没填」而回落到别的值
+	c := &Config{Entry: &EntryCfg{MarginUSDT: 0.1, MaxMarginUSDT: 1.0}}
 	fillDefaults(c)
-	if c.Entry.MarginUSDT != 0.01 {
-		t.Fatalf("margin_usdt=0.01 被改成了 %v", c.Entry.MarginUSDT)
+	if c.Entry.MarginUSDT != 0.1 {
+		t.Fatalf("margin_usdt=0.1 被改成了 %v", c.Entry.MarginUSDT)
+	}
+}
+
+// TestMinBarRisePctThreeStates 「这根 K 线必须真涨」的三种状态必须泾渭分明。
+//
+//	min_bar_rise_pct 用**指针**，为的就是区分「没写」与「写了 0」：
+//	  没写   → 默认 1.0（漏配时条件仍在，不会静默放开全市场下单）
+//	  写 0   → 真的关掉这个条件
+//	  写负数 → 视为写错，按默认 1.0
+//
+// 为什么值得单独守：二期在 max_concurrent_positions / daily_max_entries 上
+// 正是栽在「用户写的 0 被 `<= 0` 反压回默认值」—— 配置看起来改了、其实没生效。
+// 若这里退化成值类型 + `<=0 兜底`，同一个坑会原样复现。
+func TestMinBarRisePctThreeStates(t *testing.T) {
+	// ① 没写（nil）→ 默认 1.0
+	d := defaultConfig()
+	if d.MinBarRisePct() != 1.0 {
+		t.Fatalf("默认 min_bar_rise_pct 应为 1.0，实际 %v", d.MinBarRisePct())
+	}
+	c := &Config{}
+	fillDefaults(c)
+	if c.MinBarRisePct() != 1.0 {
+		t.Fatalf("键缺失时应为 1.0，实际 %v", c.MinBarRisePct())
+	}
+	// ② 显式写 0 → 关闭条件（绝不能被反压回 1.0）
+	zero := 0.0
+	c = &Config{Entry: &EntryCfg{MinBarRisePct: &zero}}
+	fillDefaults(c)
+	if c.MinBarRisePct() != 0 {
+		t.Fatalf("min_bar_rise_pct=0（显式关闭）被改成了 %v，条件会静默复活", c.MinBarRisePct())
+	}
+	// ③ 显式写正数 → 原样生效
+	v := 2.5
+	c = &Config{Entry: &EntryCfg{MinBarRisePct: &v}}
+	fillDefaults(c)
+	if c.MinBarRisePct() != 2.5 {
+		t.Fatalf("min_bar_rise_pct=2.5 应原样保留，实际 %v", c.MinBarRisePct())
+	}
+	// ④ 负数 = 写错 → 按默认 1.0（既不能变成「关闭」，也不能倒扣）
+	neg := -3.0
+	c = &Config{Entry: &EntryCfg{MinBarRisePct: &neg}}
+	fillDefaults(c)
+	if c.MinBarRisePct() != 1.0 {
+		t.Fatalf("负数应按默认 1.0 处理，实际 %v", c.MinBarRisePct())
+	}
+	// ⑤ Entry 整块缺失也不能 panic，同样退回默认
+	c = &Config{Entry: nil}
+	if c.MinBarRisePct() != 1.0 {
+		t.Fatalf("Entry 为 nil 时应退回 1.0，实际 %v", c.MinBarRisePct())
+	}
+}
+
+// TestExcludeStockETFDefaultsOff 三期取消了「不买美股/ETF/商品」的过滤。
+//
+// 用户口径：「取消美股 etf 不做的功能，只要买入上限小于 1U 就做」。
+// 这是**兜底默认值**，必须与 service.DefaultUniversePolicy 一致 ——
+// 两处只要有一处留着 true，配置读不到时这条被取消的规则就会悄悄复活。
+func TestExcludeStockETFDefaultsOff(t *testing.T) {
+	if defaultConfig().ExcludeStockETF {
+		t.Fatalf("默认 exclude_stock_etf 应为 false（三期已取消该过滤）")
 	}
 }

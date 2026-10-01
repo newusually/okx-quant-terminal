@@ -21,7 +21,7 @@ type ScanResult struct {
 	Universe   int       // 全市场 USDT 永续合约数
 	Candidates int       // 粗筛后的候选数
 	Scanned    int       // 真正算了信号的合约数
-	Signals    []*Signal // score >= 阈值 的信号（按分数、时间倒序）
+	Signals    []*Signal // 通过 SignalQualified 的信号（按分数、时间倒序）
 	Failed     int       // 抓 K 线失败的合约数
 
 	// FromDB / FromNet 这一轮 K 线分别来自本地库 / OKX 网络。
@@ -215,10 +215,16 @@ func Scan(cfg *conf.Config, cli *OKXClient, bar string, kdb KlineReader) (*ScanR
 	//   详见该函数的注释。
 	policy := UniversePolicyFromConfig(cfg)
 	kept, fst := FilterUniverse(mList, mTickers, delistSet, policy)
-	if fst.DroppedCategory+fst.DroppedNew+fst.DroppedDelist+fst.DroppedNotional > 0 {
-		logx.Logf("INFO", "合约准入过滤：%d → %d（美股ETF -%d，新上线 -%d，待下线 -%d，资金不够 -%d，非live -%d）",
+	// ★ 三期补上「成交额」这一项 ★
+	//   原来这行只打 4 类原因，成交额被过滤掉的那批**根本不出现在日志里** ——
+	//   三期实测「480 → 238（美股ETF -0，新上线 -38，待下线 -1，资金不够 -0，非live -0）」
+	//   各项相加只有 39，剩下 203 个去哪了完全看不出来（就是被 24h 成交额下限滤掉的）。
+	//   报数不全比没有日志更坏：会让人以为「资金不够」的口径生效了。
+	if fst.DroppedCategory+fst.DroppedNew+fst.DroppedDelist+fst.DroppedNotional+
+		fst.DroppedVolume+fst.DroppedState > 0 {
+		logx.Logf("INFO", "合约准入过滤：%d → %d（美股ETF -%d，新上线 -%d，待下线 -%d，成交额 -%d，资金不够 -%d，非live -%d）",
 			fst.Total, fst.Kept, fst.DroppedCategory, fst.DroppedNew,
-			fst.DroppedDelist, fst.DroppedNotional, fst.DroppedState)
+			fst.DroppedDelist, fst.DroppedVolume, fst.DroppedNotional, fst.DroppedState)
 	}
 
 	type cand struct {
@@ -303,7 +309,10 @@ func Scan(cfg *conf.Config, cli *OKXClient, bar string, kdb KlineReader) (*ScanR
 				} else {
 					res.FromNet++
 				}
-				if sig.Score >= cfg.ThresholdFor(j.ins.InstID) {
+				// 买入判据：与加仓共用同一个函数（score 门槛 + 这根 K 线必须真涨）。
+				// 不要在这里手写 `sig.Score >= ...` —— 加仓那边也有一份，
+				// 两处各写一遍就等于把「加仓条件与买入一致」变成口头承诺。
+				if SignalQualified(sig, cfg.ThresholdFor(j.ins.InstID), cfg.MinBarRisePct()) {
 					res.Signals = append(res.Signals, sig)
 				}
 				mu.Unlock()

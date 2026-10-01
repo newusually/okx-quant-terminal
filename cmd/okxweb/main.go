@@ -468,7 +468,15 @@ func runApp(ctx context.Context) error {
 	strategy := strategyStore.Get()
 	fmt.Printf("[CFG] 策略参数：%s，止盈 %.2f%%，共振阈值 %d/8，dry_run=%v\n",
 		strategy.MarginText(), strategy.Exit.TakeProfitPct, strategy.ScoreThreshold, strategy.DryRun)
-	fmt.Printf("[CFG] 准入上限：最小一手保证金 ≤ %.2fU 才进 symbolList（改 JSON 即时生效，无需重启）\n",
+	// ★ 三期新增的入场条件必须和共振阈值一起打出来 ——
+	//   只看到一个数字，会以为「score 够了就买」。
+	riseRule := "K线涨幅条件已关闭"
+	if mr := strategy.MinBarRisePct(); mr > 0 {
+		riseRule = fmt.Sprintf("触发那根 K 线涨幅 > %.2f%%", mr)
+	}
+	fmt.Printf("[CFG] 买入/加仓条件：score ≥ %d 且 %s（加仓与买入走同一判据）\n",
+		strategy.ScoreThreshold, riseRule)
+	fmt.Printf("[CFG] 准入上限：最小一手保证金 ≤ %.2fU 才进 symbolList（品类不限；改 JSON 即时生效，无需重启）\n",
 		strategy.MaxOrderMarginUSDT)
 
 	// ---- 3. 数据服务（业务层）----
@@ -533,8 +541,10 @@ func runApp(ctx context.Context) error {
 	}
 
 	// ---- 2.5 合约准入过滤（哪些能买）----
-	//   不买美股/ETF/商品 + 不买刚上线 + 不买要下线 + 最小一手保证金 ≤ 准入上限
+	//   不买刚上线 + 不买要下线 + 最小一手保证金 ≤ 准入上限
 	//   （上限来自 configs/okx_strategy.json 的 max_order_margin_usdt）
+	//   ★ 三期起不再按品类排除：用户口径「取消美股 etf 不做的功能，
+	//     只要买入上限小于 1U 就做」。
 	service.SetAnnounceCacheDB(db)
 	applyUniverseFilter(db, bf, strategyStore, resolveBackfillDays(*days))
 
@@ -716,18 +726,33 @@ func runApp(ctx context.Context) error {
 //
 // 过滤规则（详细口径见 internal/service/universe.go）：
 //
-//	规则 1  不买美股 / ETF / 商品（OKX instCategory != 1 的全砍掉）
+//	规则 1  不买美股 / ETF / 商品（★ 三期默认已关闭）
 //	规则 2  不买刚上线的（listTime 距今不足 N 天）
 //	规则 3  不买要下线的（OKX 公告中心 announcements-delistings 解析出来的名单）
 //	规则 4  单笔保证金必须 ≤ max_order_margin_usdt 才买得起
 //
-// ★ 所有阈值都从 store 现取（热读 configs/okx_strategy.json），
+// ★ 所有阈值都从配置现取（热读 configs/okx_strategy.json），
 //   所以改完 JSON 不用重启就能改掉 symbolList。
 func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *service.StrategyStore, days int) service.FilterStats {
-	st := store.Get() // ← 热读：文件一变这里拿到的就是新的
-	if st == nil {
+	// 热读一次只做「配置是否可用」的守卫
+	if store.Get() == nil {
 		return service.FilterStats{}
 	}
+
+	// ★★ 准入策略必须走唯一构造入口，不要在这里手写字面量 ★★
+	//
+	// 这里原来手写了一份 service.UniversePolicy{...} —— 与二期 Scan() 漏填
+	// MarginPolicy 是**同一个坑的复现**（当时准入上限静默从 1U 掉回 0.01U，
+	// 480 个候选只剩 33 个）。三期复查时发现它同样漏填了 ExtraExclude：
+	// 也就是说 exclude_inst 这条手动黑名单**只在下单扫描路径生效**，
+	// 而「写回 inst 表」这条路径完全不看 —— 手动拉黑的合约照样会显示成
+	// 「可交易」，两条路的结果互相打架。
+	//
+	// 另外：策略在这个进程里有两套解析器 —— conf（下单与准入计算用）与
+	// service.StrategyConfig（前端展示用）。准入是会决定「买不买」的判定，
+	// 必须与下单同源，所以取 conf.LoadConfig()。
+	policy := service.UniversePolicyFromConfig(conf.LoadConfig())
+
 	insts, err := db.ListInstruments()
 	if err != nil {
 		fmt.Printf("[准入] ⚠ 读合约列表失败：%v\n", err)
@@ -741,17 +766,6 @@ func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *servic
 	tkMap := make(map[string]model.Ticker, len(tks))
 	for _, t := range tks {
 		tkMap[t.InstID] = t
-	}
-
-	policy := service.UniversePolicy{
-		ExcludeStockETF:       st.ExcludeStockETF,
-		ExcludeNewListingDays: st.ExcludeNewListingDays,
-		ExcludeDelisting:      st.ExcludeDelisting,
-		MarginUSDT:            st.Entry.MarginUSDT,
-		Leverage:              st.Entry.Leverage,
-		MarginPolicy:          st.Entry.MarginPolicy,
-		MaxMarginUSDT:         st.MaxOrderMarginUSDT,
-		MinQuoteVolume24h:     st.MinQuoteVolume24h,
 	}
 
 	// 下线名单：抓 OKX 公告（有 24 小时缓存）
@@ -795,7 +809,13 @@ func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *servic
 	fmt.Println("[准入] ── 合约准入过滤 ─────────────────────────────────")
 	fmt.Printf("[准入] 抓到合约      : %d 个 USDT 永续\n", stats.Total)
 	fmt.Printf("[准入] 分类分布      : %v（1=加密 3=美股ETF 4=商品）\n", stats.ByCategory)
-	fmt.Printf("[准入] 排除 美股/ETF/商品 : %d（规则1）\n", stats.DroppedCategory)
+	// 规则 1 三期已默认关闭：这里必须把开关状态打出来，
+	// 否则「排除 0 个」既可能是「已关闭」也可能是「本来就没有」。
+	catState := "已关闭（三期：只看最小一手 ≤ 上限）"
+	if policy.ExcludeStockETF {
+		catState = "启用中"
+	}
+	fmt.Printf("[准入] 排除 美股/ETF/商品 : %d（规则1·%s）\n", stats.DroppedCategory, catState)
 	fmt.Printf("[准入] 排除 非 live       : %d\n", stats.DroppedState)
 	fmt.Printf("[准入] 排除 刚上线(%d天)  : %d（规则2）\n", policy.ExcludeNewListingDays, stats.DroppedNew)
 	if policy.ExcludeDelisting {
@@ -805,8 +825,8 @@ func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *servic
 	fmt.Printf("[准入] 排除 单张>%.2fU     : %d（规则5·最小一手保证金超上限）\n", policy.OrderMarginCap(), stats.DroppedNotional)
 	fmt.Printf("[准入] ✔ 可交易合约   : %d 个\n", stats.Kept)
 	if stats.ScaledUp > 0 {
-		fmt.Printf("[准入]   · 其中 %d 个 0.1U 买不起 1 张，下单会放大到刚好 1 张（≤%.2fU）\n",
-			stats.ScaledUp, policy.OrderMarginCap())
+		fmt.Printf("[准入]   · 其中 %d 个 %.2fU 买不起 1 张，下单会放大到刚好 1 张（≤%.2fU）\n",
+			stats.ScaledUp, policy.MarginUSDT, policy.OrderMarginCap())
 	}
 	if len(stats.DelistSymbols) > 0 {
 		fmt.Printf("[准入] 命中下线公告币种 : %v\n", stats.DelistSymbols)

@@ -46,6 +46,15 @@ type Signal struct {
 	Mask    int
 	Score   int
 	HitList string // 命中的因子名，逗号分隔
+
+	// RisePct 这一根 K 线自己的涨跌幅（%）= (收 − 开) ÷ 开 × 100。
+	//
+	// ★ 2026-10-02 三期新增（用户口径：「有信号的那个 K 线必须大于 1% 涨幅才行」）。
+	//   放在 Signal 里而不是让调用方自己拿 candles[idx] 算，是为了让
+	//   买入扫描与加仓判定读到**同一个数** —— 两处各算一遍是本项目的老坑。
+	//   开盘价为 0（脏数据）时记 0：这样它一定过不了「> 1%」的门槛，偏保守。
+	RisePct float64
+
 	Pot     float64
 	Fri     float64
 	Kin     float64
@@ -55,6 +64,48 @@ type Signal struct {
 	BollUp  float64
 	MacdH   float64
 	Ready   bool // 指标是否算得出来（暖机够不够）
+}
+
+// SignalQualified 判断一个信号是否**够格下单**。
+//
+// ★★ 这是「买入」与「加仓」共用的唯一判据 —— 两处都必须调它 ★★
+//
+// 用户口径（2026-10-02 三期）：
+//
+//	「score >3 + 额外条件：有信号的那个 K 线必须大于 1% 涨幅才行，
+//	  就买入和加仓」
+//
+// 三个条件同时成立才通过：
+//
+//	① sig.Ready           指标暖机完整。不 Ready 时 Pot / Rsi / BollLo 是 NaN，
+//	                      score 本身没有意义（比如冷启动只拉到几十根 K 线）
+//	② sig.Score >= 门槛   调用方传 cfg.ThresholdFor(instID)。threshold = 4
+//	                      就等价于用户说的「score > 3」（Score 是 0~8 的整数）
+//	③ sig.RisePct > 涨幅  该根 K 线的实体涨跌幅要**严格大于** minRisePct。
+//	                      minRisePct <= 0 表示不启用这个条件（只看分数）
+//
+// 为什么必须做成一个函数：加仓的口径是「与买入条件完全一致」。只要两处
+// 各写一遍判定，迟早会在边界上走岔 ——「>= 还是 >」「用 Close 还是 RisePct」
+// —— 而且不会报错。一期 closedWindow 喂错 Candle.Confirm 就是这么静默失效的。
+//
+// 注意 threshold <= 0 时**直接拒绝**：那是配置坏掉的状态（归一化保证它 ≥ 1），
+// 与其「放宽到只看 1 个因子」乱开单，不如这一轮不下单。
+func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
+	if sig == nil || !sig.Ready {
+		return false
+	}
+	if threshold <= 0 {
+		return false
+	}
+	if sig.Score < threshold {
+		return false
+	}
+	// 写成 !(a > b) 而不是 a <= b：RisePct 理论上是 NaN 时
+	// 所有比较都是 false，前者会把 NaN 判成「不合格」（保守），后者会放行。
+	if minRisePct > 0 && !(sig.RisePct > minRisePct) {
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +342,10 @@ func computeSignalReference(instID, bar string, candles []Candle, idx int) *Sign
 	s.High = cur.H
 	s.Low = cur.L
 	s.Vol = cur.V
+	// 与 indicator_series.go 的 signalAt 保持一致（等价性测试会逐字段比对）
+	if cur.O > 0 {
+		s.RisePct = (cur.C - cur.O) / cur.O * 100
+	}
 
 	h := make([]float64, n)
 	l := make([]float64, n)

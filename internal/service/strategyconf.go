@@ -27,6 +27,12 @@ type StrategyEntry struct {
 	DailyMaxEntries        int     `json:"daily_max_entries"`
 	MarginPolicy           string  `json:"margin_policy"`
 	MaxMarginUSDT          float64 `json:"max_margin_usdt"`
+
+	// MinBarRisePct 触发信号的那根 K 线必须涨过这个百分比（三期新增）。
+	// 用指针区分「没写」（nil → 默认 1.0）与「写了 0」（= 关闭该条件），
+	// 语义与 conf.EntryCfg.MinBarRisePct 完全一样 —— 前端展示的值
+	// 必须与真正生效的值一致，否则改了口径在页面上看不出来。
+	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
 }
 
 // StrategyExit 出场参数
@@ -42,7 +48,8 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径（2026-10-01 二期）：加仓次数**不限**，触发条件与买入完全一致（8 指标全中）。
+//	用户口径（2026-10-01 二期 → 2026-10-02 三期）：加仓次数**不限**，
+//	触发条件与买入完全一致（score ≥ 4 且触发那根 K 线涨幅 > 1%，共用 SignalQualified）。
 type StrategyAddon struct {
 	Enabled  bool    `json:"enabled"`
 	Ratio    float64 `json:"ratio"`
@@ -80,6 +87,26 @@ type StrategyConfig struct {
 	Path string `json:"path"` // 配置文件路径（不在 JSON 里）
 }
 
+// MinBarRisePct 触发信号那根 K 线的最低涨幅（%）。
+//
+//	指针 nil（键没写）→ 默认 1.0
+//	0                → 关闭该条件（只看 score）
+//	负数             → 视为写错，按默认 1.0
+//
+// 与 conf.Config.MinBarRisePct() 是同一套三态语义。前端只是展示，
+// 但**展示的值必须等于真正生效的值** —— 否则改了 JSON 在页面上看不出变化，
+// 「改了没用」的那种排查又要来一遍。
+func (c *StrategyConfig) MinBarRisePct() float64 {
+	if c == nil || c.Entry.MinBarRisePct == nil {
+		return conf.DefaultMinBarRisePct
+	}
+	v := *c.Entry.MinBarRisePct
+	if v < 0 {
+		return conf.DefaultMinBarRisePct
+	}
+	return v
+}
+
 // StrategyLive 实时引擎的两条心跳间隔（秒）
 //
 //	ExitSec  止盈巡检：只看在持仓，浮盈够线立刻平。要快，默认 3 秒。
@@ -92,21 +119,31 @@ type StrategyLive struct {
 // LoadStrategy 读配置文件。带注释的 JSON 也能读（先把注释剥掉）。
 // 文件不存在时返回内置默认值 + error，调用方自己决定怎么处理。
 func LoadStrategy(path string) (*StrategyConfig, error) {
+	// 取一个局部变量：让「默认值」的指针有独立地址，
+	// 不与其它调用共享同一块内存（指针字段被就地改写时会互相污染）。
+	minBarRiseDefault := conf.DefaultMinBarRisePct
 	def := &StrategyConfig{
 		Enabled: true, DryRun: true, Bar: "15m",
 		BarsEnabled: []string{"1m", "3m", "5m", "15m"},
 		SignalBars:  []string{"1m", "3m", "5m", "15m"},
-		ScoreThreshold: 8,
+		// ★ 三期：阈值 8 → 4（= 用户说的「score > 3」）
+		ScoreThreshold: 4,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
-		ExcludeStockETF: true, ExcludeNewListingDays: 30, ExcludeDelisting: true,
+		// ★ 三期：品类过滤默认关闭（「取消美股 etf 不做的功能」）
+		ExcludeStockETF: false, ExcludeNewListingDays: 30, ExcludeDelisting: true,
 		// ↑↓ 这些数字全是「配置文件缺失 / 解析失败」时的兜底，
 		//    真正生效的口径永远来自 configs/okx_strategy.json（热插拔）。
+		//    ⚠ 但兜底值也必须跟真源同口径：本文件与 conf.DefaultConfig、
+		//      service.DefaultUniversePolicy 三处一旦不一致，配置读不到时
+		//      「已取消的规则」就会悄悄复活。
 		MaxOrderMarginUSDT: 1.0,
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
 			// ★ 0 = 不限（用户口径「取消限制」）。这里只是「配置文件读不到」时的兜底，
 			//   与 conf.DefaultConfig 保持一致，免得兜底值把限制偷偷放回来。
-			MarginUSDT: 0.01, Leverage: 20, MaxConcurrentPositions: 0,
-			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0},
+			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 0,
+			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
+			// 三期：默认要求「这根 K 线真涨 > 1%」（指针对上局部变量，别共享全局）
+			MinBarRisePct: &minBarRiseDefault},
 		Exit: StrategyExit{TakeProfitPct: 1.0, BollUpperExit: true, MaxHoldMinutes: 360},
 		// ★ MaxTimes: 0 = 不限；RiseBar "auto" = 用该仓位自己的周期。
 		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
