@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>验收报告 · 四期（关布林上轨 + 止盈 0.3% + 超时 1 小时 + 涨幅 1.1% + 1m 下线 + 分区 DDL 修复）2026-10-02</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --sub:#5b6673; --line:#e3e6ea;
+    --ok:#0a7d4c; --warn:#a8620a; --bad:#b3261e; --accent:#0b62c4;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 24px 72px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+  .lead{color:var(--sub);margin:0 0 28px;font-size:14px}
+  h2{font-size:18px;margin:38px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;font-weight:600;color:var(--sub);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  code,pre{font-family:var(--mono);font-size:12.5px}
+  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+  pre{background:#1c2128;color:#d6dde6;padding:14px 16px;border-radius:8px;overflow-x:auto;line-height:1.55}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:14px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:21px;letter-spacing:-.3px;margin-bottom:2px}
+  .kpi span{font-size:12px;color:var(--sub)}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:99px;
+        border:1px solid currentColor;vertical-align:1px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  blockquote{margin:12px 0;padding:10px 16px;background:#fff;border-left:3px solid var(--accent);
+             border-radius:0 8px 8px 0;color:#333;font-size:14px}
+  .foot{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>验收报告 · 四期：关布林上轨 / 止盈 0.3% / 超时 1 小时 / 涨幅 1.1% / 1m 下线 / 分区 DDL 修复</h1>
+  <p class="lead">
+    OKX 全合约量化终端 · <code>C:\Users\Administrator\Documents\finally</code> ·
+    2026-10-02 00:30 – 01:30 · 运行时 <code>bin\okxweb.exe</code> = 9,037,824 字节
+    （<code>go build -trimpath -ldflags "-s -w"</code>，md5 <code>e6c75a249e7578f94b8422693db78bf4</code>）
+  </p>
+
+  <div class="grid">
+    <div class="kpi"><b class="ok">15 秒</b><span>SNDK「秒进秒出」的根因量化</span></div>
+    <div class="kpi"><b class="ok">338 万 → 87 万</b><span>K 线行数（1m 251 万行已删）</span></div>
+    <div class="kpi"><b class="ok">123.2 → 83.8 MB</b><span>kline 表体积（ANALYZE 后）</span></div>
+    <div class="kpi"><b class="ok">5 / 5</b><span>单测包全绿（conf/handler/repo/service/cmd）</span></div>
+    <div class="kpi"><b class="ok">1064 → OK</b><span>补分区 DDL：从未成功 → 一次成功</span></div>
+    <div class="kpi"><b class="ok">3.302s</b><span>三周期整轮扫描（全本地，无网络回退）</span></div>
+  </div>
+
+  <h2>一、SNDK 为什么亏了平仓 <span class="pill ok">根因已定位</span></h2>
+
+  <div class="card">
+    <h3>日志与库内双证（同一笔）</h3>
+    <pre>开仓  23:58:22  张数=0.001  开仓价=1744.30  共振 4/8  周期=3m
+平仓  23:58:37  平仓价=1741.40  盈亏=-0.0033U(-0.17%)  原因=布林上轨（均值回归出场）
+                       ↑ 相隔 15 秒</pre>
+
+    <h3>根因：布林上轨出场与买入判据读的是同一根 K 线</h3>
+    <p>
+      买入的硬条件之一是「<b>触发那根 K 线必须真涨 &gt; 1%</b>」。那么同一根 K 线既然涨了 &gt;1%，
+      它的 <code>close</code> 就有很大概率<b>已经站在 <code>SMA20 + 2σ</code> 之上</b>。
+      于是开仓之后，下一轮 3 秒巡检立刻判定「布林上轨」→ 反手市价平掉。
+    </p>
+    <blockquote>
+      这不是偶发，而是<b>结构性缺陷</b>：买入条件越强（越要求「真涨」），
+      越会命中布林上轨。两个条件在数学上互相拉扯。
+    </blockquote>
+
+    <h3>处理</h3>
+    <ul>
+      <li><code>exit.boll_upper_exit</code> ：<code>true → false</code>（关闭布林上轨出场）</li>
+      <li>判决性证据：日志里最后一次 <code>布林上轨（均值回归出场）</code> 平仓是
+          <b>00:36:04（HYPE）</b>，之后再未出现；<code>超时 1 小时 到点自动平仓</code> 成为唯一出场原因。</li>
+    </ul>
+
+    <h3>顺带澄清：全库没有任何「程序侧爆仓」记录</h3>
+    <p>
+      亏损最大的一批全部来自 <b>OKX 历史同步</b>（<code>NMR -108.65 / ETH -103.41 / …</code>），
+      最近一笔 <code>TIA -33.7 (-100.05%)</code> 发生在 9/24 —— 都在本系统接管之前。
+    </p>
+  </div>
+
+  <h2>二、出场口径最终形态</h2>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>通道</th><th>四期值</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>止盈</td><td class="ok">+0.3%</td><td><b>保留</b>（<code>take_profit_pct: 1.0 → 0.3</code>）。用户口径「赚 0.3% 也平仓，把 1% 拿掉」</td></tr>
+        <tr><td>布林上轨</td><td class="bad">关闭</td><td><code>boll_upper_exit: false</code> —— 秒进秒出的元凶</td></tr>
+        <tr><td>超时</td><td class="ok">60 分钟</td><td><code>max_hold_minutes: 360 → 60</code>。与止盈互为兜底</td></tr>
+        <tr><td>止损</td><td>不设</td><td><code>stop_loss_pct: 0</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>为什么止盈不能跟着一起关（有实测代价）</h3>
+    <p>
+      中途我曾把 <code>take_profit_pct</code> 设成 0（误把「不准乱平仓」理解成「连止盈也关」），
+      用户当即纠正。恢复后回看那段时间的纯超时平仓：
+    </p>
+    <pre>00:40 ~ 00:55 的 9 笔纯超时平仓
+  · 6 笔「未止盈」合计  -0.0924U
+  · 3 笔「到点自动平仓」+0.0767U
+  · 其中 MU 被超时平掉时已 +0.82%  ← 差一点够 +1% 止盈线</pre>
+    <p>结论：止盈是<b>把浮盈落袋</b>的那条腿，关掉它净值会变负。<b>只关布林，不关止盈。</b></p>
+
+    <h3>文案统一（防止口径再次漂移）</h3>
+    <ul>
+      <li>新增 <code>service.ExitText(tpPct, boll, holdMin)</code>：启动日志与前端共用，<b>只列真正开着的通道</b>；
+          全关时返回「无（不会自动平仓）」—— 避免「止盈 0.00%」这种看着像「线设在 0」的误导写法。</li>
+      <li>超时 reason 措辞：<code>超时 %s 未止盈</code> → <code>超时 %s 到点自动平仓</code>。
+          超时的定义是「持有到期」，不是「没到止盈线」。</li>
+    </ul>
+  </div>
+
+  <h2>三、买入 / 加仓条件（同一根 K 线）</h2>
+
+  <div class="card">
+    <p><b>用户口径</b>：「买入条件是 8 个共振中的 4 个及以上，1.1% 上涨则买入，<b>同 K 线</b>」</p>
+
+    <table>
+      <thead><tr><th>环节</th><th>实现</th></tr></thead>
+      <tbody>
+        <tr><td>取哪一根</td><td><code>scanner.go:291</code> <code>idx := IndexOfLastClosed(cands, bar, nowMs)</code> —— 只取<b>最后一根已收盘</b>的 K 线</td></tr>
+        <tr><td>共振分</td><td><code>sig := ComputeSignal(instID, bar, cands, idx)</code>，<code>Score ∈ [0,8]</code></td></tr>
+        <tr><td>涨幅</td><td><code>Signal.RisePct</code> = <b>同一根</b>的 <code>(C−O)/O×100</code>（<code>indicator.go:347</code> / <code>indicator_series.go:147</code>）</td></tr>
+        <tr><td>判定</td><td><code>service.SignalQualified(sig, threshold, minRisePct)</code>：<code>Score &gt;= 4</code> <b>且</b> <code>RisePct &gt; 1.1</code>（严格大于）</td></tr>
+        <tr><td>共用点</td><td><b>买入扫描</b>（<code>scanner.go:315</code>）/ <b>加仓判定</b>（<code>addon.go:309</code>）/ <b>信号入库</b>（<code>sigbackfill.go:294</code>）<b>三处同一个函数</b></td></tr>
+      </tbody>
+    </table>
+
+    <blockquote>
+      不跨根、不取「最近几根里任意一根满足」。<code>min_bar_rise_pct: 1.0 → 1.1</code>。<br>
+      三处共用一个函数是有意为之 —— 任何一处手写「<code>sig.Score &gt;= …</code>」，
+      图上标注的 🚀 就会与实盘真正下单的信号不一致，且不报错。
+    </blockquote>
+  </div>
+
+  <h2>四、1m 周期彻底下线 + 存量数据删除</h2>
+
+  <div class="card">
+    <h3>四处一起下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）</h3>
+    <table>
+      <thead><tr><th>#</th><th>位置</th><th>改动</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>internal/model/model.go</code> 的 <code>EnabledBars</code>（权威）</td><td><code>{1m,3m,5m,15m}</code> → <code>{3m,5m,15m}</code></td></tr>
+        <tr><td>2</td><td><code>internal/conf/config.go</code> 的 <code>defaultConfig()</code></td><td>同步三周期（否则配置读不到时 1m 复活）</td></tr>
+        <tr><td>3</td><td><code>internal/service/strategyconf.go</code> 的 <code>LoadStrategy()</code></td><td>同步（前端展示用的第二份 schema）</td></tr>
+        <tr><td>4</td><td><code>configs/okx_strategy.json</code> + <code>.example.json</code></td><td><code>bars_enabled</code> / <code>signal_bars</code> 均改三周期</td></tr>
+        <tr><td>5</td><td><code>web/assets/app.js</code> 首屏兜底 <code>state.bars</code></td><td>同步（选项卡由 <code>/api/state</code> 渲染）</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="warn">★ 下线周期会让「按仓位自己的周期加仓」永久静默失效 ★</h3>
+    <p>
+      加仓的 <code>addon.rise_bar: "auto"</code> 取的是<b>仓位自己的周期</b>（<code>trade.bar</code>）。
+      老仓可能是已经下线的 <code>1m</code> —— 那份 K 线会被 <code>CleanupKlines</code> 按
+      <code>model.EnabledBars</code> <b>整段删掉</b>，于是 <code>LatestSignal(…,"1m")</code> 永远取不到数据。
+    </p>
+    <blockquote>
+      后果不是「加仓条件略偏」，而是<b>这个仓位再也不会加仓</b>，
+      而且<b>永久</b>（K 线不会回来，重启/改回配置都没用）。
+    </blockquote>
+    <p>修法：<code>service.addonBarFor</code> 末尾再判一次白名单，不在名单就退回主周期，主周期也不在就取名单最后一个。</p>
+
+    <h3>存量数据删除（用户「删除多余数据」）</h3>
+    <pre>盘点：kline 3,385,274 行 = 1m 2,515,302 行(74%) + 非 1m 868,960 行
+
+做法：CREATE TABLE kline_new LIKE kline      -- 实测自动继承 14 个分区
+      INSERT INTO kline_new SELECT * FROM kline WHERE bar &lt;&gt; '1m';   -- 868,960 行，约 90s
+      RENAME TABLE kline TO kline_old_1m, kline_new TO kline;
+      DROP TABLE kline_old_1m;</pre>
+
+    <blockquote>
+      <b>必须先停 OKXWeb 再拷。</b>第一次拷贝时服务还在写，源表从 867,580 涨到 868,960，
+      拷出来的 867,580 行与源表对不上 —— 这种「差 1380 行」的不一致不会报错，只会静默地带进新表。
+    </blockquote>
+
+    <table>
+      <thead><tr><th>表</th><th>删除的 1m 行</th><th>处理</th></tr></thead>
+      <tbody>
+        <tr><td><code>kline</code></td><td>2,515,302</td><td>整表重建（表替换）</td></tr>
+        <tr><td><code>signals</code></td><td>15,520（占该表 86%）</td><td><code>DELETE WHERE bar='1m'</code>，剩 2,402</td></tr>
+        <tr><td><code>signal_scan_state</code></td><td>243</td><td><code>DELETE WHERE bar='1m'</code></td></tr>
+        <tr><td><code>backfill_job</code></td><td>480</td><td><code>DELETE WHERE bar='1m'</code></td></tr>
+        <tr><td><code>trade</code>（bar='1m' 的 5 笔）</td><td class="ok">保留</td><td><b>真实持仓记录，不是派生数据</b></td></tr>
+      </tbody>
+    </table>
+
+    <h3>结果</h3>
+    <table>
+      <thead><tr><th>周期</th><th>行数</th></tr></thead>
+      <tbody>
+        <tr><td>15m</td><td>459,195</td></tr>
+        <tr><td>3m</td><td>208,363</td></tr>
+        <tr><td>5m</td><td>201,402</td></tr>
+        <tr><td>1m</td><td class="ok">0</td></tr>
+      </tbody>
+    </table>
+    <p>
+      合计 <b>868,960 行</b>；<code>ANALYZE</code> 后表体积 <b>123.2 MB → 83.8 MB</b>；
+      C 盘可用空间 <b>19 GB → 20 GB</b>。
+    </p>
+  </div>
+
+  <h2>五、账户爆仓风险巡检（用户「不准爆仓」）</h2>
+
+  <div class="card">
+    <p>
+      交易所强平<b>不可关闭</b>，只能量化 + 巡检。全仓 cross 下看的是<b>账户整体</b>：
+      <code>adjEq</code> 跌破 <code>mmr</code> 才强平，与单个仓位的盈亏没有直接关系。
+    </p>
+
+    <p><code>service.ProbeAccountDiag()</code> 新增「爆仓风险巡检」段，可算出的指标：</p>
+    <ul>
+      <li><b>安全垫 = adjEq − mmr</b>（&gt; 0 就没爆仓，越厚越安全）</li>
+      <li><b>名义敞口 ≈ Σ(imr × lever)</b></li>
+      <li><b>安全垫 ÷ 名义敞口</b> = 「全部持仓<b>同时</b>反向跌多少 % 才吃光它」</li>
+    </ul>
+
+    <h3 class="warn">★ 单币种保证金模式（<code>acctLv=2</code>）下顶层字段全是空串 ★</h3>
+    <p>
+      <code>/account/balance</code> 顶层的 <code>adjEq</code> / <code>availEq</code> / <code>mmr</code>
+      在这个模式下<b>全部返回空字符串</b>，真值在 <code>details[USDT]</code> 的
+      <code>eqUsd</code> / <code>availEq</code> / <code>availBal</code> / <code>mmr</code>。
+      不兜底就会整排显示 0 —— 看上去像「权益 0、随时爆仓」，<b>比不显示更误导</b>。
+    </p>
+
+    <h3>实测</h3>
+    <pre>调整后权益 adjEq = 33.78U    维持保证金 mmr = 0.48U    可用 availEq = 31.14U
+占用保证金 2.64U（7.80%）
+★ 安全垫 = 33.78 − 0.48 = 33.30U
+名义敞口 ≈ 52.73U  →  全部持仓同时反向跌 63.15% 才吃光安全垫
+维持保证金占权益 1.42%（100% 才强平）</pre>
+  </div>
+
+  <h2>六、独立真实缺陷：补分区 DDL 从设计上就走不通 <span class="pill bad">已修</span></h2>
+
+  <div class="card">
+    <h3>原始写法（<code>internal/repo/partition.go</code>）</h3>
+    <pre>ALTER TABLE kline DROP PARTITION pmax, ADD PARTITION (...), ADD PARTITION (PARTITION pmax ...);
+-- ❌ MySQL 不允许在同一条 ALTER 里既 DROP 又 ADD 分区，恒定报 Error 1064</pre>
+
+    <p>
+      也就是说这段代码<b>从写下来那天起就没成功过</b>：新分区永远补不上，
+      数据一路堆进 <code>pmax</code> —— 而 <code>pmax</code> 恰恰是「永不 DROP」的兜底分区，
+      于是容量只增不减。
+    </p>
+    <p>
+      它能潜伏这么久的原因是<b>静默失败</b>：只在日志里留一行 <code>[WARN]</code>，
+      对外表现（K 线照常入库、网页照常打开）与成功<b>完全没有区别</b>。
+    </p>
+
+    <h3>修法</h3>
+    <pre>ALTER TABLE kline REORGANIZE PARTITION pmax INTO (
+  PARTITION pd20261004 VALUES LESS THAN (1791129600000),
+  PARTITION pmax VALUES LESS THAN (MAXVALUE)
+);</pre>
+    <ul>
+      <li>一条语句、<b>原子完成</b>，中途不存在「没有兜底分区可写」的窗口。</li>
+      <li><code>pmax</code> 正常情况下是空的（热区已铺到今天 + 2 天），本次 reorganize <b>不搬任何数据，代价≈0</b>。</li>
+      <li>拼装抽成纯函数 <code>buildAppendPartitionDDL(table, parts, hasMax)</code>，
+          新增 <code>internal/repo/partition_append_test.go</code> 钉死；
+          <b>断言「绝不出现 DROP PARTITION」</b>比断言「该出现的」更有价值。</li>
+      <li>失败时把<b>完整 DDL</b> 一起打进日志（只打 <code>Error 1064</code> 等于什么都没说）。</li>
+    </ul>
+
+    <h3 class="ok">判决性证据：换壳前后，同一条 SQL</h3>
+    <pre>01:18:10 [WARN] [PART] kline 补分区失败：Error 1064 (42000) ... near
+                 'ADD PARTITION (PARTITION pd20261004 VALUES LESS THAN (1791129600000)), ADD PARTI' at line 1
+                 ↑ 旧二进制（mb51）
+
+01:19:59 [INFO] [PART] kline 新增分区：pd20261004
+                 ↑ 新二进制（mb52），同一句 SQL，立即成功</pre>
+
+    <p>
+      分区数 <b>14 → 15</b>，<code>pmax</code> 仍在末位；<code>pmax.ibd</code> 实测仅 <b>112 KB</b>（是空的）
+      → 该缺陷的最坏影响是「每日清理的 <code>MaxDataLessThan</code> 失真、偏保守」，<b>未造成数据错误</b>。
+    </p>
+  </div>
+
+  <h2>七、运行时验证</h2>
+
+  <div class="card">
+    <h3>配置（<code>/api/state</code>，HTTP 200）</h3>
+    <pre>score_threshold = 4
+entry.min_bar_rise_pct = 1.1
+bars_enabled    = ['3m', '5m', '15m']
+signal_bars     = ['3m', '5m', '15m']
+exit            = {take_profit_pct: 0.3, boll_upper_exit: false,
+                   max_hold_minutes: 60, max_hold_bars: 0, stop_loss_pct: 0}</pre>
+
+    <h3>K 线接口</h3>
+    <pre>bar=1m  -&gt; HTTP 500  （已拒）
+bar=3m  -&gt; HTTP 200
+bar=5m  -&gt; HTTP 200
+bar=15m -&gt; HTTP 200</pre>
+
+    <h3>扫描器（日志实证）</h3>
+    <pre>[3m,5m,15m] 3m：全市场 480 / 候选 80 / 实算 80 / 信号 0 / 开仓 0 / K线本地 80 网络 0
+            5m：… K线本地 80 网络 0
+            15m：… K线本地 80 网络 0
+在持 0 仓，本轮开仓 0、平仓 0、加仓 0，用时 3.302s</pre>
+
+    <blockquote>
+      换壳后 01:23–01:25 曾有 3 轮 5m 走网络回退（本地 0 网络 80 → 本地 50 网络 30），
+      整轮 45.9s / 80.9s / 25.3s。<b>这是重启后的暖机瞬态</b>：本地读取要求「最新一根 ≥ 该周期刚收盘那根」，
+      重启后 <code>refreshLatestKlines</code> 还没来得及把最新 5m 写进库。
+      01:25:33 起 5m 恢复 <b>本地 80 网络 0</b>，整轮回到 <b>3.302s</b>。
+    </blockquote>
+
+    <h3>服务与端口</h3>
+    <pre>OKX 全合约量化终端（网页 + 数据 + 策略）   Running
+OKXApache                              Running
+OKXMySQL                               Running
+
+0.0.0.0:80         LISTENING   (Apache 反代)
+127.0.0.1:8090     LISTENING   (okxweb)
+127.0.0.1:3306     LISTENING   (MySQL)</pre>
+
+    <h3>历史信号回算</h3>
+    <pre>[SIG-BF] 历史信号回算完成：15m 周期 241 个合约，新增信号 0 条
+[SIG-BF] 历史信号回算完成：5m  周期 241 个合约，新增信号 0 条
+[SIG-BF] 历史信号回算完成：3m  周期 241 个合约，新增信号 0 条
+                                        ↑ 无 1m</pre>
+  </div>
+
+  <h2>八、测试与交付</h2>
+
+  <div class="card">
+    <h3><code>go vet ./...</code> 干净 · <code>go test ./internal/... ./cmd/...</code> 全绿</h3>
+    <pre>ok  finally-main/internal/conf      0.665s
+ok  finally-main/internal/handler   0.851s
+ok  finally-main/internal/repo      0.680s
+ok  finally-main/internal/service  12.982s
+ok  finally-main/cmd/okxweb         0.950s</pre>
+
+    <h3>新增 / 改写的测试</h3>
+    <ul>
+      <li><code>TestExitDefaultsKeepTakeProfitDropBoll</code> —— 断言止盈 <b>0.3 保留</b>、布林 false、超时 60、归一化不反压</li>
+      <li><code>TestExitText</code>（新建，6 用例）—— 只列开着的通道；全关返回「无（不会自动平仓）」</li>
+      <li><code>TestBarsDefaultsCoverThreePeriods</code> —— 三周期，并<b>反向断言 1m 已彻底出局</b></li>
+      <li><code>TestAddon_AutoBarUsesPositionBar</code> —— 覆盖「仓位周期已下线 → 退回主周期」</li>
+      <li><code>TestAppendDDLUsesReorganizeWhenMaxExists</code>（新建）—— 必须 REORGANIZE、必须带回 pmax、<b>绝不出现 DROP PARTITION</b></li>
+    </ul>
+
+    <h3>换壳</h3>
+    <pre>tmp/mb52/okxweb.exe   9,037,824 字节   md5 e6c75a249e7578f94b8422693db78bf4
+  → bin/okxweb.exe     （备份 bin/okxweb.exe.bak-20261002-0120）</pre>
+
+    <h3>提交与推送</h3>
+    <pre>commit 2404676  18 files changed, 717 insertions(+), 168 deletions(-)
+本地 HEAD  = 240467614aa26d10d470383afbc18d063e58089e
+ls-remote  = 240467614aa26d10d470383afbc18d063e58089e
+GitHub API = 240467614aa26d10d470383afbc18d063e58089e     ← 三重一致</pre>
+  </div>
+
+  <div class="foot">
+    生成于 2026-10-02 01:30 · 证据来源：<code>logs/okxbot.log</code>、MySQL <code>okx</code> 库实时查询、
+    <code>/api/state</code> 与 <code>/api/kline</code> 的 HTTP 响应、<code>go vet</code> / <code>go test</code> 输出。
+  </div>
+
+</div>
+</body>
+</html>
