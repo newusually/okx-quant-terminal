@@ -158,7 +158,9 @@ go run ./cmd/anncheck              # 公告接口连通性
 | `scripts\stop_all.bat` | 一键停止，顺序 Apache → okxweb → MySQL | 普通 |
 | `scripts\cleanup_data.bat` | **月度维护**手工触发：`-maint-dry` 预演 → 询问 → `-maint` 真跑；`/yearly` 走年度清理 | 普通 |
 | `scripts\rotate_logs.bat` | 单文件过大的日志轮转：停服务 → 搬 `logs\archive\` → 重启 → 清理 | 普通 |
-| `scripts\push_github.bat` | **推送 GitHub**：`check` / `code` / `data`；token 读 `%ROOT%\.git-token` 或 `%GITHUB_TOKEN%`，无 token 则干净退出不卡提示 | 普通 |
+| `scripts\set_token.bat` | **第一次用先跑这个**：双击 → 粘贴一次 PAT → 自动验证、存 `.git-token`、用 API 问出账号名写 `.git-owner`、数据仓不存在会自动建私有仓 | 普通 |
+| `scripts\push_now.bat` | **一键上传**（双击版）：代码仓 + 归档数据仓，跑完 `pause` 住给人看结果 | 普通 |
+| `scripts\push_github.bat` | **推送内核**（给服务/命令行用）：`check` / `code` / `data`；token 读 `%ROOT%\.git-token` 或 `%GITHUB_TOKEN%`，无 token 则干净退出不卡提示 | 普通 |
 
 **编码约定（重要）**：`.bat` 一律保存为 **ANSI / GBK(cp936) + CRLF**，第二行 `chcp 936`。
 文件名全 ASCII，中文只出现在 `echo` 文本里。
@@ -169,6 +171,20 @@ go run ./cmd/anncheck              # 公告接口连通性
 存 GBK 时控制台代码页不变，偏移恒定，中文还能正常显示。
 
 `.gitattributes` 已写死 `*.bat text eol=crlf`，防止克隆后变回 LF。
+
+**另外三条批处理硬约定**（全是实测踩出来的，不是理论）：
+
+| 坑 | 症状 | 正确写法 |
+| --- | --- | --- |
+| `if (...)` / `for ... do (...)` **块内部**出现未转义的半角 `)` | `xxx was unexpected at this time`，**整段后续代码一起失效** | 块内只写中文全角 `（）`，或转义成 `^(` `^)`；最稳的是干脆不用块，改 `goto` 平铺 |
+| `for /f` 的 `in('...')` 里给命令加引号 | `文件名、目录名或卷标语法不正确。`，且取到空值 | 绝对路径**不加引号**（`%SystemRoot%` 展开后不含空格） |
+| 用管道接 `git push … \| findstr …` 再判 `errorlevel` | 拿到的是 `findstr` 的退出码 —— 推送失败被报成「[OK] 已推送」 | 先重定向到临时文件 → 立刻取 `errorlevel` → 再过滤打印 → 删文件 |
+
+**git 不在系统 PATH**：这台机器唯一的 git 是 WorkBuddy 自带的 PortableGit
+（`%USERPROFILE%\.workbuddy\binaries\PortableGit\versions\1.2.0`），没有进系统 PATH。
+`push_github.bat` 会自己探测（PATH → 常见安装位置 → PortableGit）并把它塞进 PATH，
+所以双击运行也能用。**注意：从 Git Bash 里调 `cmd` 会继承 bash 的 PATH，测不出这个问题** ——
+必须用一个把 PATH 重置成 `C:\Windows\System32;C:\Windows` 的壳去测才复现得出来。
 
 **脚本里为什么用 `%SystemRoot%\System32\findstr.exe` 的绝对路径**：装了 Git / Cygwin / MSYS
 的机器，PATH 里会有同名的 GNU `find`、`timeout`，会把命令解析错（`find: '-/I': No such file`）。
@@ -344,10 +360,22 @@ bin\okxweb.exe -archive 2026-09   :: 只导出某月归档
 或双击 `scripts\cleanup_data.bat`（月度维护）/ `scripts\rotate_logs.bat`（大日志轮转）。
 推送归档用 `scripts\push_github.bat data`。
 
-**推送脚本**：`scripts\push_github.bat [check|code|data]`。token 读 `%ROOT%\.git-token`
+**推送怎么用**：第一次先双击 `scripts\set_token.bat` 粘一次 PAT（只需一次，以后不用再设）；
+之后双击 `scripts\push_now.bat` 一键上传两个仓库。
+
+**token 从哪来**：GitHub → `https://github.com/settings/tokens/new` →
+Note 随便填、Expiration 选 `No expiration` → 勾最上面那个大框 **`repo`**（子项会自动全选）
+→ 拉到底点 `Generate token` → 复制 `ghp_` 开头那一串（离开页面就再也看不到）。
+
+`set_token.bat` 会用 API `/user` **先验证再落盘**，无效 token 不会写进文件。
+这一步不能省：公开仓库匿名也能 `git ls-remote` 成功，**验不出 token 真假**，
+必须走 API 看 HTTP 码（无效 token = 401）。验错就是「本地归档删了、远端也没上去」的数据事故。
+
+`push_github.bat [check|code|data]` 是内核，给服务调用。token 读 `%ROOT%\.git-token`
 或 `%GITHUB_TOKEN%`，都没有则干净退出（退出码 2）**绝不卡在交互式密码提示上** ——
 服务里跑的命令一旦卡在提示符上就是永久挂起。推送用带 token 的临时 URL，
-不写进 `.git/config`。失败时退出码 1，月度任务据此跳过删本地归档。
+不写进 `.git/config`。退出码：`0` 成功 / `1` 推送失败 / `2` 无凭据 / `3` 无 git；
+月度任务据此跳过删本地归档。
 
 **实测**：2026-09 归档 1,336,768 行 / 479 合约 / 17.4 MB gzip / 27 秒；
 月度预演 12.3 秒（报出 12 个待归档月份、回收站 7,647 文件 / 385.5 MB）；
