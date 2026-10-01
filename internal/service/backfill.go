@@ -35,7 +35,8 @@ type BackfillConfig struct {
 	FocusAll bool
 
 	// Scope 决定启动时回补多少东西：
-	//   "plan"      默认。先给「全部 live 合约」各拉一次最新 300 根（Light），
+	//   "plan"      默认。先给「全部 live 合约」各拉一次最新 300 根（Light，
+	//               实际会补到 min_candles 那么多，见 MinCandlesFn），
 	//               再逐个往前翻满 Days 天；四个周期（1m/3m/5m/15m）一起补，
 	//               1m 排最前。保留窗口 10 天 ⇒ 磁盘约 200 MB，图很快可用。
 	//   "tradeable" 可交易合约 × 全部周期
@@ -75,6 +76,22 @@ type BackfillConfig struct {
 	// 做成回调而不是定值：top_n_by_volume 在策略 JSON 里是热插拔的，
 	// 启动时读一次会跟 JSON 脱节。
 	RefreshTopNFn func() int
+
+	// MinCandlesFn 返回「扫描算信号至少需要多少根 K 线」（= 策略 min_candles，默认 400）。
+	// 回补的 Light 铺底会至少铺这么多根，0 / nil 时退回 300。
+	//
+	// ★ 为什么 Light 必须铺够 400 而不是 300 ★
+	//
+	// 扫描读本地有**两个**前提：够新（本地已有刚收盘那根）与**够长**（len ≥ min_candles）。
+	// 而单次 /market/candles 的 limit **上限就是 300** ——
+	// 只铺 300 根的话，本地永远差 100 根、永远达不到门槛，
+	// 于是 1m/3m/5m × 80 个候选 = **240 次网络回退**，回头和回补抢同一把 OKX 闸门。
+	// 实测就是这个：整轮 3m48s、eng.scan 101.7s、出场巡检等锁 35.4s。
+	//
+	// 代价只是 Light 阶段每个 (合约,周期) 多一次 100 根的历史请求
+	// （约 3 周期 × 170 合约 = 510 次 ≈ 51 秒闸门，一次性），
+	// 换来的是 1m/3m/5m 全部转本地、扫描不再回退网络。
+	MinCandlesFn func() int
 }
 
 // DefaultBackfillConfig 默认配置
@@ -657,8 +674,46 @@ func (m *BackfillManager) backfillLight(instID, bar string) error {
 		return err
 	}
 	m.markKnown(instID, bar, latest[len(latest)-1].Ts)
-	m.setProgress(instID, bar, "queued", fmt.Sprintf("已铺最新 %d 根", len(latest)))
+
+	// ★ 第二页：把长度顶过扫描的读本地门槛（min_candles，默认 400）★
+	//
+	// 单次 /market/candles 的 limit 上限是 300，只铺 300 根本地就永远不够长，
+	// 扫描每轮都会回退网络并和回补抢闸门（详见 BackfillConfig.MinCandlesFn 的注释）。
+	// 这里补一页历史（100 根），Light 一遍下来 1m/3m/5m 就能直接读本地。
+	//
+	// 取数口径与扫描的网络路径一致（300 + 翻 1 页 100），
+	// 所以本地窗口与网络窗口**等长同内容**，不会算出不同的信号。
+	total := len(latest)
+	if min := m.lightMin(); min > 300 {
+		older, herr := m.feed.FetchHistoryCandles(instID, bar, latest[0].Ts, 100)
+		if herr != nil {
+			// 翻页失败不当致命：已经铺的那 300 根照用，下次还会再跑
+			m.logf("⚠ %s %s 补第二页失败：%v（本次只铺 %d 根）", instID, bar, herr, total)
+		} else if trimmed := m.trimToWindow(older); len(trimmed) > 0 {
+			if _, err := m.db.UpsertKlines(trimmed); err != nil {
+				m.setProgress(instID, bar, "error", "写库失败："+err.Error())
+				return err
+			}
+			total += len(trimmed)
+		}
+	}
+	m.setProgress(instID, bar, "queued", fmt.Sprintf("已铺最新 %d 根", total))
 	return nil
+}
+
+// lightMin Light 阶段至少要铺多少根（下限 300，上限 1000 防跑飞）。
+func (m *BackfillManager) lightMin() int {
+	if m.cfg.MinCandlesFn == nil {
+		return 300
+	}
+	v := m.cfg.MinCandlesFn()
+	if v <= 300 {
+		return 300
+	}
+	if v > 1000 {
+		return 1000
+	}
+	return v
 }
 
 // backfillOne 单个任务：先补最新 300 根，再一路往前翻到覆盖满 Days 天

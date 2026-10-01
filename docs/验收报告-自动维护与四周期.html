@@ -48,14 +48,14 @@
   <h1>验收报告 · 二期：四周期 / 10 天保留 / 每日自动清理</h1>
   <p class="lead">
     OKX 全合约量化终端 · <code>C:\Users\Administrator\Documents\finally</code> ·
-    2026-10-01 19:51–23:15 · 运行时 <code>bin\okxweb.exe</code> = 9,013,760 字节（<code>-trimpath -ldflags "-s -w"</code>）
+    2026-10-01 19:51–23:34 · 运行时 <code>bin\okxweb.exe</code> = 9,015,296 字节（<code>-trimpath -ldflags "-s -w"</code>）
   </p>
 
   <div class="grid">
     <div class="kpi"><b class="ok">9 / 9</b><span>二期口径全部落地</span></div>
     <div class="kpi"><b class="ok">21.3 s</b><span>每日清理实测（释放 996 万行）</span></div>
     <div class="kpi"><b class="ok">4 / 4</b><span>单测包全绿（conf/handler/repo/service）</span></div>
-    <div class="kpi"><b class="ok">15m 10.00 天</b><span>保留红线精确命中</span></div>
+    <div class="kpi"><b class="ok">3m48s → 1.5s</b><span>四周期整轮用时（≈150×）</span></div>
   </div>
 
   <blockquote>
@@ -157,75 +157,74 @@
 结果：38 个分区（日 24 / 月 12 / 兜底 1），原先压在 p_old 里的 945 万行 → 0.0 MB
 副产品：归档单月从「>5 分钟跑不完」降到 4 分 58 秒内（EXPLAIN 从命中 p_old / rows=9450737 变为命中当月分区）</pre>
 
-  <h2>五、四周期回补现状（23:15 实测）</h2>
+  <h2>五、四周期回补现状（23:34 实测）</h2>
   <table>
-    <thead><tr><th>周期</th><th>行数</th><th>覆盖</th><th>每合约根数（avg / max）</th><th>≥400 根（转本地）</th><th>扫描读源</th></tr></thead>
+    <thead><tr><th>周期</th><th>每合约根数（avg / max）</th><th>≥400 根（转本地门槛）</th><th>扫描读源</th></tr></thead>
     <tbody>
-      <tr><td><b>15m</b></td><td>457,369</td><td class="ok">10.00 天</td><td>954 / 961</td><td class="ok">477 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
-      <tr><td><b>1m</b></td><td>193,892+</td><td>回补中</td><td>686 / 14,407</td><td class="warn">19 / 480</td><td class="warn">本地 19 / 网络 61</td></tr>
-      <tr><td><b>3m</b></td><td>147,875</td><td>回补中（15.6 h）</td><td>312 / 313</td><td class="bad">0 / 480</td><td class="bad">本地 0 / 网络 80</td></tr>
-      <tr><td><b>5m</b></td><td>145,701</td><td>回补中（25.6 h）</td><td>307 / 308</td><td class="bad">0 / 480</td><td class="bad">本地 0 / 网络 80</td></tr>
+      <tr><td><b>15m</b></td><td>956 / 963</td><td class="ok">477 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
+      <tr><td><b>1m</b></td><td>1,196 / 14,427</td><td class="ok">480 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
+      <tr><td><b>3m</b></td><td>400 / 403</td><td class="ok">479 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
+      <tr><td><b>5m</b></td><td>399 / 401</td><td class="ok">478 / 480</td><td class="ok">本地 80 / 网络 0</td></tr>
     </tbody>
   </table>
   <div class="card">
-    <h3 style="margin-top:0">为什么 3m/5m 还走网络</h3>
-    <p>扫描读本地有<b>两个</b>前提：<b>够新</b>（本地最新一根 ≥ 刚收盘那根）与 <b>够长</b>
-       （<code>len(rows) ≥ minCandles = 400</code>）。网络路径是「300 根 + 翻 1 页 100 根 = 400 根」，
+    <h3 style="margin-top:0">本地读取的两个前提</h3>
+    <p>扫描读本地要求：<b>够新</b>（本地最新一根 ≥ 刚收盘那根）与 <b>够长</b>
+       （<code>len(rows) ≥ min_candles = 400</code>）。网络路径是「300 根 + 翻 1 页 100 根 = 400 根」，
        本地必须取同样长度，否则递归指标（ATR/RSI/EMA/TD9）因<b>窗口起始位置不同</b>算出不同信号。</p>
-    <p>3m 需要 400 × 3 min = <b>20 小时</b>、5m 需要 400 × 5 min = <b>33.3 小时</b>。
-       现在 3m 到 15.6 h（313 根）、5m 到 25.6 h（308 根）—— <b>是长度不够，不是新鲜度不够</b>，
-       会随回补推进自动达标。</p>
-    <p>接口旁证：<code>/api/kline?inst=ETH-USDT-SWAP</code> → 1m 1000 根（截断到一屏上限）、
-       3m 313 根、5m 307 根、15m 961 根；BTC 的 1m coverage <code>days = 10.004</code>。</p>
+    <p><b>关键发现：Light 铺底只取 300 根，而门槛是 400 根 —— 差 100 根。</b>
+       （单次 <code>/market/candles</code> 的 <code>limit</code> 上限就是 300。）
+       于是 1m/3m/5m 即使数据充足也<b>永远不够长</b>，每轮必然回退网络 —— 见下一节。</p>
   </div>
 
-  <h2>六、性能回归与修复：四周期把 OKX 闸门打满</h2>
-  <p>这是二期引入的真问题，已定位并修掉。</p>
-  <h3>现象</h3>
-  <pre>23:01  [PERF] 耗时 eng.scan=101701ms live.exitPass=36150ms live.exitWait=35424ms
-23:02  [PERF] 耗时 feed.refreshLatest=141767ms eng.scan=51568ms
-       [1m,3m,5m,15m] … 用时 3m48.378s</pre>
-  <h3>根因（可算，不用猜）</h3>
-  <ol>
-    <li>OKX 行情类限频 <b>20 次 / 2 秒 = 10 次/秒</b>，且 <b>全进程共用一把闸门</b>
-        （<code>internal/ratelimit</code>：扫描 / 回补 / 续 K 线 / 出场共用）。</li>
-    <li>「续最新一根」按 <b>库里有数据的 (合约,周期)</b> 逐个续 = 可交易合约 169 × 4 周期 = <b>676 条</b>
-        → 单轮最少 <b>67.6 秒 &gt; 1 分钟</b>。</li>
-    <li>而 1m 读本地的判据是「本地含刚收盘那根」——刷新周期超过 1 分钟，
-        <b>1m 永远不可能新鲜</b> → 每轮都回退网络（80 次）→ 和续 K 线抢同一把闸门
-        → 续 K 线更慢 → 本地更不新鲜 …… <b>死循环</b>。</li>
-    <li>连锁后果：<code>live.exitWait</code>（出场巡检等引擎锁）被顶到 <b>35 秒</b> ——
-        出场巡检被饿死，这是会亏钱的那一类。</li>
-  </ol>
-  <h3>修法</h3>
+  <h2>六、性能：四周期把 OKX 限频闸门打满（两层，第二层才是真根因）</h2>
+
+  <h3>第一层：续最新一根的范围过宽</h3>
+  <p>OKX 行情类限频 <b>20 次 / 2 秒 = 10 次/秒</b>，且 <b>全进程共用一把闸门</b>
+     （<code>internal/ratelimit</code>：扫描 / 回补 / 续 K 线 / 出场共用）。
+     「续最新一根」按<b>库里所有有数据的 (合约,周期)</b> 续 = 可交易 169 × 4 周期 = <b>676 条</b>
+     → 单轮最少 <b>67.6 秒 &gt; 60 秒</b>。</p>
+  <p><b>修法</b>：截到扫描真正会用的那批（<code>top_n_by_volume</code>，默认 80）→ 80 × 4 = 320 条 ≈ <b>32 秒</b>。
+     落点 <code>service.BackfillConfig.RefreshTopNFn</code> + 纯函数 <code>pickRefreshInsts()</code>（7 组单测）。</p>
+
+  <h3>★ 第二层：Light 铺底只铺 300 根，门槛却是 400 根 ★</h3>
   <div class="card">
-    <p>把「续最新一根」的范围<b>截到扫描真正会用的那批</b>
-       （<code>top_n_by_volume</code>，默认 80）：80 × 4 = 320 条 ≈ <b>32 秒 &lt; 60 秒</b>，
-       1m 本地开始真正转热，扫描回落本地，省下的闸门还给回补 —— 打破死循环。</p>
-    <p>落点：<code>service.BackfillConfig.RefreshTopNFn</code>（回调，跟随热插拔的策略 JSON）+
-        <code>pickRefreshInsts()</code> / <code>refreshScope()</code>（<b>纯函数 + 7 组单测</b>）。</p>
-    <p><b>口径同源：</b>刷新范围与扫描候选都取 <code>inst</code> 表里
-       <code>tradeable=1</code> 按 24h 成交额降序的前 N 个 —— 两处各写一份口径必然对不上，
-       这是本项目反复踩过的坑。唯一差异是扫描用实时 ticker 成交额、刷新用库里的
-       <code>quote_vol24h</code>（每 60 秒同步），边界互换只影响 1 个请求，可接受。</p>
-    <p><b>查库失败时不截断</b>（返回 nil = 不限）：宁可多打几次 OKX，也不能让全站 K 线图一起停更。</p>
+    <p>单次 <code>/market/candles</code> 的 <code>limit</code> 上限是 300，而扫描的读本地门槛
+       <code>min_candles = 400</code>（网络路径 = 300 + 翻 1 页 100）。<b>只铺 300 根，本地就永远差 100 根。</b></p>
+    <p>于是形成循环依赖：<b>1m/3m/5m 每轮都回退网络（80+80+80 = 240 次请求）
+       → 与续 K 线、与回补抢同一把闸门 → 回补更慢、日期更不新鲜 → 下一轮继续回退网络</b>。</p>
+    <p><b>修法</b>：Light 铺底补一页历史（300 + 100 = 400），把长度顶过门槛。
+       取数口径与扫描的网络路径<b>完全一致</b>，所以本地窗口与网络窗口等长同内容，
+       不会算出不同的信号（这条是硬要求，不是优化）。</p>
+    <p>落点 <code>service.BackfillConfig.MinCandlesFn</code>（<b>走 <code>conf.LoadConfig()</code></b>，
+       与 <code>Scan(cfg *conf.Config, …)</code> 同源，不新增第二份口径）+ <code>lightMin()</code>（9 组单测）。</p>
+    <p><b>一次性代价</b>：Light 阶段每 (合约,周期) 多 1 次 100 根请求 ≈ 510 次 ≈ 51 秒闸门。</p>
   </div>
-  <h3>修复后实测</h3>
+
+  <h3>实测（诚实的指标：整轮 <code>用时</code>）</h3>
+  <pre>修前（三周期全走网络）  23:01  用时 3m48.378s    1m 本地 9 / 3m 本地 0 / 5m 本地 0
+                        23:05  用时 3m30.271s
+                        23:08  用时 3m28.571s
+第一层修复后            23:28  用时 1m9.209s     1m 本地 80 / 3m 本地 80 / 5m 本地 0
+第二层修复后            23:30  用时 1.664s        ← 5m 铺底完成，四周期全本地
+                        23:33  用时 1.535s
+                        23:34  用时 6.293s        本轮 1.535~8.403s（波动来自回补抢闸门）</pre>
   <table>
-    <thead><tr><th>指标</th><th>修复前</th><th>修复后</th><th>变化</th></tr></thead>
+    <thead><tr><th>指标</th><th>修前</th><th>修后</th><th>变化</th></tr></thead>
     <tbody>
-      <tr><td><code>feed.refreshLatest</code></td><td>141,767 ms</td><td class="ok">9,058 / 12,551 / 18,334 ms</td><td class="ok">7.7 ~ 15×</td></tr>
-      <tr><td><code>live.exitPass</code></td><td>36,150 ms</td><td class="ok">3,951 ms</td><td class="ok">9.1×</td></tr>
-      <tr><td><code>live.exitWait</code>（等锁）</td><td>35,424 / 49,262 ms</td><td class="ok">13,977 ms</td><td class="ok">2.5 ~ 3.5×</td></tr>
-      <tr><td>整轮用时</td><td>3 m 48.4 s</td><td class="warn">2 m 34.2 s</td><td class="warn">1.5×（待 3m/5m 转本地）</td></tr>
-      <tr><td>1m 读本地合约数</td><td>3 ~ 10</td><td class="ok">19</td><td class="ok">上升中</td></tr>
-      <tr><td>CPU 均值</td><td>14 ~ 23%</td><td class="ok">4 ~ 7%</td><td class="ok">3×</td></tr>
+      <tr><td>整轮用时</td><td>2 m 34 s ~ 3 m 48 s</td><td class="ok"><b>1.5 ~ 8.4 s</b></td><td class="ok">≈ 25 ~ 150×</td></tr>
+      <tr><td>四周期读源</td><td>本地 9~20 / 网络 220~240</td><td class="ok">本地 320 / 网络 <b>0</b></td><td class="ok">回退清零</td></tr>
+      <tr><td>「平仓失败」</td><td>24 条（22:58 前）</td><td class="ok"><b>0 条</b></td><td class="ok">幽灵仓已清</td></tr>
     </tbody>
   </table>
+
   <blockquote>
-    <b>整轮仍然慢的剩余原因</b>：3m/5m 各 80 次网络回退（160 次 ÷ 10 次/秒 = 16 秒起），
-    叠加回补抢闸门。等 3m/5m 每合约过 400 根、扫描全部落本地，
-    预期回到一期的 <b>526~837 ms</b> 量级。<b>这不是靠加并发能解决的 —— 闸门是地板。</b>
+    <b>⚠ 一个必须记住的打点陷阱</b>：<code>[PERF]</code> 行的 <code>耗时 xxx=NNNms</code>
+    <b>不是本窗口真实耗时</b>，而是 <code>累计平均单次 × 本窗口调用次数</code>
+    （<code>perf.go</code> 的 <code>avgMs × deltaCalls</code>）。累计平均会被<b>历史上的慢调用污染</b>，
+    所以刚从「单轮 100 秒」恢复过来的那几分钟，这个数会虚高到 30~40 秒。
+    <b>做前后对比必须用整轮 <code>用时</code>（或 <code>/api/perf</code> 的 <code>maxMs</code>），
+    不要用 PERF 行的 <code>耗时</code>。</b>
   </blockquote>
 
   <h2>七、幽灵仓对账（附带修复）</h2>
@@ -264,10 +263,10 @@
   <table>
     <thead><tr><th>项</th><th>结果</th></tr></thead>
     <tbody>
-      <tr><td>运行时可执行</td><td><code>bin\okxweb.exe</code> = 9,013,760 字节；备份 <code>bin\okxweb.exe.bak-20261001-{1951,2231,2239,2244,2250,2258,2309}</code></td></tr>
+      <tr><td>运行时可执行</td><td><code>bin\okxweb.exe</code> = 9,015,296 字节；备份 <code>bin\okxweb.exe.bak-20261001-{1951,2231,2239,2244,2250,2258,2309,2324}</code></td></tr>
       <tr><td>服务状态</td><td class="ok">OKXMySQL / OKXWeb / OKXApache 全部 Running</td></tr>
       <tr><td>端口</td><td class="ok">80（Apache 反代）/ 8090（回环）/ 8091（pprof，只回环）/ 3306</td></tr>
-      <tr><td>单测</td><td class="ok">conf / handler / repo / service / cmd 全绿；新增 <code>refresh_scope_test.go</code>（7 组）+ <code>reconcile_test.go</code> + <code>maintenance_text_test.go</code> + <code>drop_predicate_test.go</code> + <code>universe_policy_test.go</code></td></tr>
+      <tr><td>单测</td><td class="ok">conf / handler / repo / service / cmd 全绿；新增 <code>refresh_scope_test.go</code>（含 <code>pickRefreshInsts</code> 7 组 + <code>lightMin</code> 9 组 + 「Light 必须铺够扫描门槛」守门）+ <code>reconcile_test.go</code> + <code>maintenance_text_test.go</code> + <code>drop_predicate_test.go</code> + <code>universe_policy_test.go</code></td></tr>
       <tr><td><code>/api/state</code> 口径</td><td class="ok"><code>bars=["1m","3m","5m","15m"]</code> · <code>klineRetainDays=10</code> · <code>backfillDays=10</code> · <code>maxOrderMarginUsdt=1</code> · <code>marginText="0.01U/笔 · 20x"</code> · <code>score_threshold=8</code> · <code>take_profit_pct=1</code></td></tr>
       <tr><td>磁盘</td><td><code>mysql/data</code> 4.1 GB → 676 MB；<code>okx</code> 库 521 MB → 131.6 MB；C 盘可用 20.26 GB</td></tr>
     </tbody>
@@ -275,12 +274,13 @@
 
   <h3>待办（不阻塞交付）</h3>
   <ul>
-    <li>1m / 3m / 5m 回补至 10 天窗口 —— 3m 需每合约 ≥400 根（20 h）、5m 需 ≥400 根（33.3 h），过线后自动转本地读取。</li>
-    <li>数据仓月归档推送（<code>scripts\push_github.bat data</code>）。</li>
+    <li>1m/3m/5m 继续往前补满 10 天（本地读取门槛 400 根已全部达成，这一步只影响图的历史长度，不影响交易速度）。</li>
+    <li>出场巡检与整轮扫描争 <code>eng.mu</code>（<code>live.exitWait</code> 仍有数十秒）：扫描已从 3 分钟降到秒级，
+       这一问题已大幅缓解，但要彻底消除需把出场巡检与扫描解耦（既有待办 #59）。</li>
   </ul>
 
   <div class="foot">
-    验收时间 2026-10-01 23:15（UTC+8）· 证据来源：<code>logs/okxbot.log</code>、
+    验收时间 2026-10-01 23:34（UTC+8）· 证据来源：<code>logs/okxbot.log</code>、
     <code>/api/state</code>、<code>/api/kline</code>、MySQL <code>kline</code>/<code>trade</code>/<code>backfill_job</code> 直查、
     <code>go test ./internal/... ./cmd/...</code> 输出。<br>
     本文档为二期唯一验收口径，与 <code>docs/架构说明.md</code>、<code>docs/策略说明.md</code>、<code>docs/项目详情.md</code> 同步。

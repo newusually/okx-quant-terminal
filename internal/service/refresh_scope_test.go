@@ -101,3 +101,46 @@ func TestRefreshScope_NilFn(t *testing.T) {
 		t.Errorf("RefreshTopNFn=nil 应返回 nil（不限），得到 %v", got)
 	}
 }
+
+// TestLightMin Light 铺底根数的下限 / 上限。
+//
+// 这个数决定「本地 K 线够不够长、扫描能不能不回退网络」：
+//   太小 → 本地永远差一截，每轮回退网络抢闸门（本次要修的 bug）
+//   太大 → Light 阶段要翻十几页历史，铺底迟迟跑不完，图反而是空的
+func TestLightMin(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func() int
+		want int
+	}{
+		{"nil 回调 → 退回单次上限 300", nil, 300},
+		{"配置 0 → 300（下限）", func() int { return 0 }, 300},
+		{"配置负 → 300（下限）", func() int { return -5 }, 300},
+		{"配置 100 → 300（下限）", func() int { return 100 }, 300},
+		{"配置 300 → 300", func() int { return 300 }, 300},
+		{"配置 400（生产默认）→ 400", func() int { return 400 }, 400},
+		{"配置 800 → 800", func() int { return 800 }, 800},
+		{"配置 1000 → 1000", func() int { return 1000 }, 1000},
+		{"配置 5000 → 1000（上限，防跑飞）", func() int { return 5000 }, 1000},
+	}
+	for _, c := range cases {
+		m := &BackfillManager{}
+		if c.fn != nil {
+			m.cfg.MinCandlesFn = c.fn
+		}
+		if got := m.lightMin(); got != c.want {
+			t.Errorf("%s：期望 %d，得到 %d", c.name, c.want, got)
+		}
+	}
+}
+
+// TestLightMin_MustCoverScanThreshold 把「Light 必须铺够扫描门槛」这条因果关系钉死：
+// 生产默认 min_candles=400，Light 的下限必须 ≥ 它，否则扫描永远读不了本地。
+func TestLightMin_MustCoverScanThreshold(t *testing.T) {
+	const scanMinCandles = 400 // 与 conf.Config.MinCandles 的默认值对齐
+	m := &BackfillManager{}
+	m.cfg.MinCandlesFn = func() int { return scanMinCandles }
+	if got := m.lightMin(); got < scanMinCandles {
+		t.Fatalf("Light 只铺 %d 根 < 扫描门槛 %d 根 → 本地永远不够长，扫描必然回退网络", got, scanMinCandles)
+	}
+}

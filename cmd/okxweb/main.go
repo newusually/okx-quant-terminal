@@ -45,6 +45,7 @@ import (
 	"syscall"
 	"time"
 
+	"finally-main/internal/conf"
 	"finally-main/internal/handler"
 	"finally-main/internal/logx"
 	"finally-main/internal/model"
@@ -490,6 +491,14 @@ func runApp(ctx context.Context) error {
 	//
 	// 走回调而不是取一次定值：top_n_by_volume 是热插拔的，启动读一次会跟 JSON 脱节。
 	cfg.RefreshTopNFn = func() int { return strategyStore.Get().TopNByVolume }
+	// Light 铺底至少要铺到扫描读本地的门槛（min_candles，默认 400）。
+	// 单次 /market/candles 上限只有 300，只铺 300 的话 1m/3m/5m 永远不够长、
+	// 每轮都回退网络，和回补抢同一把闸门。详见 service.BackfillConfig.MinCandlesFn。
+	//
+	// ★ 必须走 conf.LoadConfig()，不能自己再读一份 JSON 或另加字段 ★
+	//   扫描器 Scan(cfg *conf.Config, …) 用的就是它（每次调用都重新加载、带 mtime 缓存）。
+	//   两处各取一份口径 = 迟早对不上，这是本项目反复踩过的坑。
+	cfg.MinCandlesFn = func() int { return conf.LoadConfig().MinCandles }
 	if *focus != "" {
 		for _, s := range strings.Split(*focus, ",") {
 			if s = strings.TrimSpace(s); s != "" {
