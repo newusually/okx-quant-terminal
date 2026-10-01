@@ -64,11 +64,15 @@ var (
 		"回补范围：plan（默认，全部live×15m/1H/4H + 可交易×5m）| tradeable | live（约3.6GB，看磁盘）| focus | none")
 	minFree = flag.Int("min-free-mb", 800, "剩余磁盘低于此值就暂停回补（0=不检查）")
 
+	// MySQL 连接参数：口令**不再有默认值**（原来这里写死明文，仓库一公开就泄漏）。
+	// 留空 = 走 internal/conf/secret.go 的解析链：
+	//     环境变量 OKX_MYSQL_PASS → <项目根>\.mysql-pass → 空
+	// 要设置 / 轮换口令，双击 scripts\set_db_pass.bat。
 	mHost  = flag.String("mysql-host", "127.0.0.1", "MySQL 主机")
 	mPort  = flag.Int("mysql-port", 3306, "MySQL 端口")
-	mUser  = flag.String("mysql-user", "okx", "MySQL 用户")
-	mPass  = flag.String("mysql-pass", "OkxQuant2026", "MySQL 密码")
-	mDB    = flag.String("mysql-db", "okx", "MySQL 库名")
+	mUser  = flag.String("mysql-user", "", "MySQL 用户（留空 = OKX_MYSQL_USER 或默认 okx）")
+	mPass  = flag.String("mysql-pass", "", "MySQL 密码（留空 = OKX_MYSQL_PASS 或 .mysql-pass 文件）")
+	mDB    = flag.String("mysql-db", "", "MySQL 库名（留空 = 默认 okx）")
 	mOpen  = flag.Int("mysql-maxopen", 64, "MySQL 连接池上限")
 	mBatch = flag.Int("mysql-batch", 500, "批量写入分片大小")
 
@@ -248,8 +252,7 @@ func main() {
 	// 之后每个月的「补新分区」是 INPLACE/LOCK=NONE，由启动流程自动完成。
 	if *partition || *repartition {
 		mcfg := repo.DefaultMySQLConfig()
-		mcfg.Host, mcfg.Port = *mHost, *mPort
-		mcfg.User, mcfg.Password, mcfg.Database = *mUser, *mPass, *mDB
+		applyMySQLFlags(&mcfg)
 		// 整表重建要跑几分钟，必须关掉 DSN 的读超时（否则 60 秒被掐断）
 		mcfg.LongDDL = true
 		db, err := repo.OpenMySQL(mcfg)
@@ -327,8 +330,7 @@ func runApp(ctx context.Context) error {
 	root := projectRoot()
 
 	mcfg := repo.DefaultMySQLConfig()
-	mcfg.Host, mcfg.Port = *mHost, *mPort
-	mcfg.User, mcfg.Password, mcfg.Database = *mUser, *mPass, *mDB
+	applyMySQLFlags(&mcfg)
 	mcfg.MaxOpenConns, mcfg.BatchSize = *mOpen, *mBatch
 
 	fmt.Println("==============================================================")
@@ -337,6 +339,11 @@ func runApp(ctx context.Context) error {
 	fmt.Printf(" 项目根目录 : %s\n", root)
 	fmt.Printf(" 数据库     : mysql://%s@%s:%d/%s（连接池 %d）\n",
 		mcfg.User, mcfg.Host, mcfg.Port, mcfg.Database, mcfg.MaxOpenConns)
+	// 只报「口令从哪来」，不报口令本身 —— 日志经常被人截图贴出去。
+	fmt.Printf(" 口令来源   : %s\n", repo.MySQLSecretSource())
+	if mcfg.Password == "" {
+		fmt.Printf("\n%s\n\n", repo.MySQLHint())
+	}
 	fmt.Printf(" 回补天数   : %d\n", *days)
 	fmt.Printf(" 回补周期   : %s\n", *bars)
 	fmt.Printf(" 回补并发   : %d\n", *workers)
@@ -793,6 +800,35 @@ func previewSymbols(items []service.DelistEntry, n int) string {
 // 为什么要有第二条：把 okxweb 注册成 Windows 服务后，进程的工作目录是
 // C:\Windows\System32，靠 cwd 永远找不到项目根，日志/配置/网页资源全会跑偏。
 // 服务方式下只能靠 exe 自己（bin\okxweb.exe）往上退一级反推。
+// applyMySQLFlags 把命令行**显式传入**的 MySQL 参数盖到 c 上。
+//
+// ★ 为什么是「显式传入才盖」而不是像原来那样无条件赋值 ★
+//
+//	原来写的是 `c.User, c.Password, c.Database = *mUser, *mPass, *mDB`，
+//	而 mPass 的 flag 默认值就是明文口令 —— 等于 flag 默认值**永远压过**
+//	配置文件和环境变量。想让口令来自环境变量，这一行必须先变成条件赋值，
+//	否则在 secret.go 里做得再干净也没用（这就是「改了源码但没生效」的经典坑）。
+//
+//	空串 / 0 一律解释成「没传」，保留 DefaultMySQLConfig() 已经从
+//	环境变量 / 密钥文件解析出来的值。
+func applyMySQLFlags(c *repo.MySQLConfig) {
+	if *mHost != "" {
+		c.Host = *mHost
+	}
+	if *mPort != 0 {
+		c.Port = *mPort
+	}
+	if *mUser != "" {
+		c.User = *mUser
+	}
+	if *mPass != "" {
+		c.Password = *mPass
+	}
+	if *mDB != "" {
+		c.Database = *mDB
+	}
+}
+
 func projectRoot() string {
 	if dir, err := os.Getwd(); err == nil {
 		if r := walkUpToRoot(dir, 6); r != "" {

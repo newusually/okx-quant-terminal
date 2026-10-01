@@ -24,6 +24,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"finally-main/internal/conf"
 	"finally-main/internal/logx"
 	"finally-main/internal/model"
 )
@@ -59,6 +60,19 @@ type MySQLConfig struct {
 
 // DefaultMySQLConfig 本机默认配置（与 conf/my.ini、scripts/init_db.sql 一致）
 //
+// ★ 口令不在这里 ★
+//
+//	2026-10-01 之前，这个函数里写死了 `Password: "OkxQuant****"`（旧值已轮换失效），
+//	连同 cmd/okxweb、cmd/okxbench 的 flag 默认值，一共 4 处明文躺在
+//	public 仓库里。现在改成本文件不持有口令，而是走 conf 的解析链：
+//
+//	    环境变量 OKX_MYSQL_PASS  →  <项目根>\.mysql-pass  →  空
+//
+//	详见 internal/conf/secret.go。设置 / 轮换用 scripts\set_db_pass.bat。
+//
+//	为什么口令一定要比 user/db 更晚决定：user 和 db 是「怎么连」，
+//	口令是「凭什么连」，只有它需要保密，所以只有它单独走 secret 通道。
+//
 // ★ 连接池为什么收这么小（2 逻辑核 / 1.97GB 的机器）：
 //
 //	老配置 MaxOpen=64 / MaxIdle=32，实测 processlist 长期挂着 55 条连接
@@ -70,15 +84,30 @@ type MySQLConfig struct {
 //	注意：连接池不是「越大越抗压」。上一轮全站雪崩（查询 8~20 秒）恰恰是
 //	连接池被慢查询占满导致的 —— 池子越大，堆积的慢查询越多，雪崩越猛。
 func DefaultMySQLConfig() MySQLConfig {
+	pass, _ := conf.MySQLSecret()
 	return MySQLConfig{
 		Host: "127.0.0.1", Port: 3306,
-		User: "okx", Password: "OkxQuant2026", Database: "okx",
+		User: conf.MySQLUser(), Password: pass, Database: conf.DefaultMySQLDatabase,
 		MaxOpenConns: 16, MaxIdleConns: 4,
 		ConnMaxLife: 30 * time.Minute, ConnMaxIdle: 60 * time.Second,
 		Timeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second,
 		BatchSize: 500,
 	}
 }
+
+// MySQLSecretSource 口令来源描述（「环境变量 OKX_MYSQL_PASS」/「密钥文件 …」/
+// 「★ 未配置」）。启动横幅和 -acct 诊断都打这一行 ——
+// 排障时第一个要确认的就是「口令到底从哪来的」，而**只报来源不报口令**，
+// 因为日志经常被人截图贴出去。
+func MySQLSecretSource() string {
+	if _, src := conf.MySQLSecret(); src != "" {
+		return src
+	}
+	return "★ 未配置"
+}
+
+// MySQLHint 未配置口令时的操作提示（转给 conf，给 CLI 打印用）
+func MySQLHint() string { return conf.MySQLHint() }
 
 // normalize 补齐零值，避免调用方漏填导致怪异行为
 func (c *MySQLConfig) normalize() {
@@ -437,7 +466,14 @@ func OpenMySQL(cfg MySQLConfig) (*DB, error) {
 	// 建连探活（直到这里失败才说明 MySQL 真没起来）
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("连接 MySQL %s:%d 失败：%w", cfg.Host, cfg.Port, err)
+		// 口令是空的就别只说「Access denied」了 —— 那会让人以为是口令写错，
+		// 实际上根本没配。直接告诉他去哪配。
+		if cfg.Password == "" {
+			return nil, fmt.Errorf("连接 MySQL %s:%d 失败（用户 %s，口令为空）：%w\n%s",
+				cfg.Host, cfg.Port, cfg.User, err, conf.MySQLHint())
+		}
+		return nil, fmt.Errorf("连接 MySQL %s:%d 失败（用户 %s，口令来源：%s）：%w",
+			cfg.Host, cfg.Port, cfg.User, MySQLSecretSource(), err)
 	}
 
 	d := &DB{sql: db, cfg: cfg}

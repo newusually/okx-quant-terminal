@@ -372,6 +372,15 @@ configs/okx_secret.json
 *.secret.json
 credential*.json
 
+# MySQL 口令（见 internal/conf/secret.go、scripts\set_db_pass.bat）
+#
+# 2026-10-01：口令此前硬编码在 4 个 .go 源文件 + 3 个批处理里，仓库 public
+# → 等于公开。现在源码/脚本里都不再出现明文口令，改为运行时读
+#   环境变量 OKX_MYSQL_PASS  →  下面这两个文件  →  空
+# 这两个文件**永远不能入库**，否则等于没改。
+.mysql-pass
+.mysql-user
+
 # 说明：configs/okx_strategy.example.json 是脱敏模板，**要**入库。
 #       真正生效的 configs/okx_strategy.json 里含 OKX api_key/secret/passphrase，
 #       一律不入库；请用环境变量或 api.json 提供密钥。

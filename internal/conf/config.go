@@ -136,10 +136,18 @@ type StoreCfg struct {
 	Enabled bool   `json:"enabled"`
 	Driver  string `json:"driver"` // 固定 mysql
 
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	User string `json:"user"`
+
+	// Password 可以不写 —— 留空（或整段删掉）时会自动落到
+	// 环境变量 OKX_MYSQL_PASS → 密钥文件 <项目根>\.mysql-pass。
+	//
+	// 建议**就留空**：本文件虽然已在 .gitignore 里，但"配置文件里明文写口令"
+	// 这个习惯一旦扩散（比如被谁拷进 example.json），泄漏只是时间问题。
+	// 详见 internal/conf/secret.go。
 	Password string `json:"password"`
+
 	Database string `json:"database"`
 	DSN      string `json:"dsn"` // 若填写则优先于上面 5 个字段
 
@@ -359,6 +367,9 @@ func walkUpToRoot(dir string, max int) string {
 func DefaultConfig() *Config { return defaultConfig() }
 
 func defaultConfig() *Config {
+	// 口令不进源码：环境变量 OKX_MYSQL_PASS → 密钥文件 <根>\.mysql-pass → 空。
+	// 细节见 secret.go。写死在这里的后果是「仓库一公开，口令就公开」。
+	mysqlPass, _ := MySQLSecret()
 	return &Config{
 		Enabled:           true,
 		DryRun:            true,
@@ -422,7 +433,7 @@ func defaultConfig() *Config {
 		Store: &StoreCfg{
 			Enabled: true, Driver: "mysql",
 			Host: "127.0.0.1", Port: 3306,
-			User: "okx", Password: "OkxQuant2026", Database: "okx",
+			User: MySQLUser(), Password: mysqlPass, Database: DefaultMySQLDatabase,
 			MaxOpenConns: 64, MaxIdleConns: 32, BatchSize: 500,
 			// K 线留 1 年（用户口径），记录表 30 天，日志 30 天 —— 三者独立。
 			KeepKlineDays: 30, KlineRetainDays: 365, RetainDays: 30, LogRetainDays: 30,

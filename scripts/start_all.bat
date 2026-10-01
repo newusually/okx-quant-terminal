@@ -30,6 +30,15 @@ echo.
 
 rem ---- 1. MySQL ------------------------------------------------------------
 echo [1/4] 检查 MySQL 服务 OKXMySQL ...
+
+rem 口令：环境变量 OKX_MYSQL_PASS → 根目录 .mysql-pass（与 Go 侧解析顺序一致）。
+rem ★ 这两行必须留在下面那个 if(...) 块**外面** ★
+rem   块内的 %PWARG% 会在「整块被读到」时就展开，而 call 是块执行时才跑的
+rem   → 恒为空。批处理最经典的静默失效：不报错，只是探测永远匿名。
+call "%ROOT%\scripts\_read_db_pass.bat"
+set "PWARG="
+if defined MYSQL_PASS set "PWARG=-p%MYSQL_PASS%"
+
 sc query OKXMySQL >nul 2>&1
 if errorlevel 1 (
     echo       [错误] 服务没注册。先跑 scripts\install_services.bat
@@ -45,8 +54,13 @@ if errorlevel 1 (
     ) else (
         echo       已在运行。
     )
-    rem 等真的能连上再往下走
-    "%ROOT%\mysql\bin\mysqladmin.exe" -uokx -pOkxQuant2026 -h127.0.0.1 --connect-timeout=5 ping >nul 2>&1
+    rem 等真的能连上再往下走（口令来自上面的 .mysql-pass / 环境变量）
+    if defined MYSQL_PASS (
+        echo       口令已配置（%MYSQL_USER%）。
+    ) else (
+        echo       [警告] 没找到 MySQL 口令：先双击 scripts\set_db_pass.bat
+    )
+    "%ROOT%\mysql\bin\mysqladmin.exe" -u%MYSQL_USER% -h127.0.0.1 %PWARG% --connect-timeout=5 ping >nul 2>&1
     if errorlevel 1 (
         echo       [警告] 连不上 127.0.0.1:3306
     ) else (

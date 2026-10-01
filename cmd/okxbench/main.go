@@ -33,11 +33,14 @@ const benchTable = "kline_bench"
 
 func main() {
 	var (
+		// 口令不再有默认值：留空 = 环境变量 OKX_MYSQL_PASS → .mysql-pass 文件。
+		// 见 internal/conf/secret.go。原来这里写死的明文已随 public 仓库泄漏，
+		// 现在源码/脚本里都不再出现口令。
 		mHost = flag.String("mysql-host", "127.0.0.1", "MySQL 主机")
 		mPort = flag.Int("mysql-port", 3306, "MySQL 端口")
-		mUser = flag.String("mysql-user", "okx", "MySQL 用户")
-		mPass = flag.String("mysql-pass", "OkxQuant2026", "MySQL 密码")
-		mDB   = flag.String("mysql-db", "okx", "MySQL 库名")
+		mUser = flag.String("mysql-user", "", "MySQL 用户（留空 = OKX_MYSQL_USER 或默认 okx）")
+		mPass = flag.String("mysql-pass", "", "MySQL 密码（留空 = OKX_MYSQL_PASS 或 .mysql-pass 文件）")
+		mDB   = flag.String("mysql-db", "", "MySQL 库名（留空 = 默认 okx）")
 
 		maxContracts = flag.Int("contracts", 478, "并发合约数（最多取库里实际数量）")
 		perContract  = flag.Int("bars", 300, "每个合约每个周期写多少根 K 线")
@@ -52,8 +55,23 @@ func main() {
 	_ = proxy
 
 	mcfg := repo.DefaultMySQLConfig()
-	mcfg.Host, mcfg.Port = *mHost, *mPort
-	mcfg.User, mcfg.Password, mcfg.Database = *mUser, *mPass, *mDB
+	// 只覆盖命令行显式传的项（空串=没传）—— 否则 flag 的默认值会盖掉
+	// DefaultMySQLConfig() 从环境变量/密钥文件解析出来的口令。
+	if *mHost != "" {
+		mcfg.Host = *mHost
+	}
+	if *mPort != 0 {
+		mcfg.Port = *mPort
+	}
+	if *mUser != "" {
+		mcfg.User = *mUser
+	}
+	if *mPass != "" {
+		mcfg.Password = *mPass
+	}
+	if *mDB != "" {
+		mcfg.Database = *mDB
+	}
 	mcfg.MaxOpenConns = 128 // 压测时连接池放大，避免池本身成为瓶颈
 	mcfg.MaxIdleConns = 64
 	mcfg.BatchSize = *batchSize

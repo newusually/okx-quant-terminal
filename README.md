@@ -28,6 +28,9 @@ set OKX_API_KEY=你的key
 set OKX_SECRET_KEY=你的secret
 set OKX_PASSPHRASE=你的passphrase
 
+:: MySQL 口令：双击 scripts\set_db_pass.bat 生成一个随机口令即可
+:: （源码 / 脚本里已经没有任何明文口令；解析链见下）
+
 :: 一次性：注册 Windows 服务（需管理员）—— OKXMySQL / OKXApache / OKXWeb 全注册
 scripts\install_services.bat
 
@@ -158,6 +161,7 @@ go run ./cmd/anncheck              # 公告接口连通性
 | `scripts\stop_all.bat` | 一键停止，顺序 Apache → okxweb → MySQL | 普通 |
 | `scripts\cleanup_data.bat` | **月度维护**手工触发：`-maint-dry` 预演 → 询问 → `-maint` 真跑；`/yearly` 走年度清理 | 普通 |
 | `scripts\rotate_logs.bat` | 单文件过大的日志轮转：停服务 → 搬 `logs\archive\` → 重启 → 清理 | 普通 |
+| `scripts\set_db_pass.bat` | **MySQL 口令的唯一入口**：双击走菜单，或 `--gen` 生成 24 位随机口令并轮换、`--pass-file` 从文件读、`--file-only` 只写文件。先验证再落盘、失败自动回退，**不需要 root**，换完自动重启 OKXWeb | 普通 |
 | `scripts\set_token.bat` | **第一次用先跑这个**：双击 → 粘贴一次 PAT → 自动验证、存 `.git-token`、用 API 问出账号名写 `.git-owner`、数据仓不存在会自动建私有仓 | 普通 |
 | `scripts\push_now.bat` | **一键上传**（双击版）：代码仓 + 归档数据仓，跑完 `pause` 住给人看结果 | 普通 |
 | `scripts\push_github.bat` | **推送内核**（给服务/命令行用）：`check` / `code` / `data`；token 读 `%ROOT%\.git-token` 或 `%GITHUB_TOKEN%`，无 token 则干净退出不卡提示 | 普通 |
@@ -410,3 +414,29 @@ Note 随便填、Expiration 选 `No expiration` → 勾最上面那个大框 **`
 * 崩溃自动重启（5s / 5s / 30s），开机自启。
 * 日志写 `logs/okxbot.log`，与有没有人开网页无关。
 * 想让引擎完全停：`net stop OKXWeb`（或 `scripts\stop_all.bat`）；只停交易不停网页：`configs\okx_strategy.json` 里 `enabled: false`。
+
+### 11. MySQL 口令不再进仓库（2026-10-01）
+
+口令原先硬编码在 **4 个 `.go` 源文件 + 3 个批处理**里，而仓库是 public 的。
+现在源码 / 脚本里**不含任何明文口令**，运行时按下面顺序解析：
+
+| # | 来源 | 位置 |
+| --- | --- | --- |
+| 1 | 环境变量 | `OKX_MYSQL_PASS` / `OKX_MYSQL_USER` / `OKX_MYSQL_DSN` |
+| 2 | 密钥文件 | `<项目根>\.mysql-pass`（一行口令，**已在 .gitignore**） |
+| 3 | 空 | 连不上时报错会直接告诉你去哪配 |
+
+```bat
+:: 设置 / 轮换（双击也行）——换完自动重启 OKXWeb，不需要 MySQL root
+scripts\set_db_pass.bat --gen
+```
+
+**为什么环境变量优先、但服务实际读文件**：Windows 服务的环境变量是 SCM 在启动时
+整份拷贝的，`setx /M` 之后已注册的服务往往要重启整机才看得到；`.mysql-pass` 没有这个坑。
+`set_db_pass.bat` 会同时写文件和 `setx OKX_MYSQL_PASS`，两边不会打架。
+
+> ⚠️ **改代码不等于堵住泄漏。** 历史提交里那把旧口令此前一直有效 ——
+> 所以本轮做了**真实轮换**，旧口令现在返回 `Access denied`。
+> 只改代码不换口令，是最容易交付、也最没用的那种「安全修复」。
+
+自检：`bin\okxweb.exe -init-only` 的横幅会打 `口令来源 : 密钥文件 …`（**只报来源不报口令**）。
