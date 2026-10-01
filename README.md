@@ -161,7 +161,7 @@ go run ./cmd/anncheck              # 公告接口连通性
 | `scripts\stop_all.bat` | 一键停止，顺序 Apache → okxweb → MySQL | 普通 |
 | `scripts\cleanup_data.bat` | **月度维护**手工触发：`-maint-dry` 预演 → 询问 → `-maint` 真跑；`/yearly` 走年度清理 | 普通 |
 | `scripts\rotate_logs.bat` | 单文件过大的日志轮转：停服务 → 搬 `logs\archive\` → 重启 → 清理 | 普通 |
-| `scripts\set_db_pass.bat` | **MySQL 口令的唯一入口**：双击走菜单，或 `--gen` 生成 24 位随机口令并轮换、`--pass-file` 从文件读、`--file-only` 只写文件。先验证再落盘、失败自动回退，**不需要 root**，换完自动重启 OKXWeb | 普通 |
+| `scripts\set_db_pass.bat` | **MySQL 口令的唯一入口**：双击走菜单，或 `--gen` 生成 24 位随机口令并轮换、`--pass-file` 从文件读、`--file-only` 只写文件。先验证再落盘、失败自动回退，**不需要 root**，换完自动重启 OKXWeb。**默认只写 `.mysql-pass`，不碰环境变量**（`--env` 才写，不推荐） | 普通 |
 | `scripts\set_token.bat` | **第一次用先跑这个**：双击 → 粘贴一次 PAT → 自动验证、存 `.git-token`、用 API 问出账号名写 `.git-owner`、数据仓不存在会自动建私有仓 | 普通 |
 | `scripts\push_now.bat` | **一键上传**（双击版）：代码仓 + 归档数据仓，跑完 `pause` 住给人看结果 | 普通 |
 | `scripts\push_github.bat` | **推送内核**（给服务/命令行用）：`check` / `code` / `data`；token 读 `%ROOT%\.git-token` 或 `%GITHUB_TOKEN%`，无 token 则干净退出不卡提示 | 普通 |
@@ -422,8 +422,8 @@ Note 随便填、Expiration 选 `No expiration` → 勾最上面那个大框 **`
 
 | # | 来源 | 位置 |
 | --- | --- | --- |
-| 1 | 环境变量 | `OKX_MYSQL_PASS` / `OKX_MYSQL_USER` / `OKX_MYSQL_DSN` |
-| 2 | 密钥文件 | `<项目根>\.mysql-pass`（一行口令，**已在 .gitignore**） |
+| 1 | 环境变量 | `OKX_MYSQL_PASS` / `OKX_MYSQL_USER` / `OKX_MYSQL_DSN`（**平时不该设**，见下） |
+| 2 | 密钥文件 | `<项目根>\.mysql-pass`（一行口令，**已在 .gitignore**）← **唯一推荐来源** |
 | 3 | 空 | 连不上时报错会直接告诉你去哪配 |
 
 ```bat
@@ -433,7 +433,17 @@ scripts\set_db_pass.bat --gen
 
 **为什么环境变量优先、但服务实际读文件**：Windows 服务的环境变量是 SCM 在启动时
 整份拷贝的，`setx /M` 之后已注册的服务往往要重启整机才看得到；`.mysql-pass` 没有这个坑。
-`set_db_pass.bat` 会同时写文件和 `setx OKX_MYSQL_PASS`，两边不会打架。
+
+> ⚠️ **别用 `setx` 把口令写进环境变量**（`set_db_pass.bat` 早期版本默认这么干，已改）：
+> 不带 `/M` 的 `setx` 写的是**用户级**变量，明文落在 `HKCU\Environment`，
+> 任何以本用户身份跑的进程 `printenv` 一下就能拿到 —— 等于把口令从 git 仓库
+> 挪进注册表，白改。而且它对 OKXWeb **完全无效**（服务跑 LocalSystem，读不到用户级变量）。
+> 现在**默认只写 `.mysql-pass`**；要写环境变量得显式加 `--env`。清理命令：
+>
+> ```powershell
+> [Environment]::SetEnvironmentVariable('OKX_MYSQL_PASS',$null,'User')
+> Remove-ItemProperty -Path 'HKCU:\Environment' -Name OKX_MYSQL_PASS -ErrorAction SilentlyContinue
+> ```
 
 > ⚠️ **改代码不等于堵住泄漏。** 历史提交里那把旧口令此前一直有效 ——
 > 所以本轮做了**真实轮换**，旧口令现在返回 `Access denied`。

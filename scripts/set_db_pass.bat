@@ -17,7 +17,7 @@ rem  做四件事（幂等，可反复跑）：
 rem    1. 定出新口令（随机生成 / 手工输入 / 沿用当前）
 rem    2. 用**旧口令**登录，执行 SET PASSWORD 换成新口令
 rem    3. 用**新口令**复验，通过才写 <项目根>\.mysql-pass
-rem    4. 设环境变量 OKX_MYSQL_PASS，并重启 OKXWeb 服务
+rem    4. 重启 OKXWeb 服务，让它用上新口令
 rem
 rem  安全设计：**先验证再落盘，且失败可回退**
 rem    - 动库之前先确认旧口令真的能连；连不上就一行都不改
@@ -25,13 +25,25 @@ rem    - 改完立刻用新口令复验；复验失败会自动把库改回旧口令
 rem      并把文件恢复成旧口令 —— 绝不会出现「库改了、文件没改」的锁死状态
 rem    - 不需要 MySQL root：okx 账号可以改自己的口令（SET PASSWORD）
 rem
+rem  ★ 默认**不**写环境变量（2026-10-01 改成这样）★
+rem    之前默认会 setx OKX_MYSQL_PASS，而 setx 不带 /M 是**用户级**的 ——
+rem    明文躺在 HKCU\Environment 里，任何以本用户身份跑的进程 printenv
+rem    一下就能拿到（实测拿到了）。等于把口令从 git 仓库挪进注册表，白改。
+rem    更要命的是它对 OKXWeb **完全无效**：服务跑在 LocalSystem，
+rem    读不到用户级变量，实际读的是 .mysql-pass 文件。
+rem    所以现在默认只留 .mysql-pass 一条路（文件有 ACL + .gitignore 双保护）。
+rem    真要在命令行手敲 mysql 图省事，显式加 --env。
+rem    （清掉已经设过的用户级变量：
+rem       powershell -Command "[Environment]::SetEnvironmentVariable('OKX_MYSQL_PASS',$null,'User')" ）
+rem
 rem  用法：
 rem    set_db_pass.bat                     交互（双击走这个）
 rem    set_db_pass.bat --gen               生成随机口令并轮换（推荐）
 rem    set_db_pass.bat --pass <口令>       指定口令轮换
 rem    set_db_pass.bat --pass-file <路径>  从文件读口令（自动化用，最稳）
-rem    set_db_pass.bat --file-only         只写文件/环境变量，不动 MySQL
-rem    set_db_pass.bat --no-env            不设环境变量
+rem    set_db_pass.bat --file-only         只写密钥文件，不动 MySQL
+rem    set_db_pass.bat --env               额外写用户级环境变量（不推荐，见上）
+rem    set_db_pass.bat --no-env            不写环境变量（= 现在的默认，兼容旧写法）
 rem    set_db_pass.bat --no-restart        不重启服务
 rem
 rem  注意：--pass 后面的口令会出现在命令行里，别含  & ^ %% " < > |  这些字符。
@@ -48,7 +60,7 @@ cd /d "%ROOT%"
 set "MODE=ask"
 set "NEWPASS="
 set "NEWFROM="
-set "DO_ENV=1"
+set "DO_ENV=0"
 set "DO_RESTART=1"
 set "FILE_ONLY=0"
 if not "%~1"=="" set "HADARG=1"
@@ -59,6 +71,7 @@ if "%~1"=="" goto parsed
 if /i "%~1"=="--gen" goto opt_gen
 if /i "%~1"=="--file-only" goto opt_fileonly
 if /i "%~1"=="--no-env" goto opt_noenv
+if /i "%~1"=="--env" goto opt_env
 if /i "%~1"=="--no-restart" goto opt_norestart
 if /i "%~1"=="--pass" goto opt_pass
 if /i "%~1"=="--pass-file" goto opt_passfile
@@ -80,6 +93,12 @@ goto parse
 
 :opt_noenv
 set "DO_ENV=0"
+shift
+goto parse
+
+:opt_env
+set "DO_ENV=1"
+set "ENV_EXPLICIT=1"
 shift
 goto parse
 
@@ -151,7 +170,7 @@ if "%MODE%"=="set" goto have_pass
 
 echo   [G] 生成一个随机口令并轮换（推荐）
 echo   [M] 手工输入一个新口令
-echo   [K] 不轮换，只把当前口令写进 .mysql-pass 与环境变量
+echo   [K] 不轮换，只把当前口令写进 .mysql-pass
 echo   [Q] 退出
 echo.
 set "CH="
@@ -260,7 +279,7 @@ echo       改密成功，新口令已生效。
 echo.
 
 :write_only
-echo [4/4] 写密钥文件与环境变量 ...
+echo [4/4] 写密钥文件 ...
 >"%ROOT%\.mysql-pass" echo %NEWPASS%
 if not exist "%ROOT%\.mysql-pass" (
     echo       [错误] 写 %ROOT%\.mysql-pass 失败。
@@ -269,6 +288,9 @@ if not exist "%ROOT%\.mysql-pass" (
 echo       已写 %ROOT%\.mysql-pass（已在 .gitignore 里，不会入库）
 
 if "%DO_ENV%"=="1" (
+    echo       [注意] 你用了 --env：会把口令写进**用户级**环境变量，
+    echo              明文落在 HKCU\Environment，任何同用户权限的进程都能读到；
+    echo              而且它对 OKXWeb 服务**无效**（服务读 .mysql-pass 文件）。
     setx OKX_MYSQL_PASS "%NEWPASS%" >nul 2>&1
     if errorlevel 1 (
         echo       [警告] 环境变量没设上（setx 被拦？）。不影响服务 ——
@@ -346,8 +368,9 @@ echo 用法：set_db_pass.bat [选项]
 echo   --gen               生成随机口令并轮换（推荐）
 echo   --pass ^<口令^>       指定口令（别含  ^&  ^^  "  ^<  ^>  ^| ）
 echo   --pass-file ^<路径^>  从文件读口令（自动化用，最稳）
-echo   --file-only         只写文件 / 环境变量，不动 MySQL
-echo   --no-env            不设环境变量
+echo   --file-only         只写密钥文件，不动 MySQL
+echo   --env               额外写用户级环境变量（不推荐：明文进注册表，服务也用不上）
+echo   --no-env            不写环境变量（= 默认值，留着兼容旧写法）
 echo   --no-restart        不重启 OKXWeb
 echo   不带参数 = 交互菜单
 echo.
