@@ -170,9 +170,25 @@
       if (!code) { setMsg('请输入验证码', true); codeInput.focus(); return; }
       loginBtn.disabled = true;
       setMsg('验证中…');
+      // ★★ 同样不要传 email！（2026-10-02 实翻车修复，与上面 sendCode 是同一个坑）★★
+      //
+      //   原来传的是 `email: emailText.textContent`，而那个 span 在发码成功后
+      //   会被回填成服务端下发的**打码**地址「493****373@qq.com」。
+      //   于是服务端登录时算的是：
+      //       hashCode("493****373@qq.com", 用户输入的码)
+      //   而发码时存的是：
+      //       hashCode("493076373@qq.com", 真码)
+      //   **两者必然不等** → 用户输入正确的 6 位码，却永远得到
+      //   「验证码错误或已失效」。更糟的是每次失败都会累加试错次数，
+      //   连试 5 次就把真码也作废了。
+      //
+      //   一个必须记住的推论：**展示用的打码地址不能参与任何比对**。
+      //   打码是为了防泄漏，它的值本身就是"错的"，拿它做业务计算必然出问题。
+      //
+      //   正确做法同 sendCode：不传 email，服务端用硬编码的授权邮箱兜底。
       api('/api/admin/login', {
         method: 'POST',
-        body: { email: emailText.textContent, code: code },
+        body: { code: code },
       }).then(function (j) {
         loginBtn.disabled = false;
         if (!j.ok) { setMsg(j.error || '登录失败', true); codeInput.select(); return; }

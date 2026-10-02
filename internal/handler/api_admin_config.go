@@ -111,7 +111,14 @@ func tokenFrom(r *http.Request) string {
 //   「验证码已发送到 493076373@qq.com」，等于把管理员账号白送给任何扫端口的人。
 //   所以只回显打码后的形式，足够本人确认「是我的邮箱」，不够让攻击者拿走。
 func adminEmailMasked() string {
-	e := rbac.AllowedEmail()
+	return maskEmail(rbac.AllowedEmail())
+}
+
+// maskEmail 把任意邮箱打码。规则和 adminEmailMasked 一致，只是作用于入参。
+//
+// 抽出来的原因：日志里打码应当走同一条规则 ——
+// 否则哪天规则改了，接口回显和日志各说各话，排查时又要重新对一遍。
+func maskEmail(e string) string {
 	at := strings.IndexByte(e, '@')
 	if at <= 1 {
 		return "***"
@@ -239,6 +246,19 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) (any, 
 	code := strings.TrimSpace(strField(body, "code"))
 	if email == "" {
 		email = rbac.AllowedEmail()
+	}
+	// ★★ 拒绝「打码地址」参与比对 ★★（2026-10-02 实翻车修复，与 send_code 同源）
+	//
+	//   前端曾经把界面上**打码后**的邮箱（493****373@qq.com）当 email 传过来。
+	//   服务端拿它算 hashCode，而发码时存的是明文地址的 hashCode，
+	//   两者必然不等 —— 用户输对了码也永远进不去，还会白白消耗试错次数。
+	//
+	//   这一条断言的价值不是"修 bug"（前端已经不传了），而是**让错配不可能悄悄发生**：
+	//   打码地址带 '*'，永远是"错的"，绝不能出现在任何比对/落库路径里。
+	//   宁可在这里明确报错，也不要走到 Login 里变成一句含糊的「验证码错误」。
+	if strings.Contains(email, "*") {
+		s.logf("✗ 管理员登录：收到打码邮箱（%s）—— 前端误把展示文案当数据传了", maskEmail(email))
+		return map[string]any{"ok": false, "error": "请求参数异常，请刷新页面重试"}, nil
 	}
 	if code == "" {
 		return map[string]any{"ok": false, "error": "请输入验证码"}, nil

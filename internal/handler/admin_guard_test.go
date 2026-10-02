@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"finally-main/internal/rbac"
 )
 
 // TestAdminOpenPath_ExactWhitelist 白名单就是那四个，一个不多一个不少。
@@ -198,4 +200,59 @@ func TestStrField_GuardsAgainstSprintNil(t *testing.T) {
 		t.Fatal("strField 必须比 fmt.Sprint 更严格：缺失字段要返回空串而不是 \"<nil>\"")
 	}
 	t.Log("✓ strField 与 fmt.Sprint 行为不同（前者把缺失如实报成空串）")
+}
+
+// ---------------------------------------------------------------------------
+// F. 打码地址绝不能参与比对
+// ---------------------------------------------------------------------------
+
+// TestMaskEmail_ProducesUnusableForCompare 打码结果**必须**与原地址不同。
+//
+// 这条看着像废话，但它守的是一个真实发生的故障：
+// 前端曾把界面上打码后的邮箱（493****373@qq.com）当 email 传回服务端，
+// 服务端拿它算 hashCode 与发码时存的哈希比 —— 必然不等，
+// 用户输对了码也永远进不去，还白白消耗 5 次试错额度。
+func TestMaskEmail_ProducesUnusableForCompare(t *testing.T) {
+	full := rbac.AllowedEmail()
+	masked := maskEmail(full)
+	if masked == full {
+		t.Fatal("打码结果不能等于原地址，否则打码形同虚设（且无法用它检测误传）")
+	}
+	if !strings.Contains(masked, "*") {
+		t.Fatalf("打码结果必须含 * 以便识别，实际 %q", masked)
+	}
+	t.Logf("✓ 打码：%s → %s（含 *，可用于识别误传）", full, masked)
+}
+
+// TestMaskEmail_SameRuleAsAdminMasked 接口回显与日志打码必须走同一条规则。
+//
+// 否则哪天规则改了，接口说一套、日志说另一套，排查时又要重新对。
+func TestMaskEmail_SameRuleAsAdminMasked(t *testing.T) {
+	if maskEmail(rbac.AllowedEmail()) != adminEmailMasked() {
+		t.Fatal("maskEmail(AllowedEmail()) 应与 adminEmailMasked() 完全一致")
+	}
+	t.Log("✓ adminEmailMasked 就是 maskEmail 作用在授权邮箱上")
+}
+
+// TestMaskEmail_ShortLocalPart 极短本地部分不该 panic 或泄漏全貌。
+func TestMaskEmail_ShortLocalPart(t *testing.T) {
+	cases := []string{"a@qq.com", "ab@qq.com", "abc@qq.com", "abcd@qq.com", "@qq.com", "nope"}
+	for _, c := range cases {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("maskEmail(%q) panic：%v", c, r)
+				}
+			}()
+			out := maskEmail(c)
+			if out == "" {
+				t.Fatalf("maskEmail(%q) 返回空串", c)
+			}
+			// 无论怎么打码，都不该把完整本地部分原样吐出来
+			if c != "nope" && out == c {
+				t.Fatalf("maskEmail(%q) 未打码", c)
+			}
+		}()
+	}
+	t.Log("✓ 短本地部分/畸形输入均安全打码，不 panic、不原样回显")
 }
