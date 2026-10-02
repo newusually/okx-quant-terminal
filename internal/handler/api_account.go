@@ -129,7 +129,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 
 	tp := 0.0
@@ -235,7 +235,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) (any, err
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 
 	// 持仓中的仓位永远排在最前面，且**不受 days 过滤** ——
@@ -365,7 +365,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) (any, erro
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 	type item struct {
 		repo.TradeEventPoint
@@ -417,7 +417,7 @@ func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) (any, err
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 	type item struct {
 		model.SignalRow

@@ -314,6 +314,12 @@ func (s *Server) ensureFresh(inst, bar string) {
 	if s.feed == nil {
 		return
 	}
+	// ★ 只读板块（NQ）的数据来自外部源，不来自 OKX ★
+	// 拿它去问 OKX 只能拿到错误，白白消耗一次请求还把错误日志刷满。
+	// 它的新鲜度由 service.StartNQSync 自己负责（按缺口补 + 限流节流）。
+	if service.IsReadonlyInst(inst) {
+		return
+	}
 	d := service.BarDuration(bar)
 	if d <= 0 {
 		return

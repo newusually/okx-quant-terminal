@@ -59,7 +59,7 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) (any, er
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 	type covItem struct {
 		model.KlineCoverage

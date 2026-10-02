@@ -8,6 +8,7 @@ require (
 	github.com/markcheno/go-talib v0.0.0-20190307022042-cd53a9264d70
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/tidwall/gjson v1.14.1
+	github.com/ulikunitz/xz v0.5.17
 	golang.org/x/sys v0.28.0
 )
 

@@ -172,8 +172,12 @@ func (s *Server) handleInstruments(w http.ResponseWriter, r *http.Request) (any,
 		if p.Last > 0 {
 			margin = service.MinOrderMargin(it, p.Last, service.LeveragePolicy{Leverage: lev})
 		}
+		// 只读板块的展示名单独给（NQ / 纳斯达克100）——
+		// 不能走 BaseCcy+"/USDT" 那条通用拼接，它根本不是 USDT 计价合约。
+		// 统一走 service.InstDisplayName（全项目唯一构造入口）。
+		name := service.InstDisplayName(it)
 		out = append(out, item{
-			InstID: it.InstID, Name: it.BaseCcy + "/USDT", Base: it.BaseCcy, Quote: it.QuoteCcy,
+			InstID: it.InstID, Name: name, Base: it.BaseCcy, Quote: it.QuoteCcy,
 			Last: p.Last, ChgPct: p.ChgPct, QuoteVol24h: it.QuoteVol24h,
 			CtVal: it.CtVal, CtMult: it.CtMult, LotSz: it.LotSz, MinSz: it.MinSz,
 			TickSz: it.TickSz, Lever: it.Lever, State: it.State,
@@ -241,7 +245,7 @@ func (s *Server) handleTickers(w http.ResponseWriter, r *http.Request) (any, err
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
 	for _, it := range insts {
-		nameOf[it.InstID] = it.BaseCcy + "/USDT"
+		nameOf[it.InstID] = service.InstDisplayName(it)
 	}
 	type item struct {
 		InstID string  `json:"instId"`

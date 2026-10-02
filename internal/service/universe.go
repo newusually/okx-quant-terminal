@@ -273,6 +273,17 @@ func FilterUniverse(
 			continue
 		}
 
+		// ---- 规则 0：只读板块（NQ 等外部数据源）----
+		//
+		// 这类合约**刻意**留在 inst 表里（前端列表、图表要能查到它），
+		// 所以必须在这里显式排除。不能指望「它没有 OKX ticker → 成交额不足」
+		// 那条间接效果 —— 哪天给只读合约补上行情快照，它就会被判成可交易。
+		// 判据只有一处：IsReadonlyInst。
+		if IsReadonlyInst(it.InstID) {
+			st.DroppedReadonly++
+			continue
+		}
+
 		// ---- 规则 1：美股 / ETF / 商品（★ 2026-10-02 三期：默认已关闭）----
 		//
 		// 用户口径：「取消美股 etf 不做的功能，只要买入上限小于 1U 就做」。
@@ -364,6 +375,24 @@ func FilterUniverse(
 	return kept, st
 }
 
+// InstDisplayName 合约展示名 —— 全项目唯一构造入口。
+//
+// 背景：`BaseCcy + "/USDT"` 这段拼接原来散落在 7 个 handler 里
+// （api_market 2 处、api_admin 1 处、api_account 5 处）。
+// 结果是「只读板块要显示成 NQ / 纳斯达克100」就得改 7 遍，
+// 改漏一处就会出现同一个合约在不同面板叫不同名字。
+//
+// 现在统一走这里：只读板块用专属名，其余维持原口径。
+func InstDisplayName(it model.Instrument) string {
+	if IsReadonlyInst(it.InstID) {
+		return ReadonlyInstName(it.InstID)
+	}
+	if it.BaseCcy != "" {
+		return it.BaseCcy + "/USDT"
+	}
+	return it.InstID
+}
+
 // instSymbol 取合约的基础币种（BTC-USDT-SWAP → BTC）
 func instSymbol(it model.Instrument) string {
 	if it.BaseCcy != "" {
@@ -421,6 +450,9 @@ const (
 	ReasonNotional   = "notional"   // 最小一手保证金超上限
 	ReasonManual     = "manual"
 	ReasonOther      = "other"
+	// ReasonReadonly 只读板块（NQ 等外部数据源）：有行情有信号，永不交易。
+	// 与上面那些「暂时不合格」的原因有本质区别 —— 它是设计约束，不随参数放宽而改变。
+	ReasonReadonly = "readonly"
 )
 
 // ExcludeLabel 把排除原因码翻成一句人话（网页 / 接口共用）
@@ -448,6 +480,8 @@ func ExcludeLabel(reason string) string {
 		return "最小一手保证金超上限"
 	case ReasonManual:
 		return "手工排除"
+	case ReasonReadonly:
+		return "只读展示，不可交易"
 	case ReasonOther:
 		return "其它原因"
 	default:

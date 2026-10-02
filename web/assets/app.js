@@ -154,6 +154,15 @@ function renderPager(key, total, onGo) {
 // 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
 const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3 };
 
+/* ★ NQ 只读板块 ★
+ * 合约 id → 展示名。这类合约的数据来自外部源（不是 OKX），
+ * 既没有行情快照、也不能下单。
+ * 前端只在**显示**层面做兜底；「不可交易」的拦截在后端
+ * （service.ReadonlyInstIDs，到底层下单出口 PlaceOrder 都拦了一道），
+ * 前端不做也不该做安全判断。 */
+const READONLY_INSTS = { 'NQ-INDEX': 'NQ / 纳斯达克100' };
+const isReadonlyInst = (id) => Object.prototype.hasOwnProperty.call(READONLY_INSTS, id);
+
 // 币安配色：涨绿跌红
 const C_UP = '#0ecb81', C_DOWN = '#f6465d';
 const C_MA7 = '#f0b90b', C_MA25 = '#e056fd', C_MA99 = '#4facfe';
@@ -711,7 +720,10 @@ function renderInstList() {
     row.className = 'inst-row' + (it.instId === state.curInst ? ' active' : '');
     row.onclick = () => selectInst(it.instId);
     // 被排除的合约打一个原因标签；可交易的不打（默认列表里全是可交易的）
-    const badge = it.tradeable
+    // 只读板块用单独一种样式：它不是「暂时不合格」，而是**设计上不可交易**
+    const badge = isReadonlyInst(it.instId)
+      ? `<span class="badge-ro" title="只读板块：只展示数据与信号，不接入交易 API">只读 · 不可交易</span>`
+      : it.tradeable
       ? `<span class="badge-ok">可交易${it.marginUsdt ? ' · ' + fmtNum(it.marginUsdt, 3) + 'U' : ''}</span>`
       : `<span class="badge-no" title="${esc(it.excludeLabel || it.excludeReason)}">${esc(it.excludeLabel || '已排除')}</span>`;
     row.innerHTML = `
@@ -997,6 +1009,14 @@ async function loadTickers() {
   const j = await api('/api/tickers');
   const map = {};
   (j.list || []).forEach((t) => { map[t.instId] = t; });
+  // ★ 只读板块（NQ）没有 OKX 行情，它的「最新价」是本地用 K 线合成的
+  //   （见 syncReadonlyTicker）。这里必须把合成条目搬过来 ——
+  //   否则每 2 秒一次的 ticker 轮询会把它整个冲掉，
+  //   标题价格变「--」、图例名称退化成裸 instId。
+  Object.keys(READONLY_INSTS).forEach((id) => {
+    const prev = state.tickers && state.tickers[id];
+    if (prev) map[id] = prev;
+  });
   state.tickers = map;
   tickerN++;
 
@@ -1120,13 +1140,41 @@ function renderKline(tickSize, keepRange) {
     state.chart.timeScale().setVisibleLogicalRange({ from: lr.from + shift, to: lr.to + shift });
     state.scrollGuardUntil = Date.now() + 600;   // 插完数据别再立刻触发下一页
   }
+  // ★ 顺序要紧：先给只读板块合成行情，再渲染图例 ★
+  //   renderLegend 的名称取自 state.tickers[curInst].name ——
+  //   反过来（先图例后合成）它的文本框里会残留裸 instId。
+  syncReadonlyTicker();
   renderLegend(state.klines[state.klines.length - 1] || null);
+}
+
+// syncReadonlyTicker 给只读板块（NQ）合成一条行情快照。
+//
+// 它没有 OKX 行情、/api/tickers 里也没有它 —— 不补这一条，标题和列表里的
+// 价格 / 涨跌幅会永远是「--」，看起来像数据坏了。用图上首尾两根 K 线算出
+// 「最新价 + 区间涨跌幅」（口径与 OKX 合约一致：都是相对当前窗口起点）。
+function syncReadonlyTicker() {
+  const inst = state.curInst;
+  if (!isReadonlyInst(inst)) return;
+  const ks = state.klines || [];
+  if (!ks.length) return;
+  const last = ks[ks.length - 1], first = ks[0];
+  const it = (state.insts || []).find((x) => x.instId === inst) || {};
+  state.tickers[inst] = Object.assign({}, state.tickers[inst], {
+    instId: inst,
+    name: it.name || READONLY_INSTS[inst],
+    last: last.c,
+    chgPct: first.o > 0 ? ((last.c - first.o) / first.o) * 100 : 0,
+  });
+  try { renderChartHead(); } catch (e) { /* 标题刷新失败不该影响画图 */ }
 }
 
 // setCandleFormat 按合约最小变动价位设置价格精度
 function setCandleFormat(tickSize) {
   if (!tickSize) return;
-  const prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
+  let prec = Math.max(0, Math.min(8, Math.ceil(-Math.log10(tickSize))));
+  // 只读板块是指数（NQ），报价习惯两位小数（29461.75）——
+  // 按 tickSz=0.25 推出来只有 1 位，读起来像被截断了。
+  if (isReadonlyInst(state.curInst)) prec = Math.max(prec, 2);
   state.candle.applyOptions({ priceFormat: { type: 'price', precision: prec, minMove: tickSize } });
 }
 
@@ -1662,6 +1710,9 @@ let klineTimer = null;
 async function selectInst(instId) {
   if (!instId) return;
   state.curInst = instId;
+  // NQ 快捷入口的高亮跟着当前合约走
+  const nqBtn = $('nqEntry');
+  if (nqBtn) nqBtn.classList.toggle('on', isReadonlyInst(instId));
   // 标题立刻刷 —— 不等网络。用户点了哪张表里的合约名，左边标题马上就得变。
   renderChartHead();
   // 左边合约列表 / 右侧合约信息只是「顺带刷新」，它们失败绝不能挡住画图。
@@ -2217,6 +2268,29 @@ async function loadPnl() {
 /* 事件                                                                */
 /* ------------------------------------------------------------------ */
 
+// setScope 切换合约列表范围（可交易 / 被排除 / 全部）
+async function setScope(scope) {
+  state.scope = scope;
+  document.querySelectorAll('.scope').forEach((b) =>
+    b.classList.toggle('active', b.dataset.scope === scope));
+  await loadInstruments();
+}
+
+// openNQ 打开 NQ 只读板块的详细 K 线图（纳斯达克100，只展示不交易）。
+//
+// 先切到「被排除」范围：NQ 是 tradeable=0，默认的「可交易」列表里没有它，
+// 不切的话会出现「图切过去了、左边列表里却找不到它高亮」的割裂感。
+async function openNQ() {
+  const ID = 'NQ-INDEX';
+  await setScope('excluded');
+  if (!(state.insts || []).some((x) => x.instId === ID)) {
+    // 首次启动时外部数据可能还没同步进来 —— 给个明确提示，别静默什么都不发生
+    const cnt = $('instCount');
+    if (cnt) cnt.textContent = 'NQ 数据同步中，稍候刷新…';
+  }
+  await selectInst(ID);
+}
+
 function bindEvents() {
   $('instSearch').addEventListener('input', renderInstList);
 
@@ -2224,10 +2298,11 @@ function bindEvents() {
   $('scopeGroup').addEventListener('click', async (e) => {
     const btn = e.target.closest('.scope');
     if (!btn) return;
-    state.scope = btn.dataset.scope;
-    document.querySelectorAll('.scope').forEach((b) => b.classList.toggle('active', b === btn));
-    await loadInstruments();
+    await setScope(btn.dataset.scope);
   });
+
+  // ★ NQ 只读板块快捷入口：一键切到纳斯达克100 的详细 K 线图
+  $('nqEntry').addEventListener('click', () => { openNQ(); });
 
   $('btnRefresh').onclick = () => {
     loadTickers(); loadKline(true); loadPositions(); loadHistory(); loadSignals(); loadBackfill();

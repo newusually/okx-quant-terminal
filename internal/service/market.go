@@ -738,6 +738,10 @@ func (c *OKXClient) EffectivePosSide(want string) string {
 }
 
 func (c *OKXClient) SetLeverage(instID string, lever int, mgnMode string) error {
+	// ★ 只读板块硬闸：NQ 这类外部数据合约连杠杆都不该去动
+	if IsReadonlyInst(instID) {
+		return fmt.Errorf("合约 %s 属于只读板块（只展示不交易），已拒绝设置杠杆", instID)
+	}
 	if mgnMode == "" {
 		mgnMode = "isolated"
 	}
@@ -763,6 +767,17 @@ type OrderResult struct {
 
 // PlaceOrder 市价下单（只做多 / 平多）
 func (c *OKXClient) PlaceOrder(instID, tdMode, side, posSide, ordType, sz string, reduceOnly bool) (*OrderResult, error) {
+	// ★★ 只读板块硬闸 ★★
+	//
+	// 这里是所有自动下单路径的**唯一咽喉**：开仓（trader.runEntries）、
+	// 平仓（closeOne）、加仓（runAddons）最后都落到这个方法。
+	//
+	// 上游（扫描/准入）本来就不会选中只读合约，但那是「靠上游不出错」。
+	// 在这里再拦一道，是为了将来有人新增一条任务直接调下单时也不会漏 ——
+	// 「只展示不交易」是产品约束，必须在最靠近交易所的那一层兜住。
+	if IsReadonlyInst(instID) {
+		return nil, fmt.Errorf("合约 %s 属于只读板块（只展示不交易），已拒绝下单", instID)
+	}
 	payload := map[string]string{
 		"instId":  instID,
 		"tdMode":  tdMode,

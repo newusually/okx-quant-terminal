@@ -136,13 +136,42 @@ html, body {
   background: rgba(252, 213, 53, .12); color: var(--accent);
   border-color: var(--accent);
 }
+/* ★ NQ 只读板块快捷入口（合约列表顶部）★
+ * 它是「只展示、不可交易」的外部指数，tradeable=0 不进可交易列表，
+ * 所以给一个独立入口，点了直接看它的 K 线图。金色 = 与 OKX 合约区分开。 */
+.nq-entry {
+  display: flex; align-items: center; gap: 7px; width: calc(100% - 16px);
+  margin: 8px 8px 0; padding: 6px 9px; cursor: pointer; text-align: left;
+  background: linear-gradient(90deg, rgba(255, 213, 79, .13), rgba(255, 213, 79, .02));
+  border: 1px solid rgba(255, 213, 79, .30); border-radius: 6px;
+  color: var(--text); font-size: 12px;
+}
+.nq-entry:hover {
+  background: linear-gradient(90deg, rgba(255, 213, 79, .22), rgba(255, 213, 79, .05));
+  border-color: rgba(255, 213, 79, .6);
+}
+.nq-entry.on {
+  border-color: var(--accent);
+  background: linear-gradient(90deg, rgba(255, 213, 79, .3), rgba(255, 213, 79, .1));
+}
+.nq-entry .nq-k {
+  font-family: var(--mono); font-weight: 800; font-size: 13px;
+  color: #ffd54f; letter-spacing: .5px;
+}
+.nq-entry .nq-t { color: var(--text-2); font-size: 11.5px; }
+.nq-entry .nq-ro {
+  margin-left: auto; font-family: var(--mono); font-size: 9.5px; line-height: 15px;
+  padding: 0 5px; border-radius: 3px; color: #ffd54f;
+  border: 1px solid rgba(255, 213, 79, .45);
+}
+
 .uni-summary {
   padding: 6px 12px 8px; font-size: 10.5px; line-height: 1.5;
   border-bottom: 1px solid var(--line); font-family: var(--mono);
 }
 
-/* 准入标签：绿的=可交易，灰的=被排除及原因 */
-.badge-ok, .badge-no {
+/* 准入标签：绿的=可交易，灰的=被排除及原因，金的=只读板块（设计上不可交易） */
+.badge-ok, .badge-no, .badge-ro {
   display: inline-block; margin-left: 4px; padding: 0 5px;
   border-radius: 3px; font-size: 9.5px; line-height: 15px;
   font-family: var(--mono); white-space: nowrap;
@@ -150,6 +179,8 @@ html, body {
 .badge-ok { background: rgba(14, 203, 129, .14); color: #0ecb81; }
 .badge-no { background: rgba(120, 128, 138, .18); color: var(--muted); max-width: 128px;
   overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.badge-ro { background: rgba(255, 213, 79, .16); color: #ffd54f;
+  border: 1px solid rgba(255, 213, 79, .3); }
 
 .inst-list { overflow-y: auto; flex: 1; }
 .inst-row {

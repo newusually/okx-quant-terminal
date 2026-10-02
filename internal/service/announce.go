@@ -58,6 +58,8 @@ type FilterStats struct {
 	DroppedDelist    int            `json:"droppedDelist"`   // 即将下线
 	DroppedVolume    int            `json:"droppedVolume"`   // 24h 成交额不足
 	DroppedNotional  int            `json:"droppedNotional"` // 0.1U 买不起最小一手
+	// DroppedReadonly 只读板块（外部数据源）：有行情、有信号，但设计上永不可交易
+	DroppedReadonly  int            `json:"droppedReadonly"`
 	ScaledUp         int            `json:"scaledUp"`        // 0.1U 买不起 1 张但没超硬上限，下单会放大
 	DelistSymbols    []string       `json:"delistSymbols"`   // 命中的下线币种
 	NewListingSymbol []string       `json:"newListingSymbols"`

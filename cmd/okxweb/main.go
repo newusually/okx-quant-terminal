@@ -736,6 +736,20 @@ func runApp(ctx context.Context) error {
 	// upsert 进 trade 表，历史面板才真的「有东西看」。
 	service.StartOKXPositionsSync(ctx)
 
+	// ---- 4.76 NQ（纳斯达克100）只读行情同步 ----
+	//
+	// 网页上多一个「只能看、不能买」的板块，数据来自外部源（Dukascopy）：
+	//   · 拉最近 30 天 1 分钟数据 → 聚合 3m/5m/15m → 写 kline 表（与 OKX 同表同结构）
+	//   · 给它**单独**跑信号回算：它 tradeable=0，不会被 RunSignalBackfillOnce
+	//     扫到（那个只遍历 TradeableInstIDs），所以必须自己来一遍
+	//   · 永不进入下单链路 —— 判据只有一处：service.ReadonlyInstIDs
+	//
+	// ⚠ Dukascopy 限流极硬（连续请求会进惩罚冷却，所有请求挂住），
+	//   所以是「按缺口补 + 单轮限量 8 天 + 失败即中止本轮」，多轮收敛。
+	service.StartNQSync(ctx, db, func(format string, args ...any) {
+		logx.Logf("INFO", "[NQ] "+format, args...)
+	})
+
 	// ---- 4.8 自动维护程序（月度任务 + 年度任务）----
 	//
 	// 两条独立红线：
@@ -854,9 +868,18 @@ func applyUniverseFilter(db *repo.DB, bf *service.BackfillManager, store *servic
 	upd := make([]model.Instrument, 0, len(insts))
 	for _, it := range insts {
 		row := model.Instrument{InstID: it.InstID}
-		if keepSet[it.InstID] {
+		switch {
+		case keepSet[it.InstID]:
 			row.Tradeable, row.ExcludeReason = 1, ""
-		} else {
+		case service.IsReadonlyInst(it.InstID):
+			// ★ 只读板块（NQ）：有行情、有信号，但**永不交易**。
+			//
+			// 这一支必须写在 reasonOf 之前，否则它会被归到
+			// 「成交额不足」「最小一手超上限」之类的技术原因上，
+			// 界面上看起来像「只是暂时不合格」，哪天参数一放宽就可能被放回可交易。
+			// 只读是**设计约束**，不是准入结论。
+			row.Tradeable, row.ExcludeReason = 0, "readonly"
+		default:
 			row.Tradeable, row.ExcludeReason = 0, reasonOf(it, tkMap, policy, delist)
 		}
 		upd = append(upd, row)
