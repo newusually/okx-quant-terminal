@@ -284,9 +284,11 @@ func closedWindow(cands []Candle, openTs, durMs int64) []Candle {
 
 // decideAddon 纯判定逻辑（不碰网络，方便单测）。
 //
-// ★ 2026-10-01 二期：触发条件 = 8 因子共振（与买入完全一致）★
+// ★ 2026-10-02 七期：触发条件 = **纯价格条件**（用户口径）★
 //
-// sig 必须是由 LatestSignal / ComputeSignal 算出来的那根**已收盘** K 线的信号。
+//	sig 由 LatestSignal / ComputeSignal 算出，是**已收盘**那根 K 线的信号：
+//	  ① 收盘价比买入价低超过 addon.drop_pct（默认 1%）——「跌到位置」
+//	  ② 该根自身涨幅 > addon.bar_rise_pct（默认 1%）——「反弹启动」
 func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	sig *Signal, durMs int64, ins Instrument) AddonDecision {
 
@@ -298,15 +300,24 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 		return AddonDecision{}
 	}
 
-	// ③ 共振判据：**与买入扫描调同一个函数**（service.SignalQualified）。
+	// ③ 价格判据（2026-10-02 七期，用户口径）——**不再与买入条件一致**：
 	//
-	//    2026-10-02 六期口径：Score ≥ 3（threshold = 3）
-	//    + 这根 K 线涨跌幅过带符号门槛 min_bar_rise_pct（当前 -0.7% = 必须真跌）。
+	//    a. 「跌到位置」：这根已收盘 K 线的**收盘价**比买入价低超过 DropPct%（默认 1）
+	//         sig.Close < p.EntryPx × (1 − DropPct/100)
+	//    b. 「反弹启动」：这根 K 线自身涨幅**严格大于** BarRisePct%（默认 1）
+	//         sig.RisePct > BarRisePct
 	//
-	//    ★ 刻意不再在这里手写 `sig.Score < th`：买入那边已经改调同一个函数，
-	//      这里若继续自己判，两个条件（分数 + 涨跌幅）就会各自只在一半路径上生效，
-	//      「加仓条件与买入一致」立刻变成假的 —— 而且不报错。
-	if !SignalQualified(sig, cfg.ThresholdFor(p.InstID), cfg.MinBarRisePct()) {
+	//    ★ 为什么不再走 SignalQualified：用户口径改成了纯价格条件，与 score 无关。
+	//      但 ④（晚于开仓）⑤（min_gap）仍然保留 —— 那两条管的是「别在同一根上重复加」，
+	//      与触发条件正交，任何口径下都必须有。
+	//    ★ NaN 安全：写成 !(a < b) —— sig.Close / RisePct 万一是 NaN，
+	//      所有比较为 false → 判成「不合格」，偏保守。
+	drop := a.DropPct
+	if drop > 0 && !(sig.Close < p.EntryPx*(1-drop/100)) {
+		return AddonDecision{}
+	}
+	rise := a.BarRisePct
+	if rise > 0 && !(sig.RisePct > rise) {
 		return AddonDecision{}
 	}
 
@@ -333,8 +344,8 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	//    这里必须带 `a.MaxTimes > 0` 前置 —— 一期在 entry 的两个计数器上
 	//    踩过一模一样的坑：0 会被当成「已达上限 0」，第一笔就被拦掉。
 	//
-	//    ★ 加满之后只是不再补仓，不再自动平仓：出场只剩 +0.3% 止盈 /
-	//      1 小时超时，没有任何一条看加仓次数。
+	//    ★ 加满之后只是不再补仓，不再自动平仓：出场只剩 +0.35% 止盈 /
+	//      24 小时超时（-300% 止损形同虚设），没有任何一条看加仓次数。
 	if a.MaxTimes > 0 && p.AddonCount >= a.MaxTimes {
 		return AddonDecision{}
 	}
@@ -374,13 +385,16 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if a.MaxTimes > 0 {
 		timesTxt = fmt.Sprintf("上限 %d 次", a.MaxTimes)
 	}
-	// 原因文本里把两个条件都写出来（分数门槛 + 涨跌幅门槛方向随符号，六期起负值=必须真跌），
-	// 否则事后查「为什么加了这一笔」只看到一个数字，看不出三期多出来的那个条件。
+	// 原因文本里把价格条件都写出来（收盘价 vs 买入价 + 该根涨幅），
+	// 否则事后查「为什么加了这一笔」只看到一个数字，看不出七期的两个条件各是多少。
 	riseTxt := ""
-	if mr := cfg.MinBarRisePct(); mr > 0 {
-		riseTxt = fmt.Sprintf("、触发那根涨 %.2f%% ＞ %.2f%%", sig.RisePct, mr)
-	} else if mr < 0 {
-		riseTxt = fmt.Sprintf("、触发那根涨 %.2f%% ＜ %.2f%%", sig.RisePct, mr)
+	if a.BarRisePct > 0 {
+		riseTxt = fmt.Sprintf("、该根涨 %.2f%% ＞ %.2f%%", sig.RisePct, a.BarRisePct)
+	}
+	dropTxt := ""
+	if a.DropPct > 0 {
+		dropTxt = fmt.Sprintf("、收盘 %.6g 低于买价 %.6g 的 %.2f%% 线",
+			sig.Close, p.EntryPx, 100-a.DropPct)
 	}
 
 	return AddonDecision{
@@ -388,7 +402,7 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 		NewSz: newSz, NewAvgPx: newAvg, NewMargin: newMargin,
 		Count: p.AddonCount + 1, AllMargin: p.AddonMargin + used,
 		Ts: sig.Ts,
-		Reason: fmt.Sprintf("共振 %d/%d（%s）与买入同条件%s → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
-			sig.Score, cfg.ThresholdFor(p.InstID), sig.HitList, riseTxt, dropFromEntry, timesTxt),
+		Reason: fmt.Sprintf("价格条件：收盘价较买入价 -%.2f%%（跌满 %.2f%%）%s%s → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
+			(p.EntryPx-sig.Close)/p.EntryPx*100, a.DropPct, dropTxt, riseTxt, dropFromEntry, timesTxt),
 	}
 }

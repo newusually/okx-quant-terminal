@@ -31,6 +31,8 @@ const state = {
   kMap: new Map(),      // ts -> K 线
   hasMore: false,       // 更早还有没有数据
   loadingOlder: false,  // 防止一次滚动触发多次翻页
+  noMoreNew: false,     // 七期：右端已到最新（loadNewer 返回 0 根时置位）
+  loadingNewer: false,  // 七期：右移翻页去重
 
   // ---- 显示开关 & 实时 ----
   indVisible: { ma: true, boll: true, vol: true },
@@ -138,8 +140,9 @@ const C_UP = '#0ecb81', C_DOWN = '#f6465d';
 const C_MA7 = '#f0b90b', C_MA25 = '#e056fd', C_MA99 = '#4facfe';
 const C_BOLL = '#5c6b7a', C_BOLL_MID = '#9aa4b2';
 
-const KLINE_PAGE = 1000;   // 一页多少根（初始加载 & 每次向前翻都这么多）
-const PAGE_TRIGGER = 5;    // 可视区左边界落到第几根之前就预加载下一页
+const KLINE_PAGE = 300;    // 一页多少根（七期：向左/向右每次翻 300 根）
+const KLINE_INIT = 100;    // 七期：初始只加载最新 100 根，往左/往右滚才按页补
+const PAGE_TRIGGER = 5;    // 可视区边界落到第几根之内就预加载下一页
 
 /* ------------------------------------------------------------------ */
 /* 工具                                                                */
@@ -674,7 +677,8 @@ function renderServiceInfo(st) {
     ? '关闭'
     // ★ 2026-10-01 起「加满自动平仓」已删除 —— 加仓次数只限制还能补几次，
     //   不再是出场条件，所以这里不再显示「满则平仓」。
-    : `最多 ${sa.max_times || '--'} 次（只限制补仓，不影响出场）`;
+    // ★ 2026-10-02 七期：触发改为纯价格条件（收盘价低于买入价 drop_pct% 且该根涨 > bar_rise_pct%）。
+    : `最多 ${sa.max_times || '--'} 次 · 触发：收盘价较买价 −${sa.drop_pct ?? '--'}% 且该根涨 > ${sa.bar_rise_pct ?? '--'}%`;
   // 超时平仓：60 → "1 小时"。整数小时就说小时，否则说分钟，和后台的
   // HoldText() 口径一致（以前后台写「60 分钟」、网页写「1 小时」，两边对不上）。
   const holdTxt = sx.max_hold_minutes > 0
@@ -682,11 +686,12 @@ function renderServiceInfo(st) {
       ? (sx.max_hold_minutes / 60) + ' 小时'
       : sx.max_hold_minutes + ' 分钟')
     : (sx.max_hold_bars > 0 ? sx.max_hold_bars + ' 根' : '关闭');
-  // 出场规则一句话（与后台 service.ExitText 口径一致）：
-  // 只列出**真正开着**的通道。四期口径下应当只剩「超时 1 小时」。
+  // 出场规则一句话（与后台 runExits 口径一致）：
+  // 只列出**真正开着**的通道。七期口径：「止盈 0.35% · 止损 -300% · 超时 24 小时」。
   const exitRuleParts = [];
   if (sx.take_profit_pct > 0) exitRuleParts.push('止盈 ' + sx.take_profit_pct + '%');
   if (sx.boll_upper_exit) exitRuleParts.push('布林上轨');
+  if (sx.stop_loss_pct > 0) exitRuleParts.push('止损 -' + sx.stop_loss_pct + '%');
   if (sx.max_hold_minutes > 0) exitRuleParts.push('超时 ' + holdTxt);
   else if (sx.max_hold_bars > 0) exitRuleParts.push('超时 ' + sx.max_hold_bars + ' 根');
   const exitRuleTxt = exitRuleParts.length ? exitRuleParts.join(' · ') : '无（不会自动平仓）';
@@ -1079,6 +1084,37 @@ async function loadOlder() {
   }
 }
 
+// loadNewer 向右翻一页（七期）：拿 state.klines 最后一根之后的 KLINE_PAGE 根。
+//
+// 初始只加载最新 100 根，用户往右滚到右边界时向后补页 —— 服务端
+// /api/mark 支持 after=<ts>（返回 after 之后**最早**的 300 根，渐进不跳段）。
+// 返回 0 根说明库里没有更新的了（右端已到实时），置 state.noMoreNew 停止请求。
+async function loadNewer() {
+  if (state.loadingNewer || state.noMoreNew || !state.curInst) return;
+  if (!state.klines.length) return;
+  state.loadingNewer = true;
+  const inst = state.curInst, bar = state.curBar;
+  const after = state.klines[state.klines.length - 1].ts;
+  $('chartHint').textContent = `加载更晚的 ${KLINE_PAGE} 根…`;
+  try {
+    const j = await api(`/api/mark?inst=${encodeURIComponent(inst)}&bar=${encodeURIComponent(bar)}` +
+      `&limit=${KLINE_PAGE}&after=${after}&_=${Date.now()}`);
+    if (inst !== state.curInst || bar !== state.curBar) return;   // 期间切了合约，丢弃
+    if (!j.kline || !j.kline.length) {
+      state.noMoreNew = true;   // 后面没有更新的 K 线了
+    } else {
+      mergePage(j, false);
+      const ts = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
+      renderKline(ts, true);
+    }
+    updatePageHint();
+  } catch (e) {
+    $('chartHint').textContent = '加载更晚数据失败：' + e.message;
+  } finally {
+    state.loadingNewer = false;
+  }
+}
+
 // updatePageHint 底部提示：已加载多少根 / 还能不能继续往前翻
 function updatePageHint() {
   const n = state.klines.length;
@@ -1089,21 +1125,24 @@ function updatePageHint() {
   const buys = state.markers.filter((m) => m.kind === 'open' || m.kind === 'signal').length;
   const sells = state.markers.filter((m) => m.kind === 'close').length;
   const mk = state.markers.length ? ` · 🚀 ${buys} · 🍃 ${sells}` : '';
-  el.textContent = (state.hasMore
-    ? `已加载 ${n} 根 · 向左滚动继续加载（每页 ${KLINE_PAGE} 根）`
-    : `已加载 ${n} 根 · 已到最早`) + mk;
+  const left = state.hasMore
+    ? `向左滚动加载更早（每页 ${KLINE_PAGE} 根）`
+    : '已到最早';
+  const right = state.noMoreNew ? ' · 已到最新' : '';
+  el.textContent = `已加载 ${n} 根 · ${left}${right}` + mk;
 }
 
-// onScroll 滚到左边缘附近就预加载下一页
+// onScroll 滚到左/右边缘附近就预加载下一页（七期：左右双向）
 //
 // scrollGuard：刚 fitContent / 刚往前插完数据时会触发一次可视区回调，
-// 那一次不能当成「用户往左拖」——否则一打开就把所有历史页全拉下来了。
+// 那一次不能当成「用户拖动」——否则一打开就把所有历史页全拉下来了。
 function onScroll() {
-  if (!state.hasMore || state.loadingOlder) return;
   if (Date.now() < (state.scrollGuardUntil || 0)) return;
   const lr = state.chart.timeScale().getVisibleLogicalRange();
   if (!lr) return;
-  if (lr.from <= PAGE_TRIGGER) loadOlder();
+  if (state.hasMore && !state.loadingOlder && lr.from <= PAGE_TRIGGER) loadOlder();
+  if (!state.noMoreNew && !state.loadingNewer &&
+      lr.to >= state.klines.length - PAGE_TRIGGER) loadNewer();
 }
 
 let klineTimer = null;
@@ -1170,6 +1209,7 @@ async function loadKline(reset) {
     state.klines = [];
     state.ind = {};
     state.hasMore = false;
+    state.noMoreNew = false;   // 七期：换合约/周期后右端重新可探
     resetMarkers();
   }
 
@@ -1181,7 +1221,7 @@ async function loadKline(reset) {
   let j;
   try {
     j = await api(`/api/mark?inst=${encodeURIComponent(inst)}&bar=${encodeURIComponent(bar)}` +
-      `&days=${state.days}&limit=${KLINE_PAGE}&_=${Date.now()}`);
+      `&days=${state.days}&limit=${KLINE_INIT}&_=${Date.now()}`);
   } catch (e) {
     $('chartHint').textContent = '加载失败：' + e.message;
     renderChartHead();          // 失败也别让标题留着上一个合约
@@ -1744,6 +1784,7 @@ function pollBackfillUntilDone() {
 (async function boot() {
   initChart();
   initPnlChart();
+  initFx();
   bindEvents();
   applyIndVisibility();
   try {
@@ -1788,3 +1829,107 @@ function pollBackfillUntilDone() {
     }
   });
 })();
+
+/* ------------------------------------------------------------------ */
+/* 七期（2026-10-02）图表特效：魔法棒光标 + 点击小星星 + 流星雨          */
+/*                                                                     */
+/* 全部纯前端、低频：流星同屏最多 3 颗、canvas 只在有流星时才重绘，      */
+/* 不碰图表数据，也不拦截任何鼠标事件（fxCanvas pointer-events:none）。  */
+/* ------------------------------------------------------------------ */
+
+function initFx() {
+  const box = document.querySelector('.chart-box');
+  const cvs = $('fxCanvas');
+  if (!box || !cvs || !cvs.getContext) return;
+  const ctx = cvs.getContext('2d');
+
+  // ---- 画布尺寸跟随容器（devicePixelRatio 对齐，拖尾不糊） ----
+  const fit = () => {
+    const r = box.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    cvs.width = Math.max(1, Math.round(r.width * dpr));
+    cvs.height = Math.max(1, Math.round(r.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  fit();
+  window.addEventListener('resize', fit);
+
+  // ---- ① 点击小星星：从棒尖落点爆开 10 颗，向外飞散 + 旋转淡出 ----
+  const STAR_GLYPHS = ['✦', '✧', '⭐', '✨'];
+  const STAR_COLORS = ['#ffd54f', '#fff3c4', '#b39dff', '#7cd4ff'];
+  box.addEventListener('click', (e) => {
+    const r = box.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    for (let i = 0; i < 10; i++) {
+      const s = document.createElement('span');
+      s.className = 'fx-star';
+      s.textContent = STAR_GLYPHS[i % STAR_GLYPHS.length];
+      s.style.left = x + 'px';
+      s.style.top = y + 'px';
+      s.style.color = STAR_COLORS[i % STAR_COLORS.length];
+      s.style.fontSize = (10 + Math.random() * 10) + 'px';
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 24 + Math.random() * 46;
+      s.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
+      s.style.setProperty('--dy', (Math.sin(ang) * dist - 18) + 'px');
+      box.appendChild(s);
+      setTimeout(() => s.remove(), 850);   // 动画放完就收，不留 DOM
+    }
+  });
+
+  // ---- ② 流星雨：随机间隔生成，右上 → 左下划过，带渐隐拖尾 ----
+  const meteors = [];
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const spawn = () => {
+    if (meteors.length >= 3) return;   // 同屏上限，保住 2 核小机器
+    const w = cvs.width / (window.devicePixelRatio || 1);
+    const h = cvs.height / (window.devicePixelRatio || 1);
+    meteors.push({
+      x: rand(w * 0.25, w * 1.05),
+      y: rand(-40, h * 0.35),
+      vx: -rand(3.2, 5.6),           // 斜向左下
+      vy: rand(2.0, 3.4),
+      len: rand(110, 220),           // 拖尾长度
+      life: 1,
+    });
+  };
+  let nextSpawn = performance.now() + 900;
+  const tick = (now) => {
+    if (now >= nextSpawn) {
+      spawn();
+      nextSpawn = now + rand(1400, 3800);   // 平均 ~2.5 秒一颗
+    }
+    if (meteors.length) {
+      const w = cvs.width / (window.devicePixelRatio || 1);
+      const h = cvs.height / (window.devicePixelRatio || 1);
+      ctx.clearRect(0, 0, w, h);
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i];
+        m.x += m.vx; m.y += m.vy;
+        if (m.x + m.len < -40 || m.y > h + 40) { meteors.splice(i, 1); continue; }
+        const nx = m.vx, ny = m.vy, nl = Math.hypot(nx, ny);
+        const tx = m.x - (nx / nl) * m.len, ty = m.y - (ny / nl) * m.len;
+        const g = ctx.createLinearGradient(m.x, m.y, tx, ty);
+        g.addColorStop(0, 'rgba(255,244,214,.95)');
+        g.addColorStop(.35, 'rgba(255,213,79,.55)');
+        g.addColorStop(1, 'rgba(255,213,79,0)');
+        ctx.strokeStyle = g;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+        // 流星头部一颗亮星
+        ctx.fillStyle = '#fffbe8';
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      ctx.clearRect(0, 0, cvs.width, cvs.height);
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}

@@ -124,7 +124,13 @@ type KlineQuery struct {
 	Bar    string
 	FromTs int64 // 含
 	ToTs   int64 // 含，0 表示不限
-	Limit  int   // 从最新往回取 N 根，0 表示不限
+	Limit  int   // Limit>0 时：DESC（默认）= 从最新往回取 N 根；Asc=true = 从最老往后取 N 根
+	// Asc 排序方向。默认 false = ORDER BY ts DESC（取「最新的 N 根」再反转为升序返回）；
+	// true = ORDER BY ts ASC（LIMIT 直接落在「窗口里最老的 N 根」）。
+	// 七期为 K 线图「右移翻页」（after=ts 取之后最早的 N 根）新增：
+	// DESC+LIMIT 会拿到「after 之后最新的 N 根」，中间跳过一段，不能用于渐进右移。
+	// 复合主键 (inst_id,bar,ts) 正反向索引都走得上，两种排序都快。
+	Asc bool
 }
 
 // KlineCoverage 某合约某周期的数据覆盖情况

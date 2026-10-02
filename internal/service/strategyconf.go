@@ -37,15 +37,13 @@ type StrategyEntry struct {
 
 // StrategyExit 出场参数（前端展示用）。
 //
-//	用户口径（2026-10-02 四期）：「不准平仓，不准爆仓，只能超时 1 小时自动平仓」——
-//	指关掉**布林上轨那种乱平仓**，不是把止盈也关掉（用户后续纠正：
-//	「止盈 1% 不平仓有问题」，再改为「赚 0.3% 也平仓」）。
-//	所以保留两条：止盈 **+0.3%** + 超时 60 分钟；布林上轨关闭，不设止损。
+//	用户口径（2026-10-02 七期）：止盈 **+0.35%** + 超时 **24 小时**；
+//	止损 -300%（价格类物理上到不了，等效不设止损）；布林上轨关闭。
 type StrategyExit struct {
-	TakeProfitPct float64 `json:"take_profit_pct"` // 四期最终口径 0.3（浮盈 +0.3% 平）
+	TakeProfitPct float64 `json:"take_profit_pct"` // 七期口径 0.35（浮盈 +0.35% 平）
 	BollUpperExit bool    `json:"boll_upper_exit"` // false = 关闭（四期起）
 	// MaxHoldMinutes 超时平仓（分钟）。>0 时优先于 MaxHoldBars。
-	// 四期口径：开仓满 60 分钟（1 小时）自动市价平掉，是没摸到止盈线时的兜底离场。
+	// 七期口径：开仓满 1440 分钟（24 小时）自动市价平掉，是没摸到止盈线时的兜底离场。
 	MaxHoldMinutes int     `json:"max_hold_minutes"`
 	MaxHoldBars    int     `json:"max_hold_bars"`
 	StopLossPct    float64 `json:"stop_loss_pct"`
@@ -53,14 +51,16 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径（2026-10-01 二期 → 2026-10-02 五期）：加仓次数**不限**，
-//	触发条件与买入完全一致（Score ≥ 3 且触发那根 K 线涨跌幅过带符号门槛，六期 -0.7 必须真跌，共用 SignalQualified）。
+//	用户口径（2026-10-02 七期）：加仓次数**不限**，
+//	触发 = **纯价格条件**：最新已收盘 K 线收盘价比买入价低超过 DropPct%（1）
+//	且该根涨幅 > BarRisePct%（1）——不再与买入条件一致。
 type StrategyAddon struct {
-	Enabled  bool    `json:"enabled"`
-	Ratio    float64 `json:"ratio"`
-	DropPct  float64 `json:"drop_pct"` // 已废弃（旧「先跌 N%」口径），保留只为读兼容
-	RiseBar  string  `json:"rise_bar"` // auto = 用该仓位自己的周期
-	MaxTimes int     `json:"max_times"` // 0 = 不限
+	Enabled    bool    `json:"enabled"`
+	Ratio      float64 `json:"ratio"`
+	DropPct    float64 `json:"drop_pct"`     // 七期复活：收盘价比买入价低 N%（默认 1）
+	BarRisePct float64 `json:"bar_rise_pct"` // 七期新增：该根涨幅须 > N%（默认 1）
+	RiseBar    string  `json:"rise_bar"`     // auto = 用该仓位自己的周期
+	MaxTimes   int     `json:"max_times"`    // 0 = 不限
 }
 
 // StrategyConfig 只取前端要展示的字段
@@ -150,11 +150,13 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
 			// ★ 五期：默认要求「这根 K 线真涨 > 0.5%」（指针对上局部变量，别共享全局）
 			MinBarRisePct: &minBarRiseDefault},
-		// ★ 四期：兜底也必须与 JSON 一致 —— 止盈 0.3 保留、布林上轨 false、超时 60。
+		// ★ 七期：兜底也必须与 JSON 一致 —— 止盈 0.35、止损 300（形同虚设）、超时 1440。
 		//   否则配置缺失时布林上轨会静默复活（与三期 exclude_stock_etf 兜底同一个道理）。
-		Exit: StrategyExit{TakeProfitPct: 0.3, BollUpperExit: false, MaxHoldMinutes: 60},
-		// ★ MaxTimes: 0 = 不限；RiseBar "auto" = 用该仓位自己的周期。
-		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5,
+		Exit: StrategyExit{TakeProfitPct: 0.35, BollUpperExit: false,
+			MaxHoldMinutes: 1440, StopLossPct: 300},
+		// ★ 七期：加仓改纯价格条件 —— DropPct 复活（收盘价比买入价低 1%）、
+		//   BarRisePct 新增（该根涨 > 1%）；MaxTimes: 0 = 不限；RiseBar "auto"。
+		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0,
 			RiseBar: conf.AddonAutoBar, MaxTimes: 0},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,

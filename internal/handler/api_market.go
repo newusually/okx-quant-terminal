@@ -283,6 +283,7 @@ type KlinePage struct {
 	Rows       []model.Kline `json:"rows"`       // 已裁掉暖机段、按时间升序
 	Limit      int           `json:"limit"`      // 本次请求的根数
 	BeforeTs   int64         `json:"beforeTs"`   // 本次的「往前取」边界（0 = 取最新）
+	AfterTs    int64         `json:"afterTs"`    // 七期：本次的「往后取」边界（0 = 不用）
 	FirstTs    int64         `json:"firstTs"`    // 本页最老一根
 	LastTs     int64         `json:"lastTs"`     // 本页最新一根
 	HasMore    bool          `json:"hasMore"`    // 更早还有没有数据
@@ -294,12 +295,15 @@ type KlinePage struct {
 //
 //	beforeTs > 0  → 取 ts < beforeTs 的最近 limit 根（向左翻页）
 //	beforeTs == 0 → 取最新 limit 根
+//	afterTs  > 0  → 取 ts > afterTs 的**最早** limit 根（七期：向右翻页，渐进不跳段）
 //	limit    <= 0 → 退回「按天数取」，一次拿全（老行为，给小 limit 的调用方用）
+//
+// before 与 after 同时传时 before 优先（前端不会同时传，这只是防御）。
 //
 // ★ 分页模式下多抓 indicatorWarmup 根，并且【不在这里裁】：
 // 指标要在含暖机段的 Raw 上算完，再按 Trim 同步裁掉，两边的下标才对得齐。
-func (s *Server) klineWindow(inst, bar string, days int, beforeTs int64, limit int) (KlinePage, error) {
-	pg := KlinePage{Limit: limit, BeforeTs: beforeTs}
+func (s *Server) klineWindow(inst, bar string, days int, beforeTs, afterTs int64, limit int) (KlinePage, error) {
+	pg := KlinePage{Limit: limit, BeforeTs: beforeTs, AfterTs: afterTs}
 
 	if limit <= 0 {
 		fromTs := time.Now().AddDate(0, 0, -days).UnixMilli()
@@ -311,6 +315,38 @@ func (s *Server) klineWindow(inst, bar string, days int, beforeTs int64, limit i
 		if n := len(rows); n > 0 {
 			pg.FirstTs, pg.LastTs = rows[0].Ts, rows[n-1].Ts
 		}
+		return pg, nil
+	}
+
+	// ★ 七期：右移翻页。after 之后取「最早的 limit 根」（Asc=true，LIMIT 落在窗口头部，
+	//   渐进右移不跳段），再抓 after 之前最近的 warmup 根做指标暖机。
+	//   Raw = 暖机 + 主体（升序），与 before 分支同口径：指标在 Raw 上算、Trim 裁暖机。
+	if afterTs > 0 {
+		pre, err := s.db.QueryKlines(model.KlineQuery{InstID: inst, Bar: bar,
+			ToTs: afterTs, Limit: indicatorWarmup})
+		if err != nil {
+			return pg, err
+		}
+		main, err := s.db.QueryKlines(model.KlineQuery{InstID: inst, Bar: bar,
+			FromTs: afterTs + 1, Limit: limit, Asc: true})
+		if err != nil {
+			return pg, err
+		}
+		raw := make([]model.Kline, 0, len(pre)+len(main))
+		raw = append(raw, pre...)
+		raw = append(raw, main...)
+		pg.Raw = raw
+		pg.Trim = len(pre)
+		pg.Rows = main
+		if n := len(pg.Rows); n > 0 {
+			pg.FirstTs, pg.LastTs = pg.Rows[0].Ts, pg.Rows[n-1].Ts
+		}
+		if first, ferr := s.db.FirstKlineTs(inst, bar); ferr == nil {
+			pg.EarliestTs = first
+			pg.HasMore = pg.FirstTs > first && pg.FirstTs > 0
+		}
+		cov := s.db.CoverageCached(inst, bar)
+		pg.TotalBars = cov.Count
 		return pg, nil
 	}
 
@@ -371,6 +407,7 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 	days := clampQueryDays(atoiDefault(q.Get("days"), s.bf.Config().Days))
 	limit := atoiDefault(q.Get("limit"), 0)
 	before := int64(atoiDefault(q.Get("before"), 0))
+	after := int64(atoiDefault(q.Get("after"), 0)) // 七期：右移翻页边界
 	auto := q.Get("auto") != "0" // 默认自动按需回补
 
 	if inst == "" || !service.IsSupportedBar(bar) {
@@ -386,12 +423,13 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 		}
 	}
 
-	pg, err := s.klineWindow(inst, bar, days, before, limit)
+	pg, err := s.klineWindow(inst, bar, days, before, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	// 本地不足时，兜底直接从 OKX 现拉最新一批，保证图不空
-	if len(pg.Rows) == 0 && before == 0 {
+	// （after 翻页翻到底 Rows=0 是「到头了」，不能兜底成「跳到最新」）
+	if len(pg.Rows) == 0 && before == 0 && after == 0 {
 		if latest, ferr := s.feed.FetchCandles(inst, bar, 300); ferr == nil && len(latest) > 0 {
 			_, _ = s.db.UpsertKlines(latest)
 			pg.Rows = latest
@@ -411,6 +449,7 @@ func (s *Server) handleKline(w http.ResponseWriter, r *http.Request) (any, error
 		"page": map[string]any{
 			"limit":      pg.Limit,
 			"beforeTs":   pg.BeforeTs,
+			"afterTs":    pg.AfterTs,
 			"firstTs":    pg.FirstTs,
 			"lastTs":     pg.LastTs,
 			"hasMore":    pg.HasMore,
@@ -435,6 +474,7 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 	days := clampQueryDays(atoiDefault(q.Get("days"), s.bf.Config().Days))
 	limit := atoiDefault(q.Get("limit"), DefaultKlinePage)
 	before := int64(atoiDefault(q.Get("before"), 0))
+	after := int64(atoiDefault(q.Get("after"), 0)) // 七期：右移翻页边界
 	if inst == "" || !service.IsSupportedBar(bar) {
 		return nil, fmt.Errorf("参数不合法：inst=%q bar=%q", inst, bar)
 	}
@@ -445,11 +485,13 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		s.ensureFresh(inst, bar)
 	}
 
-	pg, err := s.klineWindow(inst, bar, days, before, limit)
+	pg, err := s.klineWindow(inst, bar, days, before, after, limit)
 	if err != nil {
 		return nil, err
 	}
-	if len(pg.Rows) == 0 && before == 0 {
+	// ★ 七期：after（右移翻页）翻到头 Rows=0 是「后面没有更新的了」，
+	//   绝不能兜底成「跳到最新 300 根」—— 那会把用户正在看的历史区瞬间 teleport 到现在。
+	if len(pg.Rows) == 0 && before == 0 && after == 0 {
 		if latest, ferr := s.feed.FetchCandles(inst, bar, 300); ferr == nil && len(latest) > 0 {
 			_, _ = s.db.UpsertKlines(latest)
 			pg.Raw, pg.Trim, pg.Rows = latest, 0, latest
@@ -668,6 +710,7 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 		"page": map[string]any{
 			"limit":      pg.Limit,
 			"beforeTs":   pg.BeforeTs,
+			"afterTs":    pg.AfterTs,
 			"firstTs":    pg.FirstTs,
 			"lastTs":     pg.LastTs,
 			"hasMore":    pg.HasMore,

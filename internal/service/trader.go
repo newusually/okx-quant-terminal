@@ -250,7 +250,8 @@ func engineRunBars(bars []string) error {
 	//
 	//      ★ 旧的「15m 先跌 0.5% 后转涨」口径已于 2026-10-01 二期下线；
 	//        「加满 N 次就强制平仓」那条规则也已删除 —— 出场只剩
-	//        +0.3% 止盈 / 1 小时超时（布林上轨与止损关闭），没有任何一条看加仓次数。
+	//        +0.35% 止盈 / 24 小时超时（七期口径；-300% 止损物理上到不了，
+	//        等效不设止损），没有任何一条看加仓次数。
 	//        所以 runAddons 的第二个返回值（本轮平掉的仓位）**恒为空**，
 	//        这里保留合并动作只是为了不动调用结构。
 	pAddons := ph("eng.addons")
@@ -419,11 +420,13 @@ func runExits(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineRead
 		if cfg.Exit.TakeProfitPct > 0 && pnlPct >= cfg.Exit.TakeProfitPct {
 			reason = fmt.Sprintf("止盈 %+.2f%%", pnlPct)
 		} else if cfg.Exit.StopLossPct > 0 && pnlPct <= -cfg.Exit.StopLossPct {
+			// 七期默认 300：浮亏到 -300% 才平，价格类仓位物理上到不了
+			// （-100% 即归零），等效「不设止损」，仅作形式兜底。
 			reason = fmt.Sprintf("止损 %.2f%%", pnlPct)
 		} else if cfg.Exit.MaxHoldMinutes > 0 {
-			// 超时平仓（按分钟）。四期默认 60 = 1 小时。
+			// 超时平仓（按分钟）。七期默认 1440 = 24 小时。
 			//
-			// ★ 四期口径：止盈 +1%（上面第一条）**保留**，布林上轨关闭。
+			// ★ 七期口径：止盈 +0.35%（上面第一条）**保留**，布林上轨关闭。
 			//   所以这是「没摸到止盈线时的兜底离场」，不是唯一通道。
 			// 用「分钟」而不是「根」是因为 1H 图和 15m 图的 4 根完全不是一个时长。
 			// 实时巡检每 exit_sec（默认 3 秒）跑一次，到点立刻市价出，不等下一根 K 线收盘。

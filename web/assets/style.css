@@ -532,3 +532,40 @@ main .center.jump-flash {
 
 /* K 线提示框里的加仓行 */
 .tip-mk.mk-addon { color: #3b82f6; }
+
+/* ==========================================================================
+   ★ 七期（2026-10-02）：图表特效 —— 魔法棒光标 + 点击小星星 + 流星雨
+   ========================================================================== */
+
+/* 魔法棒光标：棒尖在右上 (18,8)，hotspot 对准它；老浏览器退化成 crosshair */
+#chart {
+  cursor: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cpath d='M4 22 L18 8' stroke='%237c5cff' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M18 8 L20.5 5.5' stroke='%23b39dff' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M20.5 0.5 l1.1 2.4 2.4 1.1 -2.4 1.1 -1.1 2.4 -1.1-2.4 -2.4-1.1 2.4-1.1z' fill='%23ffd54f'/%3E%3Ccircle cx='24.2' cy='10.5' r='1.5' fill='%23ffd54f'/%3E%3Ccircle cx='15.5' cy='1.8' r='1.2' fill='%23ffd54f'/%3E%3C/svg%3E") 18 8, crosshair;
+}
+
+/* 流星雨画布：盖在图上但完全不吃鼠标事件 */
+#fxCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* 点击爆开的小星星：从落点向外飞散 + 旋转淡出 */
+.fx-star {
+  position: absolute;
+  pointer-events: none;
+  z-index: 7;
+  font-size: 14px;
+  line-height: 1;
+  will-change: transform, opacity;
+  animation: fx-pop .8s ease-out forwards;
+  text-shadow: 0 0 6px rgba(255, 213, 79, .9);
+  user-select: none;
+}
+@keyframes fx-pop {
+  0%   { transform: translate(-50%, -50%) scale(.4) rotate(0deg); opacity: 1; }
+  60%  { opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, -30px))) scale(1.25) rotate(220deg); opacity: 0; }
+}

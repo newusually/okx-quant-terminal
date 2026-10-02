@@ -45,19 +45,19 @@ func mkIns() Instrument {
 	}
 }
 
-// mkSignal 造一个「已收盘那根」的共振结果
+// mkSignal 造一个「已收盘那根」的信号
 //
-// score 直接决定能不能过阈值；hitList 只用于日志/原因文本。
+// score 现在只用于展示/日志（七期起加仓不看 score）；
+// ★ 七期价格条件：加仓要求 收盘价 < 买入价×(1−1%) 且该根涨幅 > 1%。
+//   买入价基准是 basePos(1.6000)，所以这里收盘造 1.5800（比 1.6 低 1.25% ✓）、
+//   涨幅造 +2%（> 1% ✓），让「条件满足 → 加仓」这条主路径成立；
+//   边界负例由 TestAddon_SkipWhenPriceNotReached 单独覆盖。
 func mkSignal(score int, ts int64) *Signal {
 	return &Signal{
 		InstID: "TEST-USDT-SWAP", Bar: "15m", Ts: ts,
-		Close: 1.5950, Mask: (1 << uint(score)) - 1, Score: score,
+		Close: 1.5800, Mask: (1 << uint(score)) - 1, Score: score,
 		HitList: "势能,摩擦,动能,RSI,布林,MACD,TD9,放量", Ready: true,
-		// ★ 2026-10-02 六期：加仓判定与买入共用 SignalQualified，
-		//   默认还要求「这根 K 线必须真跌 < min_bar_rise_pct（当前 -0.7%）」。
-		//   这里造一根跌 2% 的 K 线，让「分数够 → 加仓」这条主路径仍然成立；
-		//   跌幅不够的负例由 TestAddon_SkipWhenBarDidNotFall 单独覆盖。
-		RisePct: -2.0,
+		RisePct: 2.0,
 	}
 }
 
@@ -70,13 +70,16 @@ func basePos(entryPx float64) repo.OpenPos {
 }
 
 // ---------------------------------------------------------------------------
-// A. 满共振 → 加仓
+// A. 七期价格条件全满足 → 加仓
 // ---------------------------------------------------------------------------
 
-func TestAddon_FiresOnFullResonance(t *testing.T) {
+// TestAddon_FiresOnPriceConditions 七期价格条件全满足 → 加仓。
+//
+// 2026-10-02 七期起加仓**不再看 score**，触发 = 纯价格条件：
+// 收盘价比买入价低超 1% 且该根涨幅 > 1%。
+func TestAddon_FiresOnPriceConditions(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
-	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -87,7 +90,7 @@ func TestAddon_FiresOnFullResonance(t *testing.T) {
 
 	d := decideAddon(cfg, p, 1.5950, sig, barMs, ins)
 	if !d.Add {
-		t.Fatalf("8/8 共振 + 晚于开仓那根 → 应当加仓，实际不加")
+		t.Fatalf("收盘价 1.58（低于买价 1%%）+ 涨 2%% → 应当加仓，实际不加")
 	}
 	if d.Margin <= 0 || d.Sz <= 0 {
 		t.Fatalf("加仓保证金/张数应 > 0，实际 margin=%.6f sz=%v", d.Margin, d.Sz)
@@ -108,31 +111,50 @@ func TestAddon_FiresOnFullResonance(t *testing.T) {
 	if d.NewMargin <= p.Margin {
 		t.Fatalf("合并保证金应增加")
 	}
-	t.Logf("✓ 场景A 8/8 共振 → 加仓 %s 张 保证金=%.4fU 新均价=%.6f（%s）",
+	t.Logf("✓ 场景A 价格条件满足 → 加仓 %s 张 保证金=%.4fU 新均价=%.6f（%s）",
 		fmtSz(d.Sz, 0), d.Margin, d.NewAvgPx, d.Reason)
 }
 
-// TestAddon_SkipWhenScoreBelowThreshold 7/8 → 不加。
+// TestAddon_SkipWhenPriceNotReached 七期价格条件不满足 → 不加。
 //
-// 这是二期最重要的一条：用户口径「加仓条件也是和买入条件一样」，
-// 买入是 8 个全中，加仓就必须也是 8 个全中，差一个都不行。
-func TestAddon_SkipWhenScoreBelowThreshold(t *testing.T) {
+// 触发 = ① 收盘价比买入价低超 drop_pct%（默认 1）② 该根涨幅 > bar_rise_pct%（默认 1）。
+// 两个条件缺一不可 —— 差半点都不行，边界必须钉死。
+func TestAddon_SkipWhenPriceNotReached(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
-	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
 
-	p := basePos(1.6000)
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(7, barMs*11), barMs, mkIns()); d.Add {
-		t.Fatalf("7/8 < 阈值 8，不该加仓")
+	p := basePos(1.6000) // 1% 线 = 1.5840
+
+	// ① 收盘价只低 0.3%（1.588 < 1.6000×0.99=1.5840 不成立）→ 不加
+	sig := mkSignal(8, barMs*11)
+	sig.Close = 1.5880
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); d.Add {
+		t.Fatalf("收盘价 1.588 未低于 1%% 线 1.584，不该加仓")
 	}
-	// 阈值降到 7 之后，同样的信号就该加 —— 证明「阈值真的是同一个入口」
-	cfg.ScoreThreshold = 7
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(7, barMs*11), barMs, mkIns()); !d.Add {
-		t.Fatalf("阈值 7 时 7/8 应当加仓（说明加仓读的确实是 cfg.ThresholdFor）")
+	// ② 收盘价恰好压在 1% 线上（=1.5840，不「低于」）→ 不加
+	sig.Close = 1.5840
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); d.Add {
+		t.Fatalf("收盘价恰好 1.5840（=1%% 线，未低于）不该加仓")
 	}
-	t.Log("✓ 场景B 7/8 不加；阈值降到 7 后加 —— 加仓与买入共用同一个阈值入口")
+	// ③ 收盘价够低（1.5800）但该根只涨 0.5%（< 1%）→ 不加
+	sig.Close = 1.5800
+	sig.RisePct = 0.5
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); d.Add {
+		t.Fatalf("该根只涨 0.5%%（未超 1%%）不该加仓")
+	}
+	// ④ 涨幅恰好 1.0（口径是**严格**大于）→ 不加
+	sig.RisePct = 1.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); d.Add {
+		t.Fatalf("涨幅恰好 1.0 未超过 1%% 门槛，不该加仓（严格大于）")
+	}
+	// ⑤ 两个条件都满足 → 加
+	sig.RisePct = 1.5
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, mkIns()); !d.Add {
+		t.Fatalf("收盘价低 1.25%% 且涨 1.5%% → 应当加仓")
+	}
+	t.Log("✓ 场景B 收盘价压线/涨幅压线都不加；两条件齐过才加 —— 七期价格判据边界钉死")
 }
 
 // TestAddon_SkipWhenNotReady 暖机不足 → 不加。
@@ -276,7 +298,11 @@ func TestAddon_RatioIsOneThird(t *testing.T) {
 	// 造一个「每张名义 0.30U」的小合约：0.0333U×20x = 0.6667U 名义 → 能买 2 张
 	ins := Instrument{InstID: "T", CtVal: 0.3, CtMult: 1, LotSz: 1, MinSz: 1, LotSzDec: 0}
 	p := basePos(1.0000) // Margin 0.1 → 预算 0.03333U
-	d := decideAddon(cfg, p, 0.9985, mkSignal(8, barMs*11), barMs, ins)
+	// 七期价格条件：买入价 1.0000 → 1% 线 = 0.9900；夹具默认收盘 1.5800 不满足，
+	// 这里单独把收盘价压到 0.9880（低 1.2%）
+	sig := mkSignal(8, barMs*11)
+	sig.Close = 0.9880
+	d := decideAddon(cfg, p, 0.9985, sig, barMs, ins)
 	if !d.Add {
 		t.Fatalf("应当加仓")
 	}
@@ -378,83 +404,56 @@ func TestAddon_AutoBarUsesPositionBar(t *testing.T) {
 func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }
 
 // ---------------------------------------------------------------------------
-// 三期（2026-10-01）新增 / 六期（2026-10-02）反转方向：加仓也必须「触发那根 K 线真跌」
+// 三期（2026-10-01）→ 六期（涨跌方向）→ 七期（2026-10-02）：加仓改纯价格条件
 // ---------------------------------------------------------------------------
 
-// TestAddon_SkipWhenBarDidNotFall 分数够、但触发那根 K 线没真跌 → 不加仓。
+// TestAddon_ScoreNoLongerMatters 七期起加仓**不看 score** 的守门测试。
 //
-// 用户口径（六期）：「Score >= 3 且 RisePct < -0.7（严格小于）」，
-// 买入与加仓都走这一条。加仓与买入共用 SignalQualified，所以这里也必须被拦住。
-//
-// 这条特别值得测：涨跌幅条件是在 SignalQualified 里判的。若哪天有人把加仓
-// 改回「自己判分数」，方向条件就会只在买入路径生效 —— 而加仓次数不限，
-// 会在一根不符合方向的 K 线上反复补仓。亏得最快的就是这种。
-func TestAddon_SkipWhenBarDidNotFall(t *testing.T) {
+// 历史教训：二期把加仓改成「与买入一致（8 因子共振）」，七期改回纯价格条件。
+// 这条测试钉死「score 与加仓无关」：score=0（一个因子都没中）只要价格条件满足
+// 也必须加 —— 若哪天有人把 SignalQualified 又接回来，这里会立刻露馅。
+func TestAddon_ScoreNoLongerMatters(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
-	cfg.ScoreThreshold = 3 // 五/六期默认（Score >= 3）
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, mkIns()); !d.Add {
+		t.Fatalf("score=0 但价格条件满足 → 应当加仓（七期加仓不看 score）")
+	}
+	t.Log("✓ score=0 也能加 —— 加仓触发只认价格条件，与共振分数无关")
+}
+
+// TestAddon_BarRisePctGate 接在判定上的涨幅闸门必须真的可关/可调。
+//
+// decideAddon 是纯函数，直接读 cfg.Addon.BarRisePct / DropPct：
+// 把它们显式置 0（关闭条件）后，价格再离谱也照样能加 —— 证明开关接在判定上；
+// 而 fillDefaults 的归一化（≤0 反压回 1.0）由 conf 包的测试另守。
+func TestAddon_BarRisePctGate(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
 
 	ins := mkIns()
 	p := basePos(1.6000)
 
-	// 分数够（8/8），但这根只跌 0.5%（没到 -0.7%）→ 不加
+	// 关掉涨幅条件（BarRisePct=0）：下跌的 K 线 + 收盘价够低也能加
+	cfg.Addon.BarRisePct = 0
 	sig := mkSignal(8, barMs*11)
-	sig.RisePct = -0.5
-	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
-		t.Fatalf("触发那根只跌 0.5%%（未到 -0.7%%）不该加仓")
+	sig.RisePct = -3.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("bar_rise_pct=0 表示关闭涨幅条件，收盘价够低就应当加仓")
 	}
 
-	// 跌恰好 -0.7% 仍然不加（口径是**严格**小于 -0.7）
-	sig.RisePct = -0.7
-	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
-		t.Fatalf("跌恰好 -0.7%% 未超过门槛，不该加仓（口径是严格小于）")
-	}
-
-	// 上涨的 K 线更不行
+	// 关掉跌幅条件（DropPct=0）：收盘价再高也能加（只剩涨幅条件）
+	cfg.Addon.DropPct = 0
+	sig.Close = 1.6500 // 比买入价还高
 	sig.RisePct = 2.0
-	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
-		t.Fatalf("触发那根是上涨的（+2%%），「必须真跌」门槛下不该加仓")
-	}
-
-	// 跌 0.9% → 加
-	sig.RisePct = -0.9
 	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
-		t.Fatalf("跌 0.9%% 且 8/8 共振 → 应当加仓")
+		t.Fatalf("drop_pct=0 表示关闭跌幅条件，只看涨幅应当加仓")
 	}
-
-	// 把门槛显式关掉（写 0）之后，上涨的 K 线也能加 —— 证明这个开关真的接在判定上
-	zero := 0.0
-	cfg.Entry.MinBarRisePct = &zero
-	sig.RisePct = 0.3
-	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
-		t.Fatalf("min_bar_rise_pct=0 表示关闭该条件，应当加仓（0 不能被反压成 -0.7）")
-	}
-}
-
-// TestAddon_FifthPeriodDefaultScore 五/六期默认口径（threshold=3）下 score=3 也要能加仓。
-//
-// 这是「加仓阈值默认值」与「买入阈值默认值」必须同一个入口的守门测试：
-// 两者都走 cfg.ThresholdFor，任何一边单独改默认值都会在这里露馅。
-func TestAddon_FifthPeriodDefaultScore(t *testing.T) {
-	cfg := mkAddonCfg()
-	cfg.Addon.Enabled = true
-	cfg.Entry.MarginUSDT = 0.1
-	cfg.Entry.Leverage = 20
-	cfg.Entry.MaxMarginUSDT = 0.5
-
-	// 刻意不显式设置 ScoreThreshold：默认必须是 3（= 用户说的「Score >= 3」）
-	if got := cfg.ThresholdFor("TEST-USDT-SWAP"); got != 3 {
-		t.Fatalf("五期默认阈值应为 3（Score >= 3），实际 %d", got)
-	}
-	p := basePos(1.6000)
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(3, barMs*11), barMs, mkIns()); !d.Add {
-		t.Fatalf("score=3（>=3）且跌 2%% → 应当加仓，说明默认阈值没落到 3")
-	}
-	// score=2 在「>=3」的边界外侧 → 不加
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(2, barMs*11), barMs, mkIns()); d.Add {
-		t.Fatalf("score=2 不满足「>=3」，不该加仓")
-	}
+	t.Log("✓ bar_rise_pct / drop_pct 两个闸门都真实接在判定上，置 0 即关闭")
 }

@@ -70,7 +70,7 @@ type EntryCfg struct {
 // 判定处（service/trader.go 的 runExits）一律带 `> 0` / bool 前置，
 // 所以 0 / false 就是「关闭」，不会被别的兜底逻辑反压回默认值。
 type ExitCfg struct {
-	// TakeProfitPct 止盈线（%）。**四期最终口径 0.3** —— 浮盈到 +0.3% 立刻市价平。
+	// TakeProfitPct 止盈线（%）。**七期口径 0.35** —— 浮盈到 +0.35% 立刻市价平。
 	// 0 才是关闭；实测把它关掉后，超时平仓的盈亏纯随机且净值为负
 	// （2026-10-02 00:40~00:55 的 9 笔：6 笔未止盈合计 -0.0924U）。
 	TakeProfitPct float64 `json:"take_profit_pct"`
@@ -87,11 +87,15 @@ type ExitCfg struct {
 	MaxHoldBars int `json:"max_hold_bars"`
 
 	// MaxHoldMinutes 超时平仓（按「分钟」算）。>0 时优先于 MaxHoldBars。
-	// 四期起默认 **60**（开仓满 1 小时自动市价平掉），也是唯一的出场通道。
+	// 七期起默认 **1440**（开仓满 24 小时自动市价平掉），兜底出场通道之一。
 	// 实时巡检每 3 秒判一次，到点立刻出，不用等下一根 K 线收盘。
 	MaxHoldMinutes int `json:"max_hold_minutes"`
 
-	// StopLossPct 硬止损（%）。0 = 关闭（不设止损）。
+	// StopLossPct 硬止损（%）：浮盈亏 pnlPct <= -StopLossPct 就平。
+	// **七期口径 300** —— 用户要求「止损 -300%」：价格类浮亏到 300% 物理上不可能
+	// （浮亏 100% 即归零），所以这条线只是形式兜底，实际效果 = 不设止损。
+	// 判定在 trader.go runExits：`StopLossPct > 0 && pnlPct <= -StopLossPct`。
+	// 0 = 关闭。
 	StopLossPct float64 `json:"stop_loss_pct"`
 }
 
@@ -104,32 +108,41 @@ const AddonAutoBar = "auto"
 
 // AddonCfg 加仓（补仓 / 摊薄均价）。
 //
-// 现行口径（2026-10-01 二期，用户指定）：
+// 现行口径（2026-10-02 七期，用户指定）：
 //
 //	加仓额 = 原持仓保证金 × Ratio（Ratio 默认 1/3）
-//	触发   = **与买入条件完全一致**：该周期最后一根已收盘 K 线 8 个因子全中
+//	触发   = **纯价格条件**：最新已收盘 K 线收盘价比买入价低超过 DropPct%（默认 1）
+//	         **且** 这根 K 线自身涨幅超过 BarRisePct%（默认 1）——「跌到位置 + 反弹启动」
 //	次数   = **不限**（MaxTimes = 0）
 //
-// ★ 原来的「15m 先跌 DropPct% 后转涨」口径已下线（用户：「加仓条件也是和买入条件一样」）。
-//   DropPct / LookbackBars / OnlyWhenPriceUp 三个字段保留只为读兼容旧配置，
-//   新逻辑不再读它们。
+// ★ 历史变迁：一期「15m 先跌 DropPct% 后转涨」（相对窗口低点）→ 二期改成与买入一致
+//   （8 因子共振，DropPct 因此废弃）→ 七期改回价格条件，但语义变了：
+//   是「相对**买入价**低 N%」，不是相对窗口低点。DropPct 就此复活。
 type AddonCfg struct {
 	Enabled bool `json:"enabled"`
 
 	// Ratio 加仓额 = 原持仓保证金 × Ratio。默认 1/3。
 	Ratio float64 `json:"ratio"`
 
-	// DropPct 【已废弃】旧口径「先跌 N%」；加仓条件已改成与买入一致的 8 因子共振，
-	//   本字段只为读兼容旧配置保留，新逻辑不读。
+	// DropPct 【七期复活】最新已收盘 K 线的收盘价比**买入价**低超过这个百分比（%）
+	//   才允许加仓 —— 「跌到位置」。默认 1.0。
+	//   判定（service.decideAddon）：sig.Close < p.EntryPx × (1 - DropPct/100)。
+	//   ≤ 0 会被 fillDefaults 反压回默认 1.0（不支持关闭；要关就 addon.enabled=false）。
 	DropPct float64 `json:"drop_pct"`
 
-	// RiseBar 用哪个周期判断 8 因子共振。默认 AddonAutoBar（"auto"）=
+	// BarRisePct 【七期新增】触发加仓的那根已收盘 K 线自身涨幅必须**严格大于**
+	//   这个百分比（%）—— 「反弹启动」。默认 1.0。
+	//   判定用 Signal.RisePct（同一根、同一个数，买入扫描与加仓不会各算一遍）。
+	//   ≤ 0 会被 fillDefaults 反压回默认 1.0。
+	BarRisePct float64 `json:"bar_rise_pct"`
+
+	// RiseBar 用哪个周期判断。默认 AddonAutoBar（"auto"）=
 	//   用「该仓位自己的周期」（1m 开的按 1m 判、15m 开的按 15m 判）；
 	//   老仓（库 bar 列为空）退回配置里的主周期 cfg.Bar。
 	RiseBar string `json:"rise_bar"`
 
 	// LookbackBars 【已废弃】旧口径「回看多少根找先跌的低点」；
-	//   「只取开仓之后那根已收盘 K 线」现在由 decideAddon 里 sig.Ts > p.OpenTs 保证。
+	//   新口径只看「最新已收盘那根 vs 买入价」，不再回看窗口。
 	LookbackBars int `json:"lookback_bars"`
 
 	// MaxTimes 每个仓位最多加几次。**<= 0 = 不限**（默认 0）。
@@ -146,7 +159,7 @@ type AddonCfg struct {
 	// MarginUSDT 固定加仓额（>0 时优先于 Ratio，一般留 0）
 	MarginUSDT float64 `json:"margin_usdt"`
 
-	// OnlyWhenPriceUp 只在上行时加（保持 true）
+	// OnlyWhenPriceUp 【已废弃】旧口径「只在上行时加」，新逻辑不读。
 	OnlyWhenPriceUp bool `json:"only_when_price_up"`
 
 	// FibRatio 旧的斐波那契口径，已废弃，仅保留读兼容
@@ -489,20 +502,25 @@ func defaultConfig() *Config {
 			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
 			MinBarRisePct: f64ptr(-0.7),
 		},
-		// ★ 2026-10-02 四期：止盈 **0.3%**、布林上轨关闭、超时收紧到 1 小时。
+		// ★ 2026-10-02 七期：止盈 **0.35%**、止损 **300**（= -300%，物理上到不了，
+		//   等效不设止损）、超时放宽到 **24 小时**（1440 分钟）。
 		//   兜底默认值必须与 JSON 一致 —— 否则 JSON 读不到时布林上轨会静默复活
 		//   （与三期 exclude_stock_etf 的兜底同一个道理）。
-		Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false,
-			MaxHoldBars: 0, MaxHoldMinutes: 60, StopLossPct: 0},
-		// 加仓：触发条件**与买入完全一致**（score ≥ 3 且触发那根涨跌幅过门槛，当前 -0.7% 必须真跌），金额 = 原持仓保证金 × 1/3
+		Exit: &ExitCfg{TakeProfitPct: 0.35, BollUpperExit: false,
+			MaxHoldBars: 0, MaxHoldMinutes: 1440, StopLossPct: 300},
+		// 加仓（2026-10-02 七期，用户口径）：**不再与买入条件一致**，改为纯价格条件：
+		//   最新已收盘 K 线的收盘价比买入价低超过 DropPct%（默认 1）——「跌到位置」
+		//   且 这根 K 线自身涨幅超过 BarRisePct%（默认 1）——「反弹启动」
+		// 金额 = 原持仓保证金 × 1/3。
 		//
-		// ★ 2026-10-01 二期：原来的「15m 先跌 0.5% 再转涨」已下线，
-		//   用户口径「加仓条件也是和买入条件一样」。
+		// ★ 历史：二期曾改成「与买入一致（8 因子共振）」，七期按用户口径改回价格条件
+		//   —— 注意这与二期下线的旧口径不同：旧口径是「15m 先跌后转涨」（相对**窗口低点**），
+		//   新口径是「收盘价相对**买入价**低 1% + 当前 K 线涨 1%」。
 		// ★ MaxTimes = 0 = **不限**（用户口径「加仓没有任何限制」）；
 		//   RiseBar = "auto" = 用「该仓位自己的周期」（p.Bar），
 		//   这样 1m 开的仓按 1m 判、15m 开的仓按 15m 判。
 		Addon: &AddonCfg{
-			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 0.5, RiseBar: AddonAutoBar,
+			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0, RiseBar: AddonAutoBar,
 			LookbackBars: 24, MaxTimes: 0, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
@@ -790,12 +808,18 @@ func fillDefaults(c *Config) {
 		c.Addon = d.Addon
 	} else {
 		a, da := c.Addon, d.Addon
-		if a.Ratio <= 0 {
-			a.Ratio = da.Ratio
-		}
-		if a.DropPct <= 0 {
-			a.DropPct = da.DropPct
-		}
+	if a.Ratio <= 0 {
+		a.Ratio = da.Ratio
+	}
+	// ★ 七期：DropPct 复活（收盘价比买入价低 N%）、新增 BarRisePct（该根涨 N%）。
+	//   两者 ≤ 0 都反压回默认 1.0 —— 这两个条件就是加仓的全部触发依据，
+	//   静默关闭等于加仓彻底失去闸门，宁可回默认也不放空。
+	if a.DropPct <= 0 {
+		a.DropPct = da.DropPct
+	}
+	if a.BarRisePct <= 0 {
+		a.BarRisePct = da.BarRisePct
+	}
 		if a.RiseBar == "" {
 			a.RiseBar = da.RiseBar
 		}

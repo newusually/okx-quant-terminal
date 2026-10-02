@@ -330,12 +330,8 @@ func TestExcludeStockETFDefaultsOff(t *testing.T) {
 	}
 }
 
-// TestExitDefaultsKeepTakeProfitDropBoll 四期口径：止盈 +1% 保留、布林上轨关闭、超时 1 小时。
-//
-// 用户口径（2026-10-02）：「不准平仓，不准爆仓，只能超时 1 小时自动平仓」，
-// 紧接着又明确纠正：「止盈 1% 不平仓有问题」——
-// 即「不准平仓」针对的是**布林上轨那种开仓 15 秒就反手平掉**的行为，
-// 不是把止盈也一起关掉。
+// TestExitDefaultsKeepTakeProfitDropBoll 七期口径：止盈 +0.35% 保留、布林上轨关闭、
+// 超时 24 小时、止损 300（=-300%，物理上到不了，等效不设止损）。
 //
 // 三处必须一致（JSON / defaultConfig / LoadStrategy 兜底）：
 // 任何一处把 BollUpperExit 留成 true，配置缺失时它就会静默复活，
@@ -345,32 +341,32 @@ func TestExitDefaultsKeepTakeProfitDropBoll(t *testing.T) {
 	if d.Exit == nil {
 		t.Fatal("defaultConfig 必须有 Exit")
 	}
-	if d.Exit.TakeProfitPct != 0.3 {
-		t.Fatalf("四期默认 take_profit_pct 应为 0.3（止盈线必须保留，不能被关掉），实际 %v", d.Exit.TakeProfitPct)
+	if d.Exit.TakeProfitPct != 0.35 {
+		t.Fatalf("七期默认 take_profit_pct 应为 0.35（止盈线必须保留，不能被关掉），实际 %v", d.Exit.TakeProfitPct)
 	}
 	if d.Exit.BollUpperExit {
-		t.Fatal("四期默认 boll_upper_exit 应为 false（关闭）—— 它会在开仓后立刻反手平掉")
+		t.Fatal("默认 boll_upper_exit 应为 false（关闭）—— 它会在开仓后立刻反手平掉")
 	}
-	if d.Exit.MaxHoldMinutes != 60 {
-		t.Fatalf("四期默认 max_hold_minutes 应为 60（1 小时），实际 %v", d.Exit.MaxHoldMinutes)
+	if d.Exit.MaxHoldMinutes != 1440 {
+		t.Fatalf("七期默认 max_hold_minutes 应为 1440（24 小时），实际 %v", d.Exit.MaxHoldMinutes)
 	}
-	if d.Exit.StopLossPct != 0 {
-		t.Fatalf("不应设止损，实际 %v", d.Exit.StopLossPct)
+	if d.Exit.StopLossPct != 300 {
+		t.Fatalf("七期默认 stop_loss_pct 应为 300（浮亏 -300%% 才平，形同虚设的兜底），实际 %v", d.Exit.StopLossPct)
 	}
 
-	// 归一化必须原样保留 false / 60，不能反压回 true / 360
-	c := &Config{Exit: &ExitCfg{TakeProfitPct: 0.3, BollUpperExit: false, MaxHoldMinutes: 60}}
+	// 归一化必须原样保留 0.35 / false / 1440，不能反压回旧值
+	c := &Config{Exit: &ExitCfg{TakeProfitPct: 0.35, BollUpperExit: false, MaxHoldMinutes: 1440, StopLossPct: 300}}
 	fillDefaults(c)
-	if c.Exit.TakeProfitPct != 0.3 || c.Exit.BollUpperExit || c.Exit.MaxHoldMinutes != 60 {
-		t.Fatalf("归一化改动了出场口径：tp=%v boll=%v hold=%d",
-			c.Exit.TakeProfitPct, c.Exit.BollUpperExit, c.Exit.MaxHoldMinutes)
+	if c.Exit.TakeProfitPct != 0.35 || c.Exit.BollUpperExit || c.Exit.MaxHoldMinutes != 1440 || c.Exit.StopLossPct != 300 {
+		t.Fatalf("归一化改动了出场口径：tp=%v boll=%v hold=%d sl=%v",
+			c.Exit.TakeProfitPct, c.Exit.BollUpperExit, c.Exit.MaxHoldMinutes, c.Exit.StopLossPct)
 	}
 
-	// Exit 整块缺失也不能 panic，同样退回四期默认
+	// Exit 整块缺失也不能 panic，同样退回七期默认
 	c2 := &Config{}
 	fillDefaults(c2)
-	if c2.Exit == nil || c2.Exit.MaxHoldMinutes != 60 ||
-		c2.Exit.BollUpperExit || c2.Exit.TakeProfitPct != 0.3 {
-		t.Fatalf("Exit 缺失时应退回四期默认（止盈 1.0 / 无上轨 / 超时 60），实际 %+v", c2.Exit)
+	if c2.Exit == nil || c2.Exit.MaxHoldMinutes != 1440 ||
+		c2.Exit.BollUpperExit || c2.Exit.TakeProfitPct != 0.35 {
+		t.Fatalf("Exit 缺失时应退回七期默认（止盈 0.35 / 无上轨 / 超时 1440），实际 %+v", c2.Exit)
 	}
 }

@@ -146,8 +146,15 @@ func (d *DB) QueryKlines(q KlineQuery) ([]Kline, error) {
 		sb.WriteString(" AND ts<=?")
 		args = append(args, q.ToTs)
 	}
-	// 复合主键 (inst_id, bar, ts) 天然按 ts 有序，DESC 走反向索引扫描，很快
-	sb.WriteString(" ORDER BY ts DESC")
+	// 复合主键 (inst_id, bar, ts) 天然按 ts 有序：
+	//   DESC（默认）走反向索引扫描，取「最新的 N 根」很快；
+	//   Asc（七期，右移翻页用）走正向索引扫描，LIMIT 直接落在窗口里最老的 N 根。
+	// 两种排序最后都反转成升序返回 —— 调用方永远拿到升序。
+	if q.Asc {
+		sb.WriteString(" ORDER BY ts ASC")
+	} else {
+		sb.WriteString(" ORDER BY ts DESC")
+	}
 	if q.Limit > 0 {
 		sb.WriteString(" LIMIT ?")
 		args = append(args, q.Limit)
@@ -168,9 +175,14 @@ func (d *DB) QueryKlines(q KlineQuery) ([]Kline, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// 反转成升序
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
+	// 反转成升序。
+	// ★ 只对 DESC 查询反转（DESC 取「最新的 N 根」需要倒过来）；
+	//   Asc=true 查询本来就是升序，再反转就变成降序 —— 七期右移翻页
+	//   的 Rows 会被弄成倒序，FirstTs/LastTs 全部反义。
+	if !q.Asc {
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
 	}
 	return out, nil
 }
