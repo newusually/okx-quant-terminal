@@ -19,6 +19,7 @@ package handler
 //   D. 任何 /api/admin/ 下未登记的新路径默认需登录（前缀兜底的真正价值）
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -140,4 +141,61 @@ func TestAdminGuard_CaseSensitive(t *testing.T) {
 		t.Fatal("带查询串的字符串不该命中白名单（r.URL.Path 本就不含 query，这里是防御性断言）")
 	}
 	t.Log("✓ 白名单按精确路径匹配，大小写/查询串变体不会命中")
+}
+
+// ---------------------------------------------------------------------------
+// E. strField：把「字段没传」和「传了值」分清
+// ---------------------------------------------------------------------------
+
+// TestStrField_NilIsEmptyNotPlaceholder ★ 2026-10-02 实翻车回归 ★
+//
+// 守的是一个把「缺失」伪装成「有值」的坑：
+//
+//	fmt.Sprint(body["email"])   // nil → "<nil>"（5 个字符，非空串！）
+//
+// 后果链条（真实发生，用户在网页点「发送验证码」永远收不到邮件）：
+//  1. 前端不传 email（或传了界面占位文案）→ body["email"] 为 nil
+//  2. fmt.Sprint 把它变成 "<nil>" → `if email == ""` 的兜底**不触发**
+//  3. "<nil>" 不在白名单 → 被判「非授权邮箱」
+//  4. 鉴权层为不泄露白名单，对这种请求**静默按成功返回**（ok:true）
+//  → 接口一路绿灯，实际一封邮件都没发，日志里只有一句不起眼的提示。
+//
+// 所以这里钉死：**取不到就是空串**，让调用方的兜底逻辑接管。
+func TestStrField_NilIsEmptyNotPlaceholder(t *testing.T) {
+	cases := []struct {
+		name string
+		m    map[string]any
+		key  string
+		want string
+	}{
+		{"键不存在", map[string]any{}, "email", ""},
+		{"显式 null", map[string]any{"email": nil}, "email", ""},
+		{"数字类型不该冒充字符串", map[string]any{"email": float64(1)}, "email", ""},
+		{"布尔类型不该冒充字符串", map[string]any{"email": true}, "email", ""},
+		{"对象类型不该冒充字符串", map[string]any{"email": map[string]any{}}, "email", ""},
+		{"正常字符串", map[string]any{"email": "493076373@qq.com"}, "email", "493076373@qq.com"},
+		{"空字符串", map[string]any{"email": ""}, "email", ""},
+	}
+	for _, c := range cases {
+		if got := strField(c.m, c.key); got != c.want {
+			t.Fatalf("%s：strField = %q，期望 %q", c.name, got, c.want)
+		}
+	}
+	t.Log("✓ strField 对缺失/类型不符一律返回空串，不会产生 \"<nil>\" 这类伪值")
+}
+
+// TestStrField_GuardsAgainstSprintNil 直接把「为什么不能用 fmt.Sprint」立成断言。
+//
+// 这样即使有人把 strField 换回 fmt.Sprint，也能立刻看到失败原因，
+// 而不是在一个看似无关的「验证码收不到」问题里重新踩一遍。
+func TestStrField_GuardsAgainstSprintNil(t *testing.T) {
+	var m = map[string]any{}
+	if got := fmt.Sprint(m["email"]); got == "" {
+		t.Skip("fmt.Sprint(nil) 行为已变化，本断言的前提不再成立，需重新评估 strField")
+	}
+	// 前提成立：fmt.Sprint(nil) 确实不是空串，那么 strField 必须与它不同
+	if strField(m, "email") != "" {
+		t.Fatal("strField 必须比 fmt.Sprint 更严格：缺失字段要返回空串而不是 \"<nil>\"")
+	}
+	t.Log("✓ strField 与 fmt.Sprint 行为不同（前者把缺失如实报成空串）")
 }

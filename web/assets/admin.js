@@ -130,7 +130,21 @@
     function sendCode() {
       sendBtn.disabled = true;
       setMsg('');
-      api('/api/admin/send_code', { method: 'POST', body: { email: emailText.textContent } })
+      // ★★ 不要传 email！（2026-10-02 实翻车修复）★★
+      //
+      //   这里原来传的是 `email: emailText.textContent` —— 也就是**界面上显示的文字**。
+      //   但界面上那个 span 在拿到服务端应答之前显示的是占位文案「（授权邮箱）」，
+      //   所以真实发出去的是 email="（授权邮箱）"。
+      //   服务端一看不在白名单，按「不回显白名单」的安全设计**静默忽略** ——
+      //   于是用户点了发送、界面提示"已发送"，而邮件系统里一封信都没有。
+      //   这个 bug 极其隐蔽：前后端各自的行为都是"正确"的，
+      //   错在**前端把展示文案当成了数据**。
+      //
+      //   正确做法：前端**根本不需要知道邮箱**。
+      //   服务端 send_code 在 email 为空时就用硬编码的授权邮箱（见
+      //   internal/handler/api_admin_config.go：「email == "" → AllowedEmail()」）。
+      //   前端越不知道那个地址，越不可能泄漏它 —— 这与安全设计的方向一致。
+      api('/api/admin/send_code', { method: 'POST', body: {} })
         .then(function (j) {
           if (!j.ok) { setMsg(j.error || '发送失败', true); return; }
           sent = true;

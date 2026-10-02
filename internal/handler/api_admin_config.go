@@ -26,6 +26,34 @@ import (
 	"finally-main/internal/service"
 )
 
+// strField 从 JSON 体里取一个字符串字段；**缺失或类型不对时返回空串**。
+//
+// ★ 为什么需要它（2026-10-02 实翻车）★
+//
+//	最直觉的写法是 `strings.TrimSpace(fmt.Sprint(body["email"]))`，但它有个致命陷阱：
+//	**`fmt.Sprint(nil)` 返回字符串 `"<nil>"`，不是空串。**
+//	于是「字段没传」这件事会被伪装成「传了一个叫 <nil> 的字符串」：
+//	  · `if email == ""` 的兜底**不会触发**
+//	  · 后面拿它去比对白名单，必然不匹配 → 被判「非授权邮箱」
+//	  · 而鉴权层为了不泄露白名单，对这种请求**静默按成功返回**
+//	最终症状：接口一路 ok:true，实际什么都没做，且日志里只有一句不起眼的提示。
+//	这个 bug 排查了两轮才抓到，根因就是一个「便捷函数」把「缺失」和「有值」抹平了 ——
+//	与本项目头号故障形态（同一个量两条路算）同源。
+//
+//	拿不准类型就返回空串，让调用方的兜底逻辑（用默认值 / 报错）去处理，
+//	**永远不要让一个占位字符串冒充真实值。**
+func strField(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
 // readJSONBody 读一个 JSON 请求体并解成 map。
 //
 // 限流：最多 64KB。这套接口的入参全是几个阈值数字，正常不会超过 1KB；
@@ -136,7 +164,22 @@ func (s *Server) handleAdminSendCode(w http.ResponseWriter, r *http.Request) (an
 	if err != nil {
 		return nil, err
 	}
-	email := strings.TrimSpace(fmt.Sprint(body["email"]))
+	// ★★ 不要用 fmt.Sprint(body["email"]) ★★（2026-10-02 实翻车修复）
+	//
+	//   fmt.Sprint(nil) 的结果是字符串 "<nil>"（5 个字符），**不是空串**。
+	//   所以原来那行：
+	//       email := strings.TrimSpace(fmt.Sprint(body["email"]))
+	//       if email == "" { email = rbac.AllowedEmail() }
+	//   在前端**不传 email** 时，得到的 email 是 "<nil>" ——
+	//   既不等于空串（兜底不触发），又不在白名单（被判非授权邮箱），
+	//   最终被「不回显白名单」的安全设计**静默忽略**：
+	//   接口照样回 ok:true，日志里却只留一句「非授权邮箱」，一封邮件都没发。
+	//
+	//   前端旧代码传的是占位文案「（授权邮箱）」，同样命中这条路。
+	//   两个 bug 叠加，表现完全一样：界面提示"已发送"，邮箱永远收不到。
+	//
+	//   正确写法：用类型断言取字符串，取不到就是「没传」。
+	email := strings.TrimSpace(strField(body, "email"))
 	if email == "" {
 		email = rbac.AllowedEmail()
 	}
@@ -189,8 +232,11 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) (any, 
 	if err != nil {
 		return nil, err
 	}
-	email := strings.TrimSpace(fmt.Sprint(body["email"]))
-	code := strings.TrimSpace(fmt.Sprint(body["code"]))
+	// 同样不要用 fmt.Sprint 取字段（见 handleAdminSendCode 里的长注释）：
+	// nil 会变成 "<nil>"，绕过所有空值兜底，最后表现成「验证码错误或已失效」，
+	// 让人白白怀疑是码错了。
+	email := strings.TrimSpace(strField(body, "email"))
+	code := strings.TrimSpace(strField(body, "code"))
 	if email == "" {
 		email = rbac.AllowedEmail()
 	}
