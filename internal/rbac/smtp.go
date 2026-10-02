@@ -29,6 +29,12 @@ type SMTPConfig struct {
 	Port int    // 465（SSL）
 	User string // 发件邮箱，如 493076373@qq.com
 	Pass string // ★ 授权码，不是登录密码
+
+	// Source 凭据是从哪来的（"env:OKX_SMTP_PASS" / "file:<绝对路径>" / ""）。
+	// ★ 只记**来源**，绝不记授权码本身 —— 这行会进日志文件。
+	//   排查「服务读不到凭据」时，这一个字段能省掉半小时：
+	//   Windows 服务的工作目录是 System32，靠相对路径找文件必然失败。
+	Source string
 }
 
 // LoadSMTPConfig 从环境变量 / 本机文件读 SMTP 配置。
@@ -56,13 +62,22 @@ func LoadSMTPConfig(root string) (SMTPConfig, bool) {
 	if c.Port == 0 {
 		c.Port = 465
 	}
+	if c.Pass != "" {
+		c.Source = "env:OKX_SMTP_PASS"
+	}
 
 	// 环境变量不齐 → 试本机文件
+	//
+	// ★ 路径顺序有讲究：**绝对路径优先**。
+	//   root 是调用方（projectRoot()）算出来的项目根，不受工作目录影响；
+	//   而 ".smtp-pass" 是相对路径，相对的是**进程工作目录** ——
+	//   Windows 服务由 SCM 拉起时那是 C:\Windows\System32，
+	//   永远不会有这个文件。把相对路径排在最后，只是给「命令行手工跑」留个方便。
 	if c.User == "" || c.Pass == "" {
 		for _, p := range []string{
 			filepath.Join(root, ".smtp-pass"),
-			".smtp-pass",
 			filepath.Join(root, "configs", ".smtp-pass"),
+			".smtp-pass",
 		} {
 			raw, err := os.ReadFile(p)
 			if err != nil {
@@ -80,6 +95,13 @@ func LoadSMTPConfig(root string) (SMTPConfig, bool) {
 			}
 			if c.Pass == "" {
 				c.Pass = strings.TrimSpace(pw)
+				if c.Pass != "" {
+					if abs, aerr := filepath.Abs(p); aerr == nil {
+						c.Source = "file:" + abs
+					} else {
+						c.Source = "file:" + p
+					}
+				}
 			}
 			break
 		}
@@ -105,6 +127,10 @@ func NewSMTPMailer(cfg SMTPConfig, logf func(string, ...any)) *SMTPMailer {
 }
 
 // Send 发一封纯文本邮件
+//
+// ★ 每一处失败都带上足够的定位信息：主机、发件人、以及**失败发生在哪一步**。
+//   SMTP 的报错原始文本往往是 "EOF" / "connection reset" 这种没头没尾的东西，
+//   不补上下文就只能靠猜。授权码本身**绝不进日志**。
 func (m *SMTPMailer) Send(to, subject, body string) error {
 	if m.cfg.Pass == "" {
 		return fmt.Errorf("SMTP 凭据未配置（需要 OKX_SMTP_PASS 或 .smtp-pass 文件）")
@@ -132,13 +158,15 @@ func (m *SMTPMailer) Send(to, subject, body string) error {
 
 	auth := smtp.PlainAuth("", m.cfg.User, m.cfg.Pass, m.cfg.Host)
 	if err := cli.Auth(auth); err != nil {
-		return fmt.Errorf("SMTP 认证失败（确认用的是授权码而不是登录密码）：%w", err)
+		return fmt.Errorf("SMTP 认证失败（发件人 %s，确认用的是授权码而不是登录密码）：%w", m.cfg.User, err)
 	}
 	if err := cli.Mail(m.cfg.User); err != nil {
-		return fmt.Errorf("发件人被拒：%w", err)
+		return fmt.Errorf("发件人被拒（%s）：%w", m.cfg.User, err)
 	}
 	if err := cli.Rcpt(to); err != nil {
-		return fmt.Errorf("收件人被拒：%w", err)
+		// ★ 收件人被拒是最容易被误判成「发出去了但没收到」的情形：
+		//   RCPT 阶段被拒时，邮件**根本没进对方队列**，界面上却常显示成功。
+		return fmt.Errorf("收件人被拒（%s）：%w", to, err)
 	}
 	wc, err := cli.Data()
 	if err != nil {

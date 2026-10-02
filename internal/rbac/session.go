@@ -206,9 +206,14 @@ func (m *Manager) SendCode(email, ip string) error {
 	m.mu.Unlock()
 
 	if mailErr != nil {
+		// ★ 发信失败**必须落日志**（2026-10-02 修订）。
+		//   原来这里直接 return，导致日志里连一条痕迹都没有：
+		//   用户点「发送验证码」收不到邮件，翻遍 1.6 万行日志看不到任何线索 ——
+		//   而这正是本项目最忌讳的「静默失败」。错的不是报错，是不留证据。
+		m.logf("✗ 管理员验证码邮件发送失败（收件人 %s）：%v", email, mailErr)
 		return fmt.Errorf("验证码邮件发送失败：%w", mailErr)
 	}
-	m.logf("★ 管理员验证码已发送至授权邮箱（%s，5 分钟内有效）", email)
+	m.logf("★ 管理员验证码已发送至授权邮箱（%s，%d 分钟内有效）", email, int(CodeTTL.Minutes()))
 	return nil
 }
 

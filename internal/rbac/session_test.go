@@ -20,6 +20,7 @@ package rbac
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -495,6 +496,66 @@ func TestSendCode_NoMailerConfigured(t *testing.T) {
 		t.Fatalf("非授权邮箱不该暴露「服务未配置」：%v", err)
 	}
 	t.Log("✓ 未配置 SMTP：授权邮箱得到明确错误，非授权邮箱仍然静默")
+}
+
+// TestSendCode_FailureIsLoggedAndSuccessIsLogged ★ 2026-10-02 回归 ★
+//
+// 守的是「静默失败」这个坑：发信失败时如果只 return 不记日志，
+// 运维侧面对「点了发送验证码收不到邮件」将毫无线索 ——
+// 实测踩到过：1.6 万行服务日志里搜不到一条 SMTP 记录，
+// 既看不出「发了」也看不出「没发」，只能靠猜。
+//
+// 所以这里断言**两个方向都留痕**：
+//   · 成功 → 日志里有「已发送」
+//   · 失败 → 日志里有「发送失败」+ 具体原因
+//
+// 顺带钉死一条安全红线：日志里**绝不能出现授权码**。
+func TestSendCode_FailureIsLoggedAndSuccessIsLogged(t *testing.T) {
+	var logs []string
+	var logMu sync.Mutex
+	rec := func(format string, args ...any) {
+		logMu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		logMu.Unlock()
+	}
+	snapshot := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return strings.Join(logs, "\n")
+	}
+
+	fm := &fakeMailer{}
+	m := NewManager(fm, rec)
+
+	// ---- ① 成功路径：必须留一条「已发送」 ----
+	if err := m.SendCode(AllowedEmail(), "1.2.3.4"); err != nil {
+		t.Fatal(err)
+	}
+	if s := snapshot(); !strings.Contains(s, "已发送") {
+		t.Fatalf("发信成功却没留日志，运维无法确认是否发出。实际日志：\n%s", s)
+	}
+
+	// ---- ② 失败路径：必须留一条「发送失败」并带原因 ----
+	fm.failOn = true
+	m.mu.Lock()
+	m.lastSend = map[string]time.Time{} // 清冷却，让这次真跑
+	m.mu.Unlock()
+	if err := m.SendCode(AllowedEmail(), "9.9.9.9"); err == nil {
+		t.Fatal("SMTP 失败时应当返回错误")
+	}
+	s := snapshot()
+	if !strings.Contains(s, "发送失败") {
+		t.Fatalf("★ 发信失败必须落日志（这正是「收不到邮件却查不出原因」的根源）。实际日志：\n%s", s)
+	}
+	if !strings.Contains(s, "smtp 挂了") {
+		t.Fatalf("失败日志里应带上底层原因，否则仍然只能靠猜。实际日志：\n%s", s)
+	}
+
+	// ---- ③ 红线：日志里绝不能出现授权码 ----
+	if strings.Contains(s, "wakoenrveqxxcaia") {
+		t.Fatal("日志里出现了真实授权码，属凭据泄漏")
+	}
+	t.Log("✓ 发信成功/失败均留痕，且日志不含凭据")
 }
 
 // ---------------------------------------------------------------------------

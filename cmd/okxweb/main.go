@@ -593,9 +593,19 @@ func runApp(ctx context.Context) error {
 	}
 
 	// ---- 4. 网页服务（接口层）----
+	//
+	// ★★ 2026-10-02 修订：logf 必须同时写日志文件，不能只 fmt.Printf ★★
+	//   第 597 行原来是纯 stdout（自定义打印格式），而 SCM 拉起的 Windows 服务
+	//   **没有控制台，stdout 被系统丢弃** → 管理员发码 / 登录 / 登录失败
+	//   这些安全事件全都写进了空气，日志文件里一条都查不到。
+	//   实测踩到：用户在网页点「发送验证码」收不到邮件，
+	//   我翻了 1.6 万行服务日志，既看不到「发出去了」也看不到「失败了」，
+	//   连「有人请求过发码」都看不到 —— 只能靠猜。
+	//   现在改成 logx.Logf（它内部就是 stdout + 文件 + runlog 三写），
+	//   前缀 [WEB] 保留，便于和引擎日志区分。
 	srv := handler.NewServer(db, feed, bf, strategyStore, handler.AssetsDir(root), root,
 		func(format string, args ...any) {
-			fmt.Printf("%s [WEB]  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+			logx.Logf("INFO", "[WEB] "+format, args...)
 		})
 
 	// ---- 4.5 管理员鉴权（★ 2026-10-02 八期）----
@@ -607,17 +617,30 @@ func runApp(ctx context.Context) error {
 	//   SMTP 凭据来源：环境变量 → 工作目录 .smtp-pass（格式 邮箱:授权码）。
 	//   拿不到就只记一条日志，服务照常起 —— 只是管理台会明确报
 	//   「邮件服务未配置」，而不是静默失败让人等一封永远不来的邮件。
+	//
+	//   ★★ 2026-10-02 修订：横幅必须同时进日志文件 ★★
+	//   原来只 fmt.Printf 到 stdout，而 SCM 拉起的 Windows 服务**没有控制台**，
+	//   stdout 直接丢弃 → 日志里既没有「已就绪」也没有「未配置」，
+	//   排查「点了发送验证码收不到邮件」时只能靠猜。
+	//   实测踩到：服务日志 1.6 万行里一条 [MAIL] 都没有。
+	//   现在两边都写，并且把凭据**来源路径**也打出来 ——
+	//   工作目录不对时，一眼就能看出它到底读了哪个文件。
 	{
 		smtpCfg, ok := rbac.LoadSMTPConfig(root)
 		if ok {
 			srv.SetMailer(rbac.NewSMTPMailer(smtpCfg, func(format string, args ...any) {
 				logx.Logf("WARN", "[MAIL] "+format, args...)
 			}))
-			fmt.Printf("[MAIL] 管理员验证码发送已就绪（%s:%d，发件人 %s）\n",
-				smtpCfg.Host, smtpCfg.Port, smtpCfg.User)
+			msg := fmt.Sprintf("[MAIL] 管理员验证码发送已就绪（%s:%d，发件人 %s，凭据来源 %s，工作目录 %s）",
+				smtpCfg.Host, smtpCfg.Port, smtpCfg.User, smtpCfg.Source, cwdOf())
+			fmt.Print(msg + "\n")
+			logx.Logf("INFO", msg)
 		} else {
-			fmt.Printf("[MAIL] ⚠ 未配置 SMTP 凭据 → 管理台登录不可用。" +
-				"设置 OKX_SMTP_USER/OKX_SMTP_PASS 环境变量，或在工作目录放 .smtp-pass（内容：邮箱:授权码）\n")
+			msg := fmt.Sprintf("[MAIL] ⚠ 未配置 SMTP 凭据 → 管理台登录不可用。"+
+				"设置 OKX_SMTP_USER/OKX_SMTP_PASS 环境变量，或在工作目录放 .smtp-pass（内容：邮箱:授权码）。"+
+				"当前 root=%s 工作目录=%s", root, cwdOf())
+			fmt.Print(msg + "\n")
+			logx.Logf("WARN", msg)
 		}
 	}
 	// 保存配置成功后立刻重算合约准入（改金额 / 上限会影响哪些合约买得起）
@@ -1071,6 +1094,18 @@ func projectRoot() string {
 		return dir
 	}
 	return "."
+}
+
+// cwdOf 取当前工作目录，仅用于日志定位。
+//
+// ★ 为什么要专门打这个：Windows 服务由 SCM 拉起时工作目录是
+//   C:\Windows\System32，而相对路径的 .smtp-pass 就是相对它的。
+//   「配置明明在，服务就是读不到」这类问题的第一个分叉点就在这一行。
+func cwdOf() string {
+	if d, err := os.Getwd(); err == nil {
+		return d
+	}
+	return "?"
 }
 
 // walkUpToRoot 从 dir 开始逐级向上找含 go.mod 的目录，找不到返回空串。
