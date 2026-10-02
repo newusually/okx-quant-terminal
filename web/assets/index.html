@@ -36,6 +36,8 @@
     <div class="stat"><label>自动交易</label><b id="stLive" class="live-pill">--</b></div>
   </div>
 
+  <!-- ★ 十五期：主题切换（暗金 / macOS 浅色），状态存 localStorage -->
+  <button class="btn ghost mini" id="btnTheme" title="切换 浅色 / 暗色 主题">浅色</button>
   <div class="conn" id="conn"><i></i><span>连接中</span></div>
 </header>
 
@@ -79,6 +81,12 @@
     <div class="uni-summary muted" id="uniSummary"></div>
     <div class="inst-list" id="instList"></div>
   </aside>
+
+  <!-- ★ 十五期：可拖拽分隔条（Flex 的 HDividedBox 等价物）。
+       拖动改左右栏宽（CSS 变量 --side-w / --right-w），双击复位，
+       宽度存 localStorage。列顺序靠 grid-column 显式固定，
+       面板浮动（fixed 脱离文档流）时分隔条也不会顶错格子。 -->
+  <div class="v-split" data-split="L" title="拖动调整左栏宽度 · 双击复位"></div>
 
   <!-- 中：图表 -->
   <section class="panel center">
@@ -202,6 +210,8 @@
     </div>
   </section>
 
+  <div class="v-split" data-split="R" title="拖动调整右栏宽度 · 双击复位"></div>
+
   <!-- 右：合约信息 -->
   <aside class="panel side right">
     <div class="panel-head"><span>合约信息</span></div>
@@ -310,12 +320,30 @@
   </div>
 </section>
 
+<!-- ★ 十五期：面板最小化 Dock（macOS 风）+ 磁性吸附辅助线。
+     Dock 平时隐藏，有面板被最小化时出现；点击 chip 弹回面板。
+     辅助线只在拖动面板贴近其他面板/容器边缘 14px 内时闪现。 -->
+<div id="panelDock" class="hidden"></div>
+<div id="snapGuideV" class="snap-guide v"></div>
+<div id="snapGuideH" class="snap-guide h"></div>
+
 <footer class="foot">
   <span id="footLeft">OKX 全合约量化终端 · 纯 Go 后端 + MySQL</span>
   <span id="footRight"></span>
 </footer>
 
-<script src="/assets/app.js"></script>
+<!-- ★ 十五期：app.js(2677行) 拆分为分层文件，加载顺序不可乱 ——
+     core(基础) → chart(图表) → render(渲染) → draw(画图) → data(数据)
+     → tables(表格) → fx(特效) → main(启动,立即执行 boot) → panels(十五期新功能) -->
+<script src="/assets/core.js"></script>
+<script src="/assets/chart.js"></script>
+<script src="/assets/render.js"></script>
+<script src="/assets/draw.js"></script>
+<script src="/assets/data.js"></script>
+<script src="/assets/tables.js"></script>
+<script src="/assets/fx.js"></script>
+<script src="/assets/main.js"></script>
+<script src="/assets/panels.js"></script>
 <!-- 管理台（八期）。刻意不放在页面上任何可见位置，靠 K 线图手势唤出。
      ⚠ 顺序必须在 app.js 之后：它要等图表容器建好才绑事件。 -->
 <script src="/assets/admin.js"></script>

@@ -937,3 +937,154 @@ main .center.jump-flash {
 
 /* 保存过程中禁止重复点 */
 .adm-ft .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* ==================================================================== */
+/* ★★★ 十五期：Flex 高级感（2026-10-02）★★★                            */
+/* 面板拖拽 + 缓动曲线 + 状态过渡 + 换肤 + 真玻璃 + View Transitions      */
+/* ==================================================================== */
+
+/* ---- ① 缓动令牌：全站动效统一走这套曲线（Flex Bounce/Back 的等价物，
+        换曲线 = 换手感，这就是「界面活了」的那一行）---- */
+:root {
+  --dur-1: .16s;
+  --dur-2: .28s;
+  --dur-3: .45s;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+  --side-w: 268px;    /* 左栏宽（v-split 拖动改写，panels.js）*/
+  --right-w: 268px;   /* 右栏宽 */
+}
+
+/* ---- ② 布局改 5 列：面板 / 分隔条 / 面板 / 分隔条 / 面板 ----
+   列位置用 grid-column 显式固定：面板浮动（fixed 脱离文档流）后，
+   分隔条也不会顶错格子 —— 否则 side 一浮动，R 分隔条会跳到第 1 列。 */
+.layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr) 6px var(--right-w); }
+.layout > .side:not(.right) { grid-column: 1; }
+.layout > .v-split[data-split="L"] { grid-column: 2; }
+.layout > .center { grid-column: 3; }
+.layout > .v-split[data-split="R"] { grid-column: 4; }
+.layout > .side.right { grid-column: 5; }
+
+.v-split {
+  position: relative; cursor: col-resize; touch-action: none;
+}
+.v-split::after {
+  content: ''; position: absolute; left: 1px; right: 1px; top: 24%; bottom: 24%;
+  border-radius: 3px; background: var(--line);
+  transition: background var(--dur-1) var(--ease-out), transform var(--dur-1) var(--ease-out);
+}
+.v-split:hover::after, .v-split:active::after { background: var(--accent); transform: scaleY(1.2); }
+
+/* ---- ③ 浮动面板：拖动抬起 / 阴影分层 / 双击最大化 ----
+   z-index 55~60：低于管理台遮罩(9000)，高于页面普通层。 */
+.panel { transition: box-shadow var(--dur-2) var(--ease-out); }
+.panel.floating {
+  position: fixed; z-index: 55;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
+}
+.panel.dragging {
+  z-index: 60; transition: none;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, .65);
+}
+.panel.dragging * { cursor: grabbing !important; }
+.panel.maxed { z-index: 58; }
+
+/* 抓手（⠿）：按住拖动，双击最大化/还原 */
+.ph-grip {
+  cursor: grab; color: var(--muted); padding: 0 6px;
+  user-select: none; flex: 0 0 auto; font-size: 12px; letter-spacing: -1px;
+  transition: color var(--dur-1) var(--ease-out);
+}
+.ph-grip:hover { color: var(--accent); }
+.ph-acts { display: flex; gap: 4px; margin-left: 8px; flex: 0 0 auto; }
+.ph-act {
+  font-size: 11px; color: var(--text-2); background: var(--bg-3);
+  border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 7px;
+  cursor: pointer; transition: all var(--dur-1) var(--ease-out);
+}
+.ph-act:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
+
+/* ---- ④ 磁性吸附辅助线：贴边 14px 内闪现的 1px 金线 ---- */
+.snap-guide {
+  position: fixed; z-index: 100; background: var(--accent);
+  pointer-events: none; opacity: 0; transition: opacity .12s ease-out;
+}
+.snap-guide.v { top: 0; bottom: 0; width: 1px; left: -9px; }
+.snap-guide.h { left: 0; right: 0; height: 1px; top: -9px; }
+
+/* ---- ⑤ Dock：最小化面板的容器（macOS 风）---- */
+#panelDock {
+  position: fixed; left: 50%; bottom: 42px; transform: translateX(-50%);
+  z-index: 80; display: flex; gap: 8px; padding: 7px 12px;
+  background: rgba(22, 26, 30, .88);
+  backdrop-filter: blur(14px) saturate(1.4); -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  border: 1px solid var(--line-2); border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+}
+#panelDock.hidden { display: none; }
+.dock-chip {
+  font-size: 12px; color: var(--text); background: var(--bg-3);
+  border: 1px solid var(--line-2); border-radius: 8px; padding: 3px 12px;
+  cursor: pointer; transition: all var(--dur-1) var(--ease-spring);
+}
+.dock-chip:hover { transform: translateY(-2px); color: var(--accent); border-color: var(--accent); }
+
+/* ---- ⑥ View Transitions（共享元素补间）----
+   tables.js 切 tab 时用 startViewTransition 包裹，浏览器对 .tables
+   拍旧/新两帧自动补间 —— 只补间这一块，页面其余部分不闪。 */
+.tables { view-transition-name: tables; }
+::view-transition-old(tables),
+::view-transition-new(tables) { animation-duration: var(--dur-2); animation-timing-function: var(--ease-out); }
+
+/* ---- ⑦ 玻璃拟态统一：顶栏 / 图例 / 悬浮提示 ---- */
+.topbar {
+  background: linear-gradient(180deg, rgba(18, 22, 27, .86), rgba(22, 26, 30, .82));
+  backdrop-filter: blur(14px) saturate(1.5); -webkit-backdrop-filter: blur(14px) saturate(1.5);
+}
+.legend {
+  background: rgba(22, 26, 30, .78);
+  backdrop-filter: blur(14px) saturate(1.4); -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05), 0 8px 24px rgba(0, 0, 0, .45);
+}
+.tip { backdrop-filter: blur(14px) saturate(1.4); -webkit-backdrop-filter: blur(14px) saturate(1.4); }
+
+/* ---- ⑧ 微交互：按钮/页签按下回缩、悬浮提亮（缓动令牌的落点）---- */
+.btn, .tab, .chip, .scope, .skey, .ind, .draw-tool, .tf, .nq-entry {
+  transition: all var(--dur-1) var(--ease-out);
+}
+.btn:active, .tab:active, .chip:active, .scope:active,
+.skey:active, .ind:active, .draw-tool:active, .tf:active { transform: scale(.96); }
+.btn:hover { filter: brightness(1.1); }
+.nq-entry:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+
+/* ---- ⑨ macOS 浅色主题（顶栏按钮切换，图表背景由 panels.js 同步换）---- */
+:root[data-theme="light"] {
+  --bg: #f5f5f7; --bg-2: #ffffff; --bg-3: #f2f2f5; --bg-4: #e8e8ed;
+  --line: #d9d9e0; --line-2: #c9c9d2;
+  --text: #1d1d1f; --text-2: #3a3a3e; --muted: #86868b;
+  --accent: #a97a0e; --accent-2: #8f6a0e;
+  --up: #0a9e63; --down: #df3450;
+}
+:root[data-theme="light"] body { background: var(--bg); }
+:root[data-theme="light"] .topbar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, .9), rgba(247, 247, 250, .85));
+  border-bottom-color: var(--line);
+}
+:root[data-theme="light"] .logo { color: #fff; }
+:root[data-theme="light"] .legend {
+  background: rgba(255, 255, 255, .82);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .6), 0 8px 24px rgba(0, 0, 0, .12);
+}
+:root[data-theme="light"] #panelDock { background: rgba(255, 255, 255, .9); }
+/* 悬浮提示 / 权益曲线提示：原样式写死深色背景，浅色主题下单独翻面 */
+:root[data-theme="light"] .tip {
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .16);
+}
+:root[data-theme="light"] .pnl-tip { background: rgba(255, 255, 255, .96); }
+
+/* ---- ⑩ 窄屏适配：右栏隐藏时 R 分隔条跟着藏，布局退回 3 列 ---- */
+@media (max-width: 1280px) {
+  .layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr); }
+  .v-split[data-split="R"] { display: none; }
+}
