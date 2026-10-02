@@ -128,8 +128,17 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 	}
 	insts, _ := s.db.ListInstruments()
 	nameOf := make(map[string]string, len(insts))
+	// ★ 十四期：名义价值改用真实口径 sz×面值×最新价 ★
+	// 旧算法 `margin×leverage` 有两个系统性偏差（2026-10-02 实测对账 OKX）：
+	//   ① trade.leverage 记的是**策略杠杆 20x**，但 CAP/RESOLV/ONE 这类
+	//      「合约最高 10x」的品种实际按 10x 成交 → 名义被高估一倍；
+	//   ② margin 是下单时的估算值，与 OKX 实际 imr 也有偏差。
+	// 实测：旧口径合计 114.56U，OKX notionalUsd 合计只有 95.61U，虚高 20%。
+	// 新口径 = sz × ctVal × ctMult × 最新价，与 OKX App 的「仓位价值」一致。
+	ctOf := make(map[string][2]float64, len(insts))
 	for _, it := range insts {
 		nameOf[it.InstID] = service.InstDisplayName(it)
+		ctOf[it.InstID] = [2]float64{it.CtVal, it.CtMult}
 	}
 
 	tp := 0.0
@@ -160,7 +169,14 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 		if p.EntryPx > 0 {
 			uplPct = (last/p.EntryPx - 1) * 100 * dir
 		}
-		notional := p.Margin * float64(lev)
+		// 名义价值：真实口径 张数×面值×最新价（面值/最新价缺失时退回旧口径 保证金×杠杆）
+		notional := 0.0
+		if cv := ctOf[p.InstID]; cv[0] > 0 && last > 0 {
+			notional = p.Sz * cv[0] * cv[1] * last
+		}
+		if notional <= 0 {
+			notional = p.Margin * float64(lev)
+		}
 		upl := notional * uplPct / 100
 		roi := 0.0
 		if p.Margin > 0 {

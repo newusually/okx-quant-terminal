@@ -26,9 +26,10 @@
     <div class="stat"><label>今日盈亏</label><b id="stTodayPnl">--</b></div>
     <div class="stat"><label>持仓</label><b id="stPos">0</b></div>
     <!-- 十一期：持仓金额（用户原话「持仓多少钱 右上角不显示 要求显示」）。
-         主数字 = 持仓占用保证金合计，小字 = 名义价值合计（杠杆放大后的仓位规模）。
-         两个数都从 /api/positions 的行里现算，跟表格用同一份真实数据。 -->
-    <div class="stat" title="持仓占用保证金合计（小字为名义价值合计）">
+         主数字 = 持仓占用保证金合计，小字 = 名义价值合计。
+         ★ 十四期：名义价值改真实口径（张数×面值×最新价，与 OKX 一致）；
+           与账户权益的区别写在 title 里，鼠标悬停可见。 -->
+    <div class="stat" title="持仓金额 = 持仓占用保证金合计（押进去的本金）；名义 = 仓位规模（张数×面值×最新价，含杠杆，与 OKX App 的仓位价值一致）。两者都小于账户权益属正常：比如 5.7U 保证金 × 20x ≈ 114U 名义，账户其余的钱仍是可用资金">
       <label>持仓金额</label><b id="stPosAmt">--</b><i class="sub" id="stPosAmtSub">--</i>
     </div>
     <div class="stat"><label>胜率</label><b id="stWin">--</b><i class="sub" id="stWinSub">--</i></div>
@@ -63,6 +64,14 @@
       <button class="scope active" data-scope="tradeable">可交易</button>
       <button class="scope" data-scope="excluded">被排除</button>
       <button class="scope" data-scope="all">全部</button>
+    </div>
+    <!-- ★ 十四期：列表排序（用户原话「上涨排序 金额排序」）★
+         默认 = 后端给的原序（成交额降序，与准入排行一致）；
+         涨幅 = 24h 涨跌幅从高到低（实时 ticker 优先）；金额 = 24h 成交额从高到低。 -->
+    <div class="scope-group sort-group" id="sortGroup">
+      <button class="skey active" data-sort="">默认</button>
+      <button class="skey" data-sort="chg">涨幅</button>
+      <button class="skey" data-sort="vol">金额</button>
     </div>
     <div class="search-box">
       <input id="instSearch" type="text" placeholder="搜索合约，如 BTC / ETH / SOL" autocomplete="off" />

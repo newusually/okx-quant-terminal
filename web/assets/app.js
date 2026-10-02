@@ -14,6 +14,7 @@ const state = {
   bars: ['3m', '5m', '15m'],
   marginText: '',
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
+  sortKey: '',          // '' 默认 | 'chg' 涨幅降序 | 'vol' 成交额降序（十四期）
   universe: null,       // 准入统计 {total,kept,dropped,byReason}
   chart: null, candle: null, volume: null, ma7: null, ma25: null, ma99: null,
   bollUp: null, bollMid: null, bollLo: null,
@@ -707,8 +708,17 @@ function renderTimeframes() {
 function renderInstList() {
   const kw = $('instSearch').value.trim().toUpperCase();
   const box = $('instList');
-  const list = state.insts.filter((it) =>
+  let list = state.insts.filter((it) =>
     !kw || it.instId.toUpperCase().includes(kw) || (it.name || '').toUpperCase().includes(kw));
+  // ★ 十四期：排序（用户原话「上涨排序 金额排序」）★
+  // chg 用实时 ticker 的涨幅优先（没行情再退合约快照），vol 按 24h 成交额。
+  // 都是**降序**：涨幅最高的 / 金额最大的排最前，不用滚动就能看到头部。
+  if (state.sortKey === 'chg') {
+    const cg = (it) => { const t = state.tickers[it.instId]; return (t && t.chgPct !== undefined && t.chgPct !== null) ? t.chgPct : (it.chgPct || 0); };
+    list = list.slice().sort((a, b) => cg(b) - cg(a));
+  } else if (state.sortKey === 'vol') {
+    list = list.slice().sort((a, b) => (b.quoteVol24h || 0) - (a.quoteVol24h || 0));
+  }
   $('instCount').textContent = list.length + ' / ' + state.insts.length;
 
   const frag = document.createDocumentFragment();
@@ -2004,6 +2014,9 @@ async function loadPositions() {
   // 主数字给**保证金合计**（自己真金白银押进去多少），小字给**名义价值合计**
   // （杠杆放大后的仓位规模）。两个都是从这份 rows 现算的 ——
   // 和下面表格里每一行显示的是同一份真实数据，不存在"顶栏一个口径、表格一个口径"。
+  // ★ 十四期：后端名义价值已改真实口径（张数×面值×最新价，对账 OKX
+  //   notionalUsd 误差 <1%；旧口径 margin×leverage 会虚高 20%，且对
+  //   「最高 10x」的合约虚高一倍）。
   const sumMargin = rows.reduce((s, p) => s + (Number(p.margin) || 0), 0);
   const sumNotional = rows.reduce((s, p) => s + (Number(p.notional) || 0), 0);
   $('stPosAmt').textContent = fmtNum(sumMargin, 2) + ' U';
@@ -2271,7 +2284,9 @@ async function loadPnl() {
 // setScope 切换合约列表范围（可交易 / 被排除 / 全部）
 async function setScope(scope) {
   state.scope = scope;
-  document.querySelectorAll('.scope').forEach((b) =>
+  // ★ 只动范围按钮组（#scopeGroup）：十四期加了排序按钮组（.skey），
+  //   不能用全局 '.scope' 一把抓，否则切范围会把排序高亮也冲掉
+  document.querySelectorAll('#scopeGroup .scope').forEach((b) =>
     b.classList.toggle('active', b.dataset.scope === scope));
   await loadInstruments();
 }
@@ -2303,6 +2318,16 @@ function bindEvents() {
 
   // ★ NQ 只读板块快捷入口：一键切到纳斯达克100 的详细 K 线图
   $('nqEntry').addEventListener('click', () => { openNQ(); });
+
+  // ★ 十四期：列表排序（默认 / 涨幅 / 金额）
+  $('sortGroup').addEventListener('click', (e) => {
+    const btn = e.target.closest('.skey');
+    if (!btn) return;
+    state.sortKey = btn.dataset.sort || '';
+    document.querySelectorAll('#sortGroup .skey').forEach((b) =>
+      b.classList.toggle('active', b === btn));
+    renderInstList();
+  });
 
   $('btnRefresh').onclick = () => {
     loadTickers(); loadKline(true); loadPositions(); loadHistory(); loadSignals(); loadBackfill();
@@ -2504,13 +2529,13 @@ function initFx() {
   fit();
   window.addEventListener('resize', fit);
 
-  // ---- ⓪ 600px 魔法棒：DOM 元素跟随鼠标 ----
+  // ---- ⓪ 魔法棒：DOM 元素跟随鼠标 ----
   //
-  // 尺寸口径：用户要的是「600px 大」。600px 直接从光标位置铺开的话会盖住
-  // 半个屏幕，所以这里取**棒身长度 600px**，整体按 600 的比例绘制，
-  // 棒尖（金色星芒那端）对齐鼠标热点 —— 与七期 26px 光标的热点语义一致，
-  // 用户「指哪儿打哪儿」的手感不变，只是棒子长了。
-  const WAND_LEN = 600;
+  // 尺寸口径：★ 十四期 600 → 320 ★ 用户反馈「太长了，都拉到边界了」——
+  // 600px 棒身在对角线上要铺 680+px，鼠标一靠近图表边缘棒身就整个戳出屏幕外。
+  // 320px 棒身实际约 365px（对角线），保留辨识度又不顶边。
+  // 棒尖（金色星芒那端）对齐鼠标热点 —— 「指哪儿打哪儿」的手感不变。
+  const WAND_LEN = 320;
   const wand = document.createElement('div');
   wand.className = 'fx-wand';
   // 用 CSS 变量把长度透给样式，方便以后单独调
