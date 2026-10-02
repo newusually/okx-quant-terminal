@@ -166,7 +166,10 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) (any, e
 		if p.Margin > 0 {
 			roi = upl / p.Margin * 100
 		}
-		// 简易强平价：逐仓、单向做多，距开仓价 1/杠杆（含维持保证金近似）
+		// 简易强平价：逐仓、单向做多，距开仓价 1/杠杆（含维持保证金近似）。
+		// ★ 七期（2026-10-02）：本系统是全仓 cross，OKX 实际强平看账户整体
+		//   adjEq vs mmr，这个逐仓估算对 0.1U 小仓严重失真（曾把「距爆仓」列
+		//   恒定吓成 4.5%）。字段保留只为接口兼容，前端「距止损」列已改用 stopLossPx。
 		liq := 0.0
 		if lev > 0 {
 			if dir > 0 {

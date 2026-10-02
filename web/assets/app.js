@@ -1367,15 +1367,34 @@ async function loadPositions() {
   tb.innerHTML = rows.map((p) => {
     const dir = (p.side || 'buy').toLowerCase() === 'sell' ? 'short' : 'long';
 
-    // 距爆仓：标记价离强平价还有几个百分点。越近越红。
-    // 逐仓做多时强平价在下方，所以「跌多少就爆」= (标记价−强平价)/标记价。
-    const liq = p.liqPx || 0;
     const mark = p.markPx || p.last || 0;
+    // 距止损：标记价离**程序止损线**（exit.stop_loss_pct，当前 -300%）还有多远。
+    //
+    // ★ 七期更正：这列原来叫「距爆仓」，显示逐仓公式估算的强平价距离
+    //   （entry×(1−1/lev+0.5%)，20x 下恒在 4.5% 附近）。但本系统是**全仓 cross**：
+    //   OKX 实际强平看的是整个账户 adjEq 跌破维持保证金 mmr，单仓跌 4.5% 根本
+    //   不会爆（账户 32.6U 权益 backing ~10U 敞口，最坏价格归零也只亏 10U）。
+    //   那个数字纯属吓人，废弃。
+    //
+    //   两个概念别混：
+    //     · 交易所强平线 —— OKX 按杠杆定的规则，程序改不了、关不掉（约 -4.5%@20x）；
+    //       全仓模式下由账户整体权益决定，账户级巡检另有专门输出。
+    //     · 程序止损线 —— exit.stop_loss_pct（当前 300 = -300% ROI），是我们自己
+    //       的市价平仓线。20x 下它对应价格 -15%，落在负价格区之外的部分物理上到不了。
+    const slPx = p.stopLossPx || 0;
     let distHtml = '<span class="muted">--</span>';
-    if (liq > 0 && mark > 0) {
-      const dist = Math.abs(mark - liq) / mark * 100;
-      const c = dist < 3 ? 'down' : (dist < 8 ? 'accent' : 'muted');
-      distHtml = `<span class="${c}"><b>${dist.toFixed(2)}%</b></span>`;
+    let slPxHtml = '<span class="muted">--</span>';
+    if (slPx !== 0) {
+      if (slPx > 0) {
+        slPxHtml = `<span class="muted">${fmtPrice(slPx)}</span>`;
+      } else {
+        // 做多且止损深于 -100% ROI（当前 -300%）→ 止损价落在负价格区 = 永远到不了
+        slPxHtml = '<span class="muted" title="止损深于 -100%，对应价格已为负 → 物理上不可达">不可达</span>';
+      }
+      if (mark > 0) {
+        const dist = Math.abs(mark - slPx) / mark * 100;
+        distHtml = `<span class="muted" title="距程序止损线（-300%）。交易所强平线由 OKX 按杠杆决定，全仓模式下看账户整体权益，单仓强平价不适用"><b>${dist.toFixed(0)}%</b></span>`;
+      }
     }
 
     return `<tr>
@@ -1384,7 +1403,7 @@ async function loadPositions() {
       <td>${fmtNum(p.sz, 0)}</td>
       <td>${fmtPrice(p.entryPx)}</td>
       <td>${fmtPrice(mark)}</td>
-      <td class="muted">${fmtPrice(liq)}</td>
+      <td>${slPxHtml}</td>
       <td>${distHtml}</td>
       <td>${fmtNum(p.margin, 3)}</td>
       <td>${p.leverage}x</td>
