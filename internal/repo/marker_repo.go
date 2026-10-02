@@ -24,6 +24,7 @@ type SignalPoint struct {
 	Ts      int64   `json:"ts"`
 	Close   float64 `json:"close"`
 	Score   int     `json:"score"`
+	RisePct float64 `json:"risePct"` // ★ 二十一期：触发那根的涨跌幅 (c-o)/o*100（负=跌）
 	Mask    int     `json:"mask"`
 	Acted   int     `json:"acted"`
 	HitList string  `json:"hitList"`
@@ -219,7 +220,7 @@ func (d *DB) BackfillTradeEvents() (int64, error) {
 
 // SignalsInRange 取某合约某周期、指定时间区间内的信号
 func (d *DB) SignalsInRange(instID, bar string, fromTs, toTs int64) ([]SignalPoint, error) {
-	q := `SELECT ts,COALESCE(close,0),COALESCE(score,0),COALESCE(mask,0),
+	q := `SELECT ts,COALESCE(close,0),COALESCE(score,0),COALESCE(rise_pct,0),COALESCE(mask,0),
 	             COALESCE(acted,0),COALESCE(hit_list,''),COALESCE(reason,'')
 	      FROM signals WHERE inst_id=? AND ts>=? AND ts<=?`
 	args := []any{instID, fromTs, toTs}
@@ -237,7 +238,7 @@ func (d *DB) SignalsInRange(instID, bar string, fromTs, toTs int64) ([]SignalPoi
 	out := make([]SignalPoint, 0, 128)
 	for rows.Next() {
 		var p SignalPoint
-		if err := rows.Scan(&p.Ts, &p.Close, &p.Score, &p.Mask,
+		if err := rows.Scan(&p.Ts, &p.Close, &p.Score, &p.RisePct, &p.Mask,
 			&p.Acted, &p.HitList, &p.Reason); err != nil {
 			return nil, err
 		}

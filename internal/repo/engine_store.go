@@ -189,11 +189,11 @@ func (s *Store) Ingest(p StorePayload) error {
 			if created == 0 {
 				created = now
 			}
-			args = append(args, []any{r.InstID, r.Bar, r.Ts, r.Close, r.Mask, r.Score, r.HitList,
+			args = append(args, []any{r.InstID, r.Bar, r.Ts, r.Close, r.Mask, r.Score, r.RisePct, r.HitList,
 				r.Pot, r.Fri, r.Kin, r.Rsi, r.Td, r.Acted, r.Reason, r.AINote, created})
 		}
 		if _, err := db.bulkUpsert("signals",
-			[]string{"inst_id", "bar", "ts", "close", "mask", "score", "hit_list",
+			[]string{"inst_id", "bar", "ts", "close", "mask", "score", "rise_pct", "hit_list",
 				"pot", "fri", "kin", "rsi", "td", "acted", "reason", "ai_note", "created_at"},
 			args, nil); err != nil {
 			return err

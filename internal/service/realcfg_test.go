@@ -113,14 +113,16 @@ func TestRealConfig_TenPhaseValues(t *testing.T) {
 		t.Fatalf("真源配置解析失败：%v", err)
 	}
 
-	// —— ③ 开仓闸门：冷却下线、改成持仓数量（用户原话「持仓数量要求<30」）——
+	// —— ③ 开仓闸门：冷却下线、改成持仓数量 ——
+	//   十期口径是 30；用户后来在管理台把上限调到 80（真源为准），
+	//   二十一期把断言同步到 80 —— 真源漂移要改测试而不是改回配置。
 	if cfg.Entry.CooldownBars != 0 {
 		t.Errorf("十期：entry.cooldown_bars 应为 0（冷却已删除），实际 %d —— "+
 			"非 0 会让 trader.go 重新拦「冷却中（距上次开仓不足 N 根）」",
 			cfg.Entry.CooldownBars)
 	}
-	if cfg.Entry.MaxConcurrentPositions != 30 {
-		t.Errorf("十期：entry.max_concurrent_positions 应为 30，实际 %d",
+	if cfg.Entry.MaxConcurrentPositions != 80 {
+		t.Errorf("持仓数量上限应为 80（用户在管理台调整后的真源值），实际 %d",
 			cfg.Entry.MaxConcurrentPositions)
 	}
 

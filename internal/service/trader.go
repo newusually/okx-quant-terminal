@@ -296,6 +296,7 @@ func engineRunBars(bars []string) error {
 				rows = append(rows, repo.EngineSignalRow{
 					InstID: s.InstID, Bar: s.Bar, Ts: s.Ts, Close: s.Close,
 					Mask: s.Mask, Score: s.Score, HitList: s.HitList,
+					RisePct: s.RisePct,
 					Pot: s.Pot, Fri: s.Fri, Kin: s.Kin, Rsi: s.Rsi, Td: s.Td,
 					CreatedAt: nowMs,
 				})

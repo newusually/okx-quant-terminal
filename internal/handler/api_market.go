@@ -606,10 +606,14 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 					continue // 同一根重复
 				}
 				lastSigTs = sg.Ts
+				// ★ 二十一期（用户口径）：「把共振几个数字写在买入信号的下面要写数字，
+				//    并且标记下跌多少百分比」—— 文字直接挂在箭头下方，
+				//    risePct 单独下发，悬浮框/明细里也能用。
 				m := map[string]any{
 					"time": snap(sg.Ts), "position": "belowBar", "shape": "arrowUp",
-					"color": "#fcd535", "text": "🚀", "size": 2,
+					"color": "#fcd535", "text": fmt.Sprintf("🚀%d %+.2f%%", sg.Score, sg.RisePct), "size": 2,
 					"kind": "signal", "price": sg.Close, "score": sg.Score,
+					"risePct": sg.RisePct,
 					"hitList": sg.HitList, "reason": sg.Reason, "ts": sg.Ts,
 				}
 				if sg.Acted == 0 {

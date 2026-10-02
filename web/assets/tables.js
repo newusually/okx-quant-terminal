@@ -265,20 +265,8 @@ async function setScope(scope) {
   await loadInstruments();
 }
 
-// openNQ 打开 NQ 只读板块的详细 K 线图（纳斯达克100，只展示不交易）。
-//
-// 先切到「被排除」范围：NQ 是 tradeable=0，默认的「可交易」列表里没有它，
-// 不切的话会出现「图切过去了、左边列表里却找不到它高亮」的割裂感。
-async function openNQ() {
-  const ID = 'NQ-INDEX';
-  await setScope('excluded');
-  if (!(state.insts || []).some((x) => x.instId === ID)) {
-    // 首次启动时外部数据可能还没同步进来 —— 给个明确提示，别静默什么都不发生
-    const cnt = $('instCount');
-    if (cnt) cnt.textContent = 'NQ 数据同步中，稍候刷新…';
-  }
-  await selectInst(ID);
-}
+// openNQ —— 二十一期已下线（2026-10-03 用户口径「取消NQ所有东西 包括并且
+// 删除NQ按钮 数据等页面还有信号」）。入口按钮与监听一并移除。
 
 function bindEvents() {
   $('instSearch').addEventListener('input', renderInstList);
@@ -289,9 +277,6 @@ function bindEvents() {
     if (!btn) return;
     await setScope(btn.dataset.scope);
   });
-
-  // ★ NQ 只读板块快捷入口：一键切到纳斯达克100 的详细 K 线图
-  $('nqEntry').addEventListener('click', () => { openNQ(); });
 
   // ★ 十四期：列表排序（默认 / 涨幅 / 金额）
   $('sortGroup').addEventListener('click', (e) => {

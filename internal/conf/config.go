@@ -578,14 +578,15 @@ func defaultConfig() *Config {
 		Enabled:  true,
 		DryRun:   true,
 		OrderVia: "go",
-		Bar:      "15m",
+		Bar:      "5m",
 		// ★ 2026-10-01 二期：1m/3m/5m 重新上线（用户口径「选项卡重新生成并补充数据」）。
 		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威，
 		//   这里只是「配置块缺失」时的兜底。
 		// ★ 2026-10-02 四期：1m 下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）。
+		// ★ 2026-10-03 二十一期：15m 下线（用户「删除15分钟K线图数据，补充3m数据到30天」）。
 		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威。
-		BarsEnabled:       []string{"3m", "5m", "15m"},
-		SignalBars:        []string{"3m", "5m", "15m"},
+		BarsEnabled:       []string{"3m", "5m"},
+		SignalBars:        []string{"3m", "5m"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -612,7 +613,10 @@ func defaultConfig() *Config {
 		//   （三期曾写 4 来表达「> 3」，那是当时「8 个共振中 4 个及以上」的口径。）
 		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
 		//     3 的把关交给下面的 min_bar_rise_pct（六期起：触发那根必须真跌 < -0.7%）。
-		ScoreThreshold:    3,
+		// ★ 2026-10-03 二十一期：3 → **4**（用户口径「共振必须大于3」——严格大于，
+		//   即 Score ∈ {4,5,6,7,8}；判定仍是 >=，写 4 等效于 > 3）。
+		//   ⚠ 真源在 configs/okx_strategy.json（当前同样 4），这里只是兜底值。
+		ScoreThreshold:    4,
 		ScoreThresholdMap: map[string]int{},
 		// ★ 2026-10-02 十三期：只读板块（NQ）**单独一套**买卖信号口径。
 		//   兜底值必须与 configs/okx_strategy.json 同口径（4 / 0 = 共振≥4 且收阴），

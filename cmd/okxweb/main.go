@@ -736,19 +736,14 @@ func runApp(ctx context.Context) error {
 	// upsert 进 trade 表，历史面板才真的「有东西看」。
 	service.StartOKXPositionsSync(ctx)
 
-	// ---- 4.76 NQ（纳斯达克100）只读行情同步 ----
+	// ---- 4.76 NQ（纳斯达克100）只读行情同步 —— ★ 二十一期已下线 ★
 	//
-	// 网页上多一个「只能看、不能买」的板块，数据来自外部源（Dukascopy）：
-	//   · 拉最近 30 天 1 分钟数据 → 聚合 3m/5m/15m → 写 kline 表（与 OKX 同表同结构）
-	//   · 给它**单独**跑信号回算：它 tradeable=0，不会被 RunSignalBackfillOnce
-	//     扫到（那个只遍历 TradeableInstIDs），所以必须自己来一遍
-	//   · 永不进入下单链路 —— 判据只有一处：service.ReadonlyInstIDs
-	//
-	// ⚠ Dukascopy 限流极硬（连续请求会进惩罚冷却，所有请求挂住），
-	//   所以是「按缺口补 + 单轮限量 8 天 + 失败即中止本轮」，多轮收敛。
-	service.StartNQSync(ctx, db, func(format string, args ...any) {
-		logx.Logf("INFO", "[NQ] "+format, args...)
-	})
+	// 2026-10-03 用户口径：「取消NQ所有东西 包括并且删除NQ按钮 数据等页面还有信号」。
+	// StartNQSync（Dukascopy 历史）与 StartNQIntraday（Yahoo ^NDX 当天）两个启动项
+	// 都已摘除 —— 不停同步的话，删掉的 NQ-INDEX 数据会被下一轮重新写回来。
+	// 存量数据（kline / signals / inst / signal_scan_state 里的 NQ-INDEX）已在
+	// 本次换壳停机窗口内手工清库。代码本体（dukascopy.go / nq_intraday.go）暂留
+	// 不删，方便日后想恢复时把这两个启动项加回来即可。
 
 	// ---- 4.8 自动维护程序（月度任务 + 年度任务）----
 	//

@@ -183,22 +183,24 @@ func TestAddonRiseBarDefaultsToAuto(t *testing.T) {
 	}
 }
 
-// TestKlineRetainDefaultsTo10Days K 线保留窗口默认 10 天（用户口径
-// 「只能查询保存最近 10 天数据，不能多，多出来就删除」）。
-func TestKlineRetainDefaultsTo10Days(t *testing.T) {
+// TestKlineRetainDefaultsTo30Days K 线保留窗口默认 30 天。
+//
+// ★ 2026-10-03 同步：二十期已把口径 10 → 30（用户「补充30天数据」），
+//   本测试是当时的守门测试，断言随口径一起更新（记录表仍是独立的 30 天）。
+func TestKlineRetainDefaultsTo30Days(t *testing.T) {
 	d := defaultConfig()
-	if d.Store == nil || d.Store.KlineRetainDays != 10 {
-		t.Fatalf("默认 kline_retain_days 应为 10，实际 %+v", d.Store)
+	if d.Store == nil || d.Store.KlineRetainDays != 30 {
+		t.Fatalf("默认 kline_retain_days 应为 30，实际 %+v", d.Store)
 	}
 	// 记录表仍是独立的 30 天红线，不能被顺手改掉
 	if d.Store.RetainDays != 30 {
 		t.Fatalf("记录表 retain_days 应为 30（与 K 线分开），实际 %d", d.Store.RetainDays)
 	}
-	// KlineRetainDays 没写时兜底 10；写了就用写的
+	// KlineRetainDays 没写时兜底 30；写了就用写的
 	c := &Config{Store: &StoreCfg{KlineRetainDays: 0, KeepKlineDays: 0}}
 	fillDefaults(c)
-	if c.Store.KlineRetainDays != 10 {
-		t.Fatalf("kline_retain_days 缺失时应兜底 10，实际 %d", c.Store.KlineRetainDays)
+	if c.Store.KlineRetainDays != 30 {
+		t.Fatalf("kline_retain_days 缺失时应兜底 30，实际 %d", c.Store.KlineRetainDays)
 	}
 	// 老配置兼容：只写了废弃的 keep_kline_days 时沿用它（这是有意保留的降级路径，
 	// 因为老配置文件里可能只有这一个键）。
@@ -208,9 +210,9 @@ func TestKlineRetainDefaultsTo10Days(t *testing.T) {
 		t.Fatalf("老键 keep_kline_days 应被沿用为 30，实际 %d", c.Store.KlineRetainDays)
 	}
 	// 两者都写了 → 新键优先
-	c = &Config{Store: &StoreCfg{KlineRetainDays: 10, KeepKlineDays: 30}}
+	c = &Config{Store: &StoreCfg{KlineRetainDays: 14, KeepKlineDays: 30}}
 	fillDefaults(c)
-	if c.Store.KlineRetainDays != 10 {
+	if c.Store.KlineRetainDays != 14 {
 		t.Fatalf("新键应优先于老键，实际 %d", c.Store.KlineRetainDays)
 	}
 	c = &Config{Store: &StoreCfg{KlineRetainDays: 14}}
@@ -220,13 +222,14 @@ func TestKlineRetainDefaultsTo10Days(t *testing.T) {
 	}
 }
 
-// TestBarsDefaultsCoverThreePeriods 默认周期名单 = 3m/5m/15m，三个都参与扫描开仓。
+// TestBarsDefaultsCoverTwoPeriods 默认周期名单 = 3m/5m，两个都参与扫描开仓。
 //
-// ★ 2026-10-02 四期：1m 下线（用户口径「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）。
-// 这里同时**反向断言 1m 不在名单里** —— 下线这类改动最容易只改一半：
-// 只要还有一处留着 1m，扫描 / 回补 / 前端选项卡就会把它带回来。
-func TestBarsDefaultsCoverThreePeriods(t *testing.T) {
-	want := []string{"3m", "5m", "15m"}
+// ★ 2026-10-02 四期：1m 下线；★ 2026-10-03 二十一期：15m 下线
+// （用户口径「所有数字货币合约都给我删除掉15分钟K线图数据，并且补充3m数据到30天」）。
+// 这里同时**反向断言已下线周期不在名单里** —— 下线这类改动最容易只改一半：
+// 只要还有一处留着，扫描 / 回补 / 前端选项卡就会把它带回来。
+func TestBarsDefaultsCoverTwoPeriods(t *testing.T) {
+	want := []string{"3m", "5m"}
 	d := defaultConfig()
 	if len(d.BarsEnabled) != len(want) {
 		t.Fatalf("默认 bars_enabled 应为 %v，实际 %v", want, d.BarsEnabled)
@@ -244,40 +247,41 @@ func TestBarsDefaultsCoverThreePeriods(t *testing.T) {
 			t.Fatalf("model.EnabledBars 里应当包含 %q", b)
 		}
 	}
-	// 1m 必须彻底出局（配置默认 + 全局白名单，两处都算）
-	if d.BarEnabled("1m") {
-		t.Fatal("1m 已下线，不应再出现在 bars_enabled 默认值里")
+	// 1m / 15m 必须彻底出局（配置默认 + 全局白名单，两处都算）
+	for _, off := range []string{"1m", "15m"} {
+		if d.BarEnabled(off) {
+			t.Fatalf("%s 已下线，不应再出现在 bars_enabled 默认值里", off)
+		}
+		if model.BarEnabled(off) {
+			t.Fatalf("%s 已下线，不应再出现在 model.EnabledBars 里", off)
+		}
 	}
-	if model.BarEnabled("1m") {
-		t.Fatal("1m 已下线，不应再出现在 model.EnabledBars 里")
-	}
-	// 没写这个键时也走默认（3 个周期）
+	// 没写这个键时也走默认（2 个周期）
 	c := &Config{}
 	fillDefaults(c)
 	if len(c.BarsEnabled) != len(want) {
-		t.Fatalf("bars_enabled 缺失时应兜底 3 个周期，实际 %v", c.BarsEnabled)
+		t.Fatalf("bars_enabled 缺失时应兜底 2 个周期，实际 %v", c.BarsEnabled)
 	}
 }
 
-// TestScoreThresholdDefaultsToThree 买入/加仓阈值默认 3 —— 就是用户说的「Score >= 3」。
-//
-// 判定处是 `score >= score_threshold`，而 Score 是 0~8 的整数，
-// 所以写 3 即字面语义「≥ 3」，判定符号一个字都不用动。
-// （三期时写的是 4、用来表达「> 3」；五期口径直接给到 3。）
-func TestScoreThresholdDefaultsToThree(t *testing.T) {
+// TestScoreThresholdDefaultsToFour 买入阈值默认 4 —— 用户口径「共振必须大于3」
+// （二十一期，2026-10-03）。判定处是 `score >= score_threshold`，Score 是 0~8 的整数，
+// 写 4 即字面语义「Score ∈ {4..8}」= 严格大于 3。
+// （沿革：三期写 4 表达「>3」→ 五期 3 → 后调 5 → 二十一期回到 4。）
+func TestScoreThresholdDefaultsToFour(t *testing.T) {
 	d := defaultConfig()
-	if d.ScoreThreshold != 3 {
-		t.Fatalf("默认 score_threshold 应为 3（Score >= 3），实际 %d", d.ScoreThreshold)
+	if d.ScoreThreshold != 4 {
+		t.Fatalf("默认 score_threshold 应为 4（共振 > 3），实际 %d", d.ScoreThreshold)
 	}
 	// 兜底里不给 BTC/ETH 单独放宽 —— 用户要的是「全市场同一个阈值」
 	if len(d.ScoreThresholdMap) != 0 {
 		t.Fatalf("默认 score_threshold_map 应为空，实际 %v", d.ScoreThresholdMap)
 	}
-	// 没写阈值时走 3；显式写的仍然生效
+	// 没写阈值时走 4；显式写的仍然生效
 	c := &Config{}
 	fillDefaults(c)
-	if c.ThresholdFor("BTC-USDT-SWAP") != 3 {
-		t.Fatalf("阈值缺失时应为 3，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
+	if c.ThresholdFor("BTC-USDT-SWAP") != 4 {
+		t.Fatalf("阈值缺失时应为 4，实际 %d", c.ThresholdFor("BTC-USDT-SWAP"))
 	}
 	c = &Config{ScoreThreshold: 6}
 	fillDefaults(c)

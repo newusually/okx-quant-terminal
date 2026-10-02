@@ -237,6 +237,7 @@ var schemaStmts = []string{
 		close   DOUBLE   DEFAULT 0,
 		mask    INT      DEFAULT 0,
 		score   INT      DEFAULT 0,
+		rise_pct DOUBLE DEFAULT 0,
 		hit_list VARCHAR(255) DEFAULT '',
 		pot DOUBLE DEFAULT 0, fri DOUBLE DEFAULT 0, kin DOUBLE DEFAULT 0,
 		rsi DOUBLE DEFAULT 0, td INT DEFAULT 0,
@@ -521,6 +522,9 @@ func (d *DB) migrate() error {
 		// 同一个仓位反复同步只会 UPDATE，不会插出重复行。
 		// 引擎自己下的单拿不到 posId，先留空，等同步时按「合约 + 开仓时间」认领。
 		{"trade", "pos_id", "VARCHAR(64) DEFAULT '' AFTER ord_id"},
+		// rise_pct：信号那根 K 线的涨跌幅 (c-o)/o*100（二十一期，用户口径
+		// 「标记下跌多少百分比 跌幅告诉我 记录在数据库」）。存量行由 SQL 回填。
+		{"signals", "rise_pct", "DOUBLE DEFAULT 0 AFTER score"},
 	}
 	for _, m := range migs {
 		if err := d.ensureColumn(m.table, m.col, m.def); err != nil {

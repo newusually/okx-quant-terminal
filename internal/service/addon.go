@@ -173,8 +173,8 @@ func runAddons(cfg *conf.Config, cli *OKXClient, store *repo.Store, kdb KlineRea
 // addonBarFor 决定某个仓位用哪个周期做加仓判定。
 //
 //	riseBar = "auto"（或空）→ 用该仓位自己的周期 instBar；老仓 instBar 为空 → cfgBar
-//	riseBar 写了具体周期   → 用它（想「不管什么周期开的都按 15m 加」就写死 15m）
-//	最后兜底             → "15m"
+//	riseBar 写了具体周期   → 用它（下线周期会被白名单闸兜回）
+//	最后兜底             → 白名单最后一个（二十一期起 = "5m"）
 //
 // 抽成纯函数是为了能被穷举单测 —— 这个映射一旦走岔，
 // 「加仓条件与买入一致」就会变成「拿 A 周期的信号加 B 周期的仓」，
@@ -193,7 +193,13 @@ func addonBarFor(riseBar, cfgBar, instBar string) string {
 		bar = rb
 	}
 	if bar == "" {
-		bar = "15m"
+		// ★ 二十一期：15m 已下线，这里的"最后兜底"改成白名单最后一个（5m）。
+		//   写死 15m 也能被下面的白名单闸兜回，但直接写对省一次绕路。
+		if n := len(model.EnabledBars); n > 0 {
+			bar = model.EnabledBars[n-1]
+		} else {
+			bar = "5m"
+		}
 	}
 	// ★ 2026-10-02 四期：仓位的周期可能**已经下线** ★
 	//

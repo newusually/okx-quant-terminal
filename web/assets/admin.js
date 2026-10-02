@@ -448,7 +448,7 @@
       desc: '8 个因子里命中多少项才买（判定：score ≥ 门槛，0~8）。取消勾选写 0 = 停买。',
       type: 'number', step: '1',
     });
-    rowScore.__input.value = b.score_threshold != null ? b.score_threshold : 3;
+    rowScore.__input.value = b.score_threshold != null ? b.score_threshold : 4;
     rowScore.__cb.checked = (b.score_threshold || 0) > 0;
     rowScore.__sync();
 
@@ -672,12 +672,11 @@
 
     var rowRiseBar = selRow({
       id: 'addonRiseBar', title: '加仓判定周期',
-      desc: 'auto = 用该仓位自己开仓时的周期（15m 开的按 15m 判）。',
+      desc: 'auto = 用该仓位自己开仓时的周期（3m/5m）。15m 已下线（二十一期），老仓自动退回 5m。',
       options: [
         { v: 'auto', t: 'auto 跟随仓位周期' },
         { v: '3m', t: '3 分钟' },
         { v: '5m', t: '5 分钟' },
-        { v: '15m', t: '15 分钟' },
       ],
     });
     rowRiseBar.__input.value = a.rise_bar || 'auto';

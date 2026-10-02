@@ -161,14 +161,14 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	// 不与其它调用共享同一块内存（指针字段被就地改写时会互相污染）。
 	minBarRiseDefault := conf.DefaultMinBarRisePct
 	def := &StrategyConfig{
-		Enabled: true, DryRun: true, Bar: "15m",
-		// ★ 四期：1m 下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」），
+		Enabled: true, DryRun: true, Bar: "5m",
+		// ★ 四期：1m 下线；★ 二十一期（2026-10-03）：15m 下线（用户「删除15分钟K线图数据」），
 		//   与 model.EnabledBars 保持一致 —— 这份是给前端展示用的第二份 schema，
-		//   兜底值必须一起改，否则配置读不到时选项卡里会冒出 1m。
-		BarsEnabled: []string{"3m", "5m", "15m"},
-		SignalBars:  []string{"3m", "5m", "15m"},
-		// ★ 2026-10-02 五期：阈值 4 → 3（用户口径「Score >= 3 且 RisePct < -0.7」，涨幅方向六期补全）
-		ScoreThreshold:    3,
+		//   兜底值必须一起改，否则配置读不到时选项卡里会冒出下线的周期。
+		BarsEnabled: []string{"3m", "5m"},
+		SignalBars:  []string{"3m", "5m"},
+		// ★ 2026-10-03 二十一期：阈值 3 → 4（用户口径「共振必须大于3」= Score ≥ 4）
+		ScoreThreshold:    4,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		// ★ 三期：品类过滤默认关闭（「取消美股 etf 不做的功能」）
 		ExcludeStockETF: false, ExcludeNewListingDays: 30, ExcludeDelisting: true,
@@ -222,7 +222,7 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		cfg.Entry.Leverage = def.Entry.Leverage
 	}
 	if cfg.Bar == "" {
-		cfg.Bar = "15m"
+		cfg.Bar = "5m" // 二十一期：15m 下线，兜底改为白名单内的 5m
 	}
 	// —— entry 段归一化：逐条与 conf.fillDefaults 对齐 ——
 	//

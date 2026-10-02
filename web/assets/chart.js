@@ -291,7 +291,10 @@ function showTip(param, k) {
     if (m.kind === 'open') {
       return `<div class="tip-mk mk-buy">🚀 买入 ${fmtPrice(m.price)} · ${amtOf(m.margin, 3)}${m.leverage ? ' · ' + m.leverage + 'x' : ''}</div>`;
     }
-    return `<div class="tip-mk mk-sig">🚀 买入信号 ${m.score}/8${m.hitList ? ' · ' + esc(m.hitList) : ''}</div>`;
+    // ★ 二十一期：信号悬浮框带共振数与该根跌幅（risePct 由 /api/mark 下发）
+    const rp = (typeof m.risePct === 'number' && isFinite(m.risePct))
+      ? ` · 跌幅 ${m.risePct.toFixed(2)}%` : '';
+    return `<div class="tip-mk mk-sig">🚀 买入信号 共振 ${m.score}/8${rp}${m.hitList ? ' · ' + esc(m.hitList) : ''}</div>`;
   }).join('');
 
   el.innerHTML =
@@ -381,8 +384,12 @@ function paintMarkers() {
     sparse = spacing < 14;
   } catch (_) { sparse = true; }
 
+  // ★ 二十一期：信号 / 仅信号两种标记的 text 是「🚀共振数 跌幅%」（用户要求
+  //   「共振数字写在买入信号下面 + 标记跌幅」），文字很短（<10px×8），
+  //   密集时也保留 —— 被剥掉的只是成交金额那种长标签。
   const list = sparse
-    ? state.markers.map((m) => Object.assign({}, m, { text: undefined }))
+    ? state.markers.map((m) => Object.assign({}, m,
+        { text: (m.kind === 'signal' || m.kind === 'signal_only') ? m.text : undefined }))
     : state.markers;
   state.candle.setMarkers(list);
 }

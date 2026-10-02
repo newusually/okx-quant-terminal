@@ -36,9 +36,7 @@ let klineTimer = null;
 async function selectInst(instId) {
   if (!instId) return;
   state.curInst = instId;
-  // NQ 快捷入口的高亮跟着当前合约走
-  const nqBtn = $('nqEntry');
-  if (nqBtn) nqBtn.classList.toggle('on', isReadonlyInst(instId));
+  // （NQ 快捷入口已随 NQ 板块下线移除，二十一期。）
   // 标题立刻刷 —— 不等网络。用户点了哪张表里的合约名，左边标题马上就得变。
   renderChartHead();
   // 左边合约列表 / 右侧合约信息只是「顺带刷新」，它们失败绝不能挡住画图。

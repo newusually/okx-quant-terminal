@@ -285,12 +285,13 @@ func TestNQRuleFingerprint_DistinguishesRules(t *testing.T) {
 	}
 }
 
-// TestRealConfig_NQSignalRule 直接读**真源**与示例配置，断言磁盘上的值
-// 就是代码期望的那套。
+// TestRealConfig_NQSignalRule —— ★ 二十一期改写（2026-10-03）★
 //
-// 为什么必须查磁盘：单测全绿但真源 JSON 里还是旧值，是本项目的已知盲区
-// （见 realcfg_test.go 的同名做法）。NQ 这块尤其要查 —— 它的失效形态是
-// 「一条信号都没有」，不报错、不告警，只能靠对配置数值的断言拦住。
+// 原断言是「真源里必须存在 nq_signal 块」。二十一期 NQ 板块整体下线
+// （用户口径「取消NQ所有东西 包括并且删除NQ按钮 数据等页面还有信号」），
+// 真源与示例里的 nq_signal 块已删、启动项已摘。
+// 这条守门测试随之反转：**断言 nq_signal 不再出现在配置里** ——
+// 防止有人把废弃块抄回来，让已删除的 NQ 数据路径悄悄复活。
 func TestRealConfig_NQSignalRule(t *testing.T) {
 	for _, rel := range []string{
 		filepath.Join("..", "..", "configs", "okx_strategy.json"),
@@ -304,23 +305,9 @@ func TestRealConfig_NQSignalRule(t *testing.T) {
 		if err := json.Unmarshal(conf.StripJSONComments(raw), &cfg); err != nil {
 			t.Fatalf("%s 解析失败：%v", rel, err)
 		}
-		n := cfg.NQSignal
-		if n == nil {
-			t.Fatalf("%s 缺少 nq_signal 块 —— NQ 会退回全市场的 -0.7%% 门槛，永不触发", rel)
-		}
-		if !n.IsEnabled() {
-			t.Fatalf("%s 里 nq_signal 未启用（enabled 必须是 true 或干脆不写）", rel)
-		}
-		if n.ScoreThreshold != 4 {
-			t.Errorf("%s：nq_signal.score_threshold 应为 4（共振 4+），实际 %d", rel, n.ScoreThreshold)
-		}
-		if n.MaxRisePct != 0 {
-			t.Errorf("%s：nq_signal.max_rise_pct 应为 0（只要收阴），实际 %v", rel, n.MaxRisePct)
-		}
-		// 反面对照：全市场门槛必须是 -0.7，说明 NQ 确实是"单独一套"而不是改了全局
-		if got := cfg.MinBarRisePct(); got != -0.7 {
-			t.Errorf("%s：全市场 min_bar_rise_pct 被改成了 %v（应为 -0.7）——"+
-				"NQ 的口径必须只影响 NQ，不能动全市场", rel, got)
+		if cfg.NQSignal != nil {
+			t.Fatalf("%s 不应再包含 nq_signal 块 —— NQ 板块二十一期已下线，"+
+				"留着它会让下线的口径看起来还活着", rel)
 		}
 	}
 }

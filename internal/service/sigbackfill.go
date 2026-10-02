@@ -342,6 +342,7 @@ func backfillSignals(cfg *conf.Config, db *repo.DB, instID, bar string, rule Rea
 		batch = append(batch, repo.EngineSignalRow{
 			InstID: instID, Bar: bar, Ts: sig.Ts, Close: sig.Close,
 			Mask: sig.Mask, Score: sig.Score, HitList: sig.HitList,
+			RisePct: nan0(sig.RisePct),
 			Pot: nan0(sig.Pot), Fri: nan0(sig.Fri), Kin: nan0(sig.Kin),
 			Rsi: nan0(sig.Rsi), Td: sig.Td,
 			Acted: 0, CreatedAt: nowMs,

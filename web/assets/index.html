@@ -53,15 +53,9 @@
       <span>合约列表</span>
       <span class="muted" id="instCount">0</span>
     </div>
-    <!-- ★ NQ 只读板块快捷入口 ★
-         纳斯达克100 指数（数据来自外部源），只展示买卖信号，**不可交易**。
-         它 tradeable=0，不进「可交易」列表 —— 这个按钮是它的专属入口，
-         点一下直接切到它的详细 K 线图（指标 / 画图 / 信号标记全都有）。 -->
-    <button class="nq-entry" id="nqEntry" title="纳斯达克100 指数（只读板块 · 不可交易）">
-      <span class="nq-k">NQ</span>
-      <span class="nq-t">纳斯达克100</span>
-      <span class="nq-ro">只读</span>
-    </button>
+    <!-- ★ NQ 只读板块快捷入口 —— 二十一期已下线（用户口径「取消NQ所有东西
+         包括并且删除NQ按钮 数据等页面还有信号」）。按钮已删，
+         后端同步与存量数据一并清掉，详见 cmd/okxweb/main.go 4.76 注释。 -->
     <div class="scope-group" id="scopeGroup">
       <button class="scope active" data-scope="tradeable">可交易</button>
       <button class="scope" data-scope="excluded">被排除</button>

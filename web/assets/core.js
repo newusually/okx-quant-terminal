@@ -11,12 +11,12 @@ const state = {
   insts: [],
   tickers: {},          // instId -> ticker
   curInst: '',
-  curBar: '15m',
+  curBar: '5m',
   days: 30,
-  // ★ 2026-10-02 四期：1m 下线，只剩 3m/5m/15m（选项卡由 /api/state 的
+  // ★ 2026-10-02 四期：1m 下线；★ 2026-10-03 二十一期：15m 下线（用户口径
+  //   「删除15分钟K线图数据」），只剩 3m/5m（选项卡由 /api/state 的
   //   bars 字段渲染，这里只是首屏兜底 —— 真源是 model.EnabledBars）。
-  //   三个周期都参与扫描开仓，K 线只保留最近 10 天（每天凌晨清一次）。
-  bars: ['3m', '5m', '15m'],
+  bars: ['3m', '5m'],
   marginText: '',
   scope: 'tradeable',   // tradeable | excluded | all —— 合约列表只看哪种
   sortKey: '',          // '' 默认 | 'chg' 涨幅降序 | 'vol' 成交额降序（十四期）
@@ -160,13 +160,12 @@ function renderPager(key, total, onGo) {
 // 各周期毫秒数（收盘倒计时、实时价能否套用最后一根都靠它）
 const BAR_MS = { '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3 };
 
-/* ★ NQ 只读板块 ★
- * 合约 id → 展示名。这类合约的数据来自外部源（不是 OKX），
- * 既没有行情快照、也不能下单。
- * 前端只在**显示**层面做兜底；「不可交易」的拦截在后端
- * （service.ReadonlyInstIDs，到底层下单出口 PlaceOrder 都拦了一道），
- * 前端不做也不该做安全判断。 */
-const READONLY_INSTS = { 'NQ-INDEX': 'NQ / 纳斯达克100' };
+/* ★ NQ 只读板块 —— 二十一期已下线 ★
+ * 2026-10-03 用户口径「取消NQ所有东西」：NQ-INDEX 数据/信号/按钮全部移除，
+ * 后端同步（Dukascopy + Yahoo 盘中）也已摘除。这里把名单清空，
+ * isReadonlyInst 恒 false —— 合成行情、高亮等 NQ 分支全部自然失效，
+ * 相关兜底代码暂留不删，想恢复时把名字加回来即可。 */
+const READONLY_INSTS = {};
 const isReadonlyInst = (id) => Object.prototype.hasOwnProperty.call(READONLY_INSTS, id);
 
 // 币安配色：涨绿跌红

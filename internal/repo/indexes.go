@@ -53,6 +53,11 @@ var indexPlan = []idxDef{
 	{Table: "signals", Name: "ix_sig_inst_bar_ts", Cols: []string{"inst_id", "bar", "ts"},
 		Note: `SELECT ... FROM signals WHERE inst_id=? AND bar=? ORDER BY ts`},
 
+	// 二十一期：按周期的全局信号统计 / 回补前后审计（用户「可以做索引 这样快」）。
+	//   SELECT ... FROM signals WHERE bar=? AND ts BETWEEN ? AND ?
+	{Table: "signals", Name: "ix_sig_bar_ts", Cols: []string{"bar", "ts"},
+		Note: `WHERE bar=? AND ts BETWEEN ? AND ?（按周期跨合约统计）`},
+
 	// ------------------------------------------------------------------ trade
 	// LoadOpenPositions：SELECT ... FROM trade WHERE status='open' ORDER BY open_ts
 	// 已有 ix_trade_status 是 (status, inst_id)，第二列不是排序列，

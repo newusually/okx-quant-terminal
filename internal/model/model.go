@@ -21,6 +21,14 @@ import "encoding/json"
 // ★ 2026-10-02 四期：1m 下线，只留 3m / 5m / 15m ★
 // 用户口径：「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」。
 //
+// ★ 2026-10-03 二十一期：15m 下线，只留 3m / 5m ★
+// 用户口径：「所有数字货币合约都给我删除掉15分钟K线图数据，并且补充3m数据到30天」。
+// 15m 从白名单移除后：
+//   - 采集 / 回补 / 信号回算 / 前端下拉全部自动不再碰 15m；
+//   - repo.CleanupKlines 会把不在名单里的周期整段删掉（存量 15m 数据自动清零）；
+//   - 老仓位的 trade.bar 若是 15m，加仓判定由 addonBarFor 退回白名单最后一位（5m），
+//     与 1m 下线时同一套兜底，不会失效。
+//
 // 这次下线的直接动因就是**行数成本**：1m 一直是 kline 表里最大的一块
 // （479 合约 × 1440 根/天 × 10 天 ≈ 430 万行，独占全表约 2/3），
 // 而它在策略里的边际价值最低 —— 1m 的噪音最大、开出来的仓最容易
@@ -47,7 +55,7 @@ import "encoding/json"
 // **仓位自己的周期**（trade.bar）。老仓的 bar 可能是已经下线的 1m，
 // 那份 K 线被 CleanupKlines 删掉后就再也取不到 → 加仓永久失效。
 // 所以 service.addonBarFor 里必须再判一次 model.BarEnabled，不在名单就退回主周期。
-var EnabledBars = []string{"3m", "5m", "15m"}
+var EnabledBars = []string{"3m", "5m"}
 
 // BarEnabled 该周期是否在当前白名单里（大小写、空白都不敏感）
 func BarEnabled(bar string) bool {
@@ -362,6 +370,7 @@ type EngineSignalRow struct {
 	Mask      int     `json:"mask"`
 	Score     int     `json:"score"`
 	HitList   string  `json:"hit_list"`
+	RisePct   float64 `json:"rise_pct"` // ★ 二十一期：该根涨跌幅 (c-o)/o*100，图上标「共振 N / 跌幅」用
 	Pot       float64 `json:"pot"`
 	Fri       float64 `json:"fri"`
 	Kin       float64 `json:"kin"`
