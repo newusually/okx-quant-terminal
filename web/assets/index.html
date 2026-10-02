@@ -25,6 +25,12 @@
     <div class="stat"><label>总盈亏</label><b id="stPnl">--</b><i class="sub" id="stRoi">--</i></div>
     <div class="stat"><label>今日盈亏</label><b id="stTodayPnl">--</b></div>
     <div class="stat"><label>持仓</label><b id="stPos">0</b></div>
+    <!-- 十一期：持仓金额（用户原话「持仓多少钱 右上角不显示 要求显示」）。
+         主数字 = 持仓占用保证金合计，小字 = 名义价值合计（杠杆放大后的仓位规模）。
+         两个数都从 /api/positions 的行里现算，跟表格用同一份真实数据。 -->
+    <div class="stat" title="持仓占用保证金合计（小字为名义价值合计）">
+      <label>持仓金额</label><b id="stPosAmt">--</b><i class="sub" id="stPosAmtSub">--</i>
+    </div>
     <div class="stat"><label>胜率</label><b id="stWin">--</b><i class="sub" id="stWinSub">--</i></div>
     <div class="stat"><label>自动交易</label><b id="stLive" class="live-pill">--</b></div>
   </div>
@@ -58,28 +64,64 @@
 
   <!-- 中：图表 -->
   <section class="panel center">
+    <!-- ★ 十一期：图表头重排成两行 ★
+         原来是七个元素挤一行靠 flex-wrap 换行，周期按钮带 margin-left:auto，
+         一旦空间不够它就被挤到第二行的中间，右边还跟着指标/回补/刷新 ——
+         用户看到的就是「右上角的分钟线选项卡不见了」。
+         现在明确拆两行：第一行右侧固定放周期（3m/5m/15m），第二行放指标与按钮。 -->
     <div class="chart-head">
-      <div class="pair">
-        <span class="pair-name" id="pairName">--</span>
-        <span class="pair-inst muted" id="pairInst">请选择合约</span>
-      </div>
-      <div class="pair-price">
-        <b id="pairPrice">--</b>
-        <span id="pairChg" class="chg flat">--</span>
+      <div class="ch-row ch-main">
+        <div class="pair">
+          <span class="pair-name" id="pairName">--</span>
+          <span class="pair-inst muted" id="pairInst">请选择合约</span>
+        </div>
+        <div class="pair-price">
+          <b id="pairPrice">--</b>
+          <span id="pairChg" class="chg flat">--</span>
+        </div>
         <span class="countdown" id="barCountdown" title="本根 K 线收盘倒计时">--:--</span>
-      </div>
-      <div class="pair-ohlc muted" id="pairOhlc"></div>
 
-      <div class="tf-group" id="tfGroup"></div>
-
-      <div class="ind-group" id="indGroup">
-        <button class="ind active" data-ind="ma">MA</button>
-        <button class="ind active" data-ind="boll">BOLL</button>
-        <button class="ind active" data-ind="vol">VOL</button>
+        <!-- 周期切换：永远在第一行的最右（右上角），不再被其它按钮挤走 -->
+        <div class="tf-group" id="tfGroup"></div>
       </div>
 
-      <button class="btn" id="btnBackfill" title="回补该合约当前周期至少一个月的K线">回补一个月</button>
-      <button class="btn ghost" id="btnRefresh">刷新</button>
+      <div class="ch-row ch-sub">
+        <div class="pair-ohlc muted" id="pairOhlc"></div>
+
+        <div class="ind-group" id="indGroup">
+          <button class="ind active" data-ind="ma">MA</button>
+          <button class="ind active" data-ind="boll">BOLL</button>
+          <button class="ind active" data-ind="vol">VOL</button>
+        </div>
+
+        <!-- ★ 十一期：OKX 式画图工具（趋势线 / 水平线 / 矩形 / 画笔 / 橡皮擦）★
+             默认收起，点 ✏️ 展开。选中某个工具后，鼠标在图上按下即开始画；
+             橡皮擦模式下点中哪条删哪条；🗑 一次清空当前合约当前周期的所有画痕。 -->
+        <div class="draw-group" id="drawGroup">
+          <button class="draw-toggle" id="drawToggle" title="画图工具">✏️</button>
+          <div class="draw-bar hidden" id="drawBar">
+            <button class="draw-tool" data-tool="trend"   title="趋势线：在图上按住拖出一条线段">╱ 趋势线</button>
+            <button class="draw-tool" data-tool="hline"   title="水平线：点一下，画一条贯穿全图的水平线">─ 水平线</button>
+            <button class="draw-tool" data-tool="rect"    title="矩形：按住拖出一个框">▭ 矩形</button>
+            <button class="draw-tool" data-tool="brush"   title="画笔：按住自由绘制">✎ 画笔</button>
+            <button class="draw-tool" data-tool="erase"   title="橡皮擦：点中哪条删哪条">🧽 擦除</button>
+            <span class="draw-sep"></span>
+            <span class="draw-colors" id="drawColors">
+              <button class="draw-c sw-yellow"  data-c="#ffd54f" title="黄色"></button>
+              <button class="draw-c sw-cyan"    data-c="#4facfe" title="青色"></button>
+              <button class="draw-c sw-green"   data-c="#0ecb81" title="绿色"></button>
+              <button class="draw-c sw-red"     data-c="#f6465d" title="红色"></button>
+              <button class="draw-c sw-purple"  data-c="#b39dff" title="紫色"></button>
+            </span>
+            <span class="draw-sep"></span>
+            <button class="draw-tool" id="drawUndo" title="撤销最近一条">↶ 撤销</button>
+            <button class="draw-tool" id="drawClear" title="清空本合约本周期的所有画痕">🗑 清空</button>
+          </div>
+        </div>
+
+        <button class="btn" id="btnBackfill" title="回补该合约当前周期至少一个月的K线">回补一个月</button>
+        <button class="btn ghost" id="btnRefresh">刷新</button>
+      </div>
     </div>
 
     <div class="chart-box">
@@ -87,12 +129,21 @@
       <!-- 七期特效：流星雨画布（pointer-events:none，只负责好看） -->
       <canvas id="fxCanvas"></canvas>
 
+      <!-- ★ 十一期：画图叠加层 ★
+           平时 pointer-events:none —— 不挡图表的滚轮缩放 / 拖动平移；
+           只有选了画图工具才切成 auto，此时鼠标事件被这层接走，
+           图表自然就不会一边画线一边被拖动。 -->
+      <canvas id="drawCanvas"></canvas>
+
       <!-- 鼠标悬浮提示框：时间 / 开 / 收 / 高 / 低 + 涨跌幅 + 成交量 -->
       <div class="tip hidden" id="tip"></div>
 
-      <!-- 左上角图例：跟随十字光标实时刷新，和币安一致 -->
+      <!-- 左上角图例：跟随十字光标实时刷新，和币安一致。
+           左侧 ⠿ 是拖动手柄：按住可把整个图例拖到任意位置（记住位置），
+           双击手柄复位到左上角。 -->
       <div class="legend" id="legend">
         <div class="lg-row">
+          <span class="lg-grip" id="lgGrip" title="按住拖动图例 · 双击复位">⠿</span>
           <span class="lg-sym" id="lgSym">--</span>
           <span class="lg-tf" id="lgTf">--</span>
           <span class="lg-ohlc" id="lgOhlc"></span>

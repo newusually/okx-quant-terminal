@@ -54,35 +54,83 @@ func TestEntryLimitsNegativeNormalizedToZero(t *testing.T) {
 	}
 }
 
-// entry 块整个缺失时走默认值。默认值也必须是 0 ——
-// 否则「键名拼错 / 块被删掉」会让限制悄悄复活，正是这次要消灭的现象。
-func TestDefaultEntryLimitsAreUnlimited(t *testing.T) {
+// entry 块整个缺失时走默认值。
+//
+// ★ 十期口径变更（2026-10-02）★
+//
+//	用户要求「冷却条件全部删除，改成数量 就是持仓数量，持仓数量要求 <30 就行」。
+//	所以这里的期望值跟着变：
+//	  MaxConcurrentPositions   0 → **30**（有上限了，不再是"不限"）
+//	  DailyMaxEntries          保持 0（= 不限）
+//	  CooldownBars             30 → **0**（冷却取消）
+//
+// ⚠ 这个测试是「兜底值必须与 JSON 同口径」这条铁律的执行者：
+//
+//	它断言的是**默认构造器**的值，而 configs/okx_strategy.json 里写的
+//	必须是同一套数字。两边只要差一处，「配置读不到」时行为就悄悄变了 ——
+//	而且那种情况只在文件被删/损坏时才暴露，属于最难发现的失配。
+func TestDefaultEntryLimits(t *testing.T) {
 	d := defaultConfig()
 	if d.Entry == nil {
 		t.Fatal("默认配置里 entry 不应为 nil")
 	}
-	if d.Entry.MaxConcurrentPositions != 0 || d.Entry.DailyMaxEntries != 0 {
-		t.Fatalf("默认值必须是 0（不限），实际 %d / %d",
-			d.Entry.MaxConcurrentPositions, d.Entry.DailyMaxEntries)
+	if d.Entry.MaxConcurrentPositions != 30 {
+		t.Fatalf("默认 max_concurrent_positions 应为 30（十期口径），实际 %d", d.Entry.MaxConcurrentPositions)
+	}
+	if d.Entry.DailyMaxEntries != 0 {
+		t.Fatalf("默认 daily_max_entries 应为 0（不限），实际 %d", d.Entry.DailyMaxEntries)
+	}
+	if d.Entry.CooldownBars != 0 {
+		t.Fatalf("默认 cooldown_bars 应为 0（十期已取消冷却），实际 %d", d.Entry.CooldownBars)
 	}
 
-	// 连 entry 都没有的配置，走完归一化后也应当是不限。
+	// 连 entry 都没有的配置，走完归一化后也应当拿到同一套默认
 	c := &Config{}
 	fillDefaults(c)
-	if c.Entry.MaxConcurrentPositions != 0 || c.Entry.DailyMaxEntries != 0 {
-		t.Fatalf("entry 缺失时也应当不限，实际 %d / %d",
-			c.Entry.MaxConcurrentPositions, c.Entry.DailyMaxEntries)
+	if c.Entry.MaxConcurrentPositions != 30 || c.Entry.DailyMaxEntries != 0 || c.Entry.CooldownBars != 0 {
+		t.Fatalf("entry 缺失时应走同样的默认，实际 持仓上限 %d / 当日上限 %d / 冷却 %d",
+			c.Entry.MaxConcurrentPositions, c.Entry.DailyMaxEntries, c.Entry.CooldownBars)
 	}
 }
 
-// 冷却（cooldown_bars）这次没动，仍然是「同一合约 6 根内不重复开仓」。
-// 写这个断言是为了说明它是**刻意保留**的，不是漏改 ——
-// 它限制的是「同一合约反复开」，不是「总持仓数 / 总笔数」。
-func TestCooldownUnchanged(t *testing.T) {
-	c := &Config{Entry: &EntryCfg{CooldownBars: 6}}
+// 冷却（cooldown_bars）：★ 十期已**取消**（六期 6 → 九期 30 → 十期 0）★
+//
+// 用户口径（2026-10-02 十期）：「冷却条件全部删除，改成数量 就是持仓数量」。
+// 所以默认值归 0（= 不冷却），数量上的把关交给 max_concurrent_positions。
+//
+// 三态仍然要钉死 —— 这个键在配置里还在（只是管理台页面不再显示它）：
+//
+//	写 0   → **保持 0 = 不冷却**（绝不能被 `<= 0 → 回默认` 那种归一化反压，
+//	          那正是本项目踩过三次的「改了没用」）
+//	写 42  → 保留 42（将来想手动恢复冷却仍然有效）
+//	写 -1  → 负数无意义，回默认 0
+func TestCooldownDefaultIsOff(t *testing.T) {
+	// 键缺失 / 配置读不到 → 不冷却（与 JSON 的 0 同口径）
+	d := &Config{Entry: &EntryCfg{}}
+	fillDefaults(d)
+	if d.Entry.CooldownBars != 0 {
+		t.Fatalf("cooldown_bars 默认应为 0（十期已取消冷却），实际 %d", d.Entry.CooldownBars)
+	}
+
+	// 写 0 必须活下来
+	z := &Config{Entry: &EntryCfg{CooldownBars: 0}}
+	fillDefaults(z)
+	if z.Entry.CooldownBars != 0 {
+		t.Fatalf("cooldown_bars 写 0 应保持不冷却，实际被改成 %d", z.Entry.CooldownBars)
+	}
+
+	// 显式写正数时保留（想恢复冷却的人还能用它）
+	c := &Config{Entry: &EntryCfg{CooldownBars: 42}}
 	fillDefaults(c)
-	if c.Entry.CooldownBars != 6 {
-		t.Fatalf("cooldown_bars 应为 6，实际 %d", c.Entry.CooldownBars)
+	if c.Entry.CooldownBars != 42 {
+		t.Fatalf("cooldown_bars 写 42 应保留，实际 %d", c.Entry.CooldownBars)
+	}
+
+	// 负数回默认（0）
+	n := &Config{Entry: &EntryCfg{CooldownBars: -1}}
+	fillDefaults(n)
+	if n.Entry.CooldownBars != 0 {
+		t.Fatalf("cooldown_bars 写 -1 应回默认 0，实际 %d", n.Entry.CooldownBars)
 	}
 }
 

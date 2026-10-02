@@ -135,8 +135,9 @@ const (
 //	次数   = **不限**（MaxTimes = 0）
 //
 // ★ 历史变迁：一期「15m 先跌 DropPct% 后转涨」（相对窗口低点）→ 二期改成与买入一致
-//   （8 因子共振，DropPct 因此废弃）→ 七期改回价格条件（DropPct 复活，语义变为
-//   「相对**买入价**低 N%」）→ 八期两套并存，加 Mode 开关。
+//
+//	（8 因子共振，DropPct 因此废弃）→ 七期改回价格条件（DropPct 复活，语义变为
+//	「相对**买入价**低 N%」）→ 八期两套并存，加 Mode 开关。
 type AddonCfg struct {
 	Enabled bool `json:"enabled"`
 
@@ -328,11 +329,11 @@ type StoreCfg struct {
 }
 
 type Config struct {
-	Enabled           bool           `json:"enabled"`
-	DryRun            bool           `json:"dry_run"`
-	OrderVia          string         `json:"order_via"`
-	Bar               string         `json:"bar"`
-	BarsEnabled       []string       `json:"bars_enabled"`
+	Enabled     bool     `json:"enabled"`
+	DryRun      bool     `json:"dry_run"`
+	OrderVia    string   `json:"order_via"`
+	Bar         string   `json:"bar"`
+	BarsEnabled []string `json:"bars_enabled"`
 	// SignalBars 信号回算/图上展示的周期。
 	// 与 BarsEnabled（真正执行「扫描 + 开仓」的周期）分开：
 	// 回算便宜、多多益善，交易昂贵、只认主周期。空 = 全部 6 个周期。
@@ -478,17 +479,17 @@ func defaultConfig() *Config {
 	// 细节见 secret.go。写死在这里的后果是「仓库一公开，口令就公开」。
 	mysqlPass, _ := MySQLSecret()
 	return &Config{
-		Enabled:           true,
-		DryRun:            true,
-		OrderVia:          "go",
-		Bar: "15m",
+		Enabled:  true,
+		DryRun:   true,
+		OrderVia: "go",
+		Bar:      "15m",
 		// ★ 2026-10-01 二期：1m/3m/5m 重新上线（用户口径「选项卡重新生成并补充数据」）。
 		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威，
 		//   这里只是「配置块缺失」时的兜底。
 		// ★ 2026-10-02 四期：1m 下线（用户「取消 1 分钟买入条件和买入信号和选项卡和 K 线图」）。
 		//   与 model.EnabledBars 保持一致 —— 那份是全项目唯一权威。
-		BarsEnabled: []string{"3m", "5m", "15m"},
-		SignalBars:  []string{"3m", "5m", "15m"},
+		BarsEnabled:       []string{"3m", "5m", "15m"},
+		SignalBars:        []string{"3m", "5m", "15m"},
 		MinCandles:        400,
 		TopNByVolume:      80,
 		MinQuoteVolume24h: 1000000,
@@ -515,10 +516,10 @@ func defaultConfig() *Config {
 		//   （三期曾写 4 来表达「> 3」，那是当时「8 个共振中 4 个及以上」的口径。）
 		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
 		//     3 的把关交给下面的 min_bar_rise_pct（六期起：触发那根必须真跌 < -0.7%）。
-		ScoreThreshold:        3,
-		ScoreThresholdMap:     map[string]int{},
-		SignalTimeoutSec:      900,
-		RequestTimeoutSec:     20,
+		ScoreThreshold:    3,
+		ScoreThresholdMap: map[string]int{},
+		SignalTimeoutSec:  900,
+		RequestTimeoutSec: 20,
 		Entry: &EntryCfg{
 			TdMode: "isolated", PosSide: "net", OrdType: "market",
 			MarginUSDT: 0.1, Leverage: 20,
@@ -526,7 +527,13 @@ func defaultConfig() *Config {
 			// （用户口径「取消限制」）。这两个的兜底值也刻意设成 0，
 			// 免得「entry 块缺失 / 键名写错」时限制悄悄复活 —— 那正是用户这次反馈的现象。
 			// 真正的兜底是账户可用余额与 risk.* 那几条，不是这里。
-			MaxConcurrentPositions: 0, CooldownBars: 6, DailyMaxEntries: 0,
+			// ★ 2026-10-02 十期：**冷却取消 + 改成持仓数量限制** ★
+			//   用户口径：「冷却条件全部删除，改成数量 就是持仓数量，持仓数量要求 <30 就行」。
+			//     · CooldownBars  30 → **0**（0 = 不冷却；归一化只反压负数，所以 0 是真生效的）
+			//     · MaxConcurrentPositions 0 → **30**（最多同时持有 30 个合约）
+			//   兜底值必须与 configs/okx_strategy.json 同口径 —— 否则配置读不到时
+			//   会跑出「有冷却 / 不限持仓」这种和配置里写的完全不同的行为。
+			MaxConcurrentPositions: 30, CooldownBars: 0, DailyMaxEntries: 0,
 			// ★ 2026-10-02 三期：单笔口径 0.01U → **0.1U**（用户：「买入价格 0.1 美金就行，
 			//   最高封顶 1 美金」）。0.1U × 20x = 2U 名义，比二期好买得多。
 			//   min_one 口径不变：买得起就按 0.1U 成交，买不起就放大到「刚好 1 张」，
@@ -562,10 +569,18 @@ func defaultConfig() *Config {
 		//   而现象只是「加仓条件和配的对不上」，最难查。
 		//   Mode 留空会让 decideAddon 落进 default 分支，
 		//   在那之前所有调用方就得先自己归一化一遍，属于隐性契约。
+		// ★ 2026-10-02 十期：加仓改成**价格模式 -3% 上涨 0.3%** ★
+		//   用户口径：「加仓条件改成 -3% 上涨 0.3%」。
+		//     · Mode      resonance → **price**
+		//     · DropPct   1.0 → **3.0**（收盘价比买入价低超 3% = 「跌到位置」）
+		//     · PriceRisePct 1.0 → **0.3**（该根涨幅 > 0.3% = 「反弹启动」）
+		//   兜底值必须与 configs/okx_strategy.json 同口径，理由同上。
+		//   BarRisePct 是共振模式的参数（当前不参与判定），一并对齐成 0.7，
+		//   免得哪天切回 resonance 时默认值和文件里写的不是一回事。
 		Addon: &AddonCfg{
-			Enabled: true, Mode: AddonModeResonance,
-			ScoreThreshold: 2, PriceRisePct: 1.0,
-			Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0, RiseBar: AddonAutoBar,
+			Enabled: true, Mode: AddonModePrice,
+			ScoreThreshold: 2, PriceRisePct: 0.3,
+			Ratio: 1.0 / 3.0, DropPct: 3.0, BarRisePct: 0.7, RiseBar: AddonAutoBar,
 			LookbackBars: 24, MaxTimes: 0, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
@@ -1101,7 +1116,9 @@ func StripJSONComments(b []byte) []byte {
 // DefaultMinBarRisePct 「触发那根 K 线涨跌幅门槛」的默认值（%，带符号）。
 //
 // ★ 2026-10-02 六期：0.5（必须真涨）→ **-0.7（必须真跌）**
-//   （用户口径「Score >= 3 且 RisePct < -0.7（严格小于）」）。
+//
+//	（用户口径「Score >= 3 且 RisePct < -0.7（严格小于）」）。
+//
 // 这个常量同时被 conf 与 service 两侧读（service.StrategyConfig.MinBarRisePct
 // 的兜底就用它），改一处两处都跟着变 —— 这正是它作为常量存在的意义。
 const DefaultMinBarRisePct = -0.7

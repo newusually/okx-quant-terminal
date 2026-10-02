@@ -107,9 +107,10 @@ func tokenFrom(r *http.Request) string {
 // adminEmailMasked 把授权邮箱打码成 4****373@qq.com 形式。
 //
 // ★ 为什么打码而不是直接回显 ★
-//   发码接口是**公开**的（要登录才能用就没法登录了）。如果它对任意请求都回显
-//   「验证码已发送到 493076373@qq.com」，等于把管理员账号白送给任何扫端口的人。
-//   所以只回显打码后的形式，足够本人确认「是我的邮箱」，不够让攻击者拿走。
+//
+//	发码接口是**公开**的（要登录才能用就没法登录了）。如果它对任意请求都回显
+//	「验证码已发送到 493076373@qq.com」，等于把管理员账号白送给任何扫端口的人。
+//	所以只回显打码后的形式，足够本人确认「是我的邮箱」，不够让攻击者拿走。
 func adminEmailMasked() string {
 	return maskEmail(rbac.AllowedEmail())
 }
@@ -158,8 +159,9 @@ func clientIP(r *http.Request) string {
 // 入参：{"email": "..."}（可选，默认就用授权邮箱）
 //
 // ★ 返回语义是「统一」的：无论邮箱在不在白名单，只要没被冷却拦住，
-//   一律返回 {"ok":true,"to":"4****373@qq.com"}。不回显「这个邮箱不授权」，
-//   避免被用来枚举管理员邮箱。
+//
+//	一律返回 {"ok":true,"to":"4****373@qq.com"}。不回显「这个邮箱不授权」，
+//	避免被用来枚举管理员邮箱。
 func (s *Server) handleAdminSendCode(w http.ResponseWriter, r *http.Request) (any, error) {
 	if r.Method != http.MethodPost {
 		return nil, fmt.Errorf("只接受 POST")
@@ -365,6 +367,26 @@ func (s *Server) handleAdminSessionsAll(w http.ResponseWriter, r *http.Request) 
 //
 // 返回「表单需要的全部字段 + 每个条件的开关状态」。
 // 与 /api/state 的区别：这里是**可编辑视图**，字段名与保存接口一一对应。
+//
+// ★ 九期：返回结构按「管理员页面上的分区」组织 ★
+//
+//	分区顺序与页面一一对应：
+//	  ① switch   总开关        enabled / dry_run
+//	  ② buy      买入条件      分数门槛 / K线涨跌幅 / 金额 / 杠杆 / 口径
+//	  ③ gate     开仓闸门      冷却根数 / 持仓上限 / 当日上限
+//	  ④ universe 合约准入      准入上限 / 新上线天数 / 待下线 / 品类 / 成交额 / 前 N
+//	  ⑤ addon    加仓条件      两套模式 + 金额 + 次数 + 间隔
+//	  ⑥ exit     出场条件      止盈 / 止损 / 超时 / 布林上轨
+//	  ⑦ risk     风控          6 条保护
+//	  ⑧ live     引擎节奏      巡检秒 / 扫描秒
+//
+//	为什么分区而不是摊平成一个 map：
+//	  前端照着分区渲染，两侧一旦不一致就会出现「页面上有这一项、
+//	  但保存时键名对不上」—— 那种错**不报错**，只是那一项永远保存不上。
+//	  分区之后，遗漏面从「40 个字段」缩小到「8 个分区」。
+//
+//	⚠ 分区里的键名 = Patch 的 json tag（前端直接把整段当请求体发回来），
+//	  这里**不允许**出现「展示名」与「入参名」不一样的情况。
 func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) (any, error) {
 	cfg := s.cfg()
 	if cfg == nil {
@@ -373,41 +395,95 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) (a
 
 	return map[string]any{
 		"ok": true,
-		// —— 买入条件 ——
+
+		// —— ① 总开关 ——
+		"switch": map[string]any{
+			"buy_enabled": cfg.Enabled,
+			"dry_run":     cfg.DryRun,
+		},
+
+		// —— ② 买入条件 ——
 		"buy": map[string]any{
-			"enabled":          cfg.Enabled,
 			"score_threshold":  cfg.ScoreThreshold,
 			"min_bar_rise_pct": cfg.MinBarRisePct(),
-			"margin_usdt":      cfg.Entry.MarginUSDT,
+			"buy_margin_usdt":  cfg.Entry.MarginUSDT,
 			"max_margin_usdt":  cfg.Entry.MaxMarginUSDT,
 			"leverage":         cfg.Entry.Leverage,
 			"margin_policy":    cfg.Entry.MarginPolicy,
 		},
-		// —— 加仓条件 ——
-		"addon": map[string]any{
-			"enabled":          cfg.Addon.Enabled,
-			"mode":             cfg.Addon.Mode,
-			"score_threshold":  cfg.Addon.ScoreThres,
-			"bar_rise_pct":     cfg.Addon.BarRisePct,
-			"drop_pct":         cfg.Addon.DropPct,
-			"price_rise_pct":   cfg.Addon.PriceRise,
-			"margin_usdt":      cfg.Addon.MarginUSDT,
-			"ratio":            cfg.Addon.Ratio,
-			"max_times":        cfg.Addon.MaxTimes,
+
+		// —— ③ 开仓闸门（数量限制）——
+		//
+		//   ★ 十期：用户改成「冷却条件全部删除，改成持仓数量，要求 <30」★
+		//
+		//   cooldown_bars 仍然**下发**（值恒为 0），但页面已不再渲染它。
+		//   为什么不下发成"删掉这个键"：
+		//     · 前端是「读出分区 → 渲染 → 收集 → 整段发回」的模型，
+		//       少一个键只是少一行控件，但留着这个键能让人**一眼看见**
+		//       "冷却现在是 0"，而不是靠翻配置文件去确认；
+		//     · 值必须是 0 才对 —— trader.go 里 cd<=0 是显式放行
+		//       （十期刚修过一处 `cd=0` 时反而拦单的判定漏洞）。
+		"gate": map[string]any{
+			"cooldown_bars":            cfg.Entry.CooldownBars,        // 恒 0；十期已下线，仅保留可见性
+			"max_concurrent_positions": cfg.Entry.MaxConcurrentPositions, // 十期口径：30（达到即不再开新仓）
+			"daily_max_entries":        cfg.Entry.DailyMaxEntries,
 		},
-		// —— 出场（只读展示，八期不改；改了要同步的地方太多）——
+
+		// —— ④ 合约准入 ——
+		"universe": map[string]any{
+			"max_order_margin_usdt":    cfg.MaxOrderMarginUSDT,
+			"exclude_new_listing_days": cfg.ExcludeNewListingDays,
+			"exclude_delisting":        cfg.ExcludeDelisting,
+			"exclude_stock_etf":        cfg.ExcludeStockETF,
+			"min_quote_volume_24h":     cfg.MinQuoteVolume24h,
+			"top_n_by_volume":          cfg.TopNByVolume,
+		},
+
+		// —— ⑤ 加仓条件 ——
+		"addon": map[string]any{
+			"enabled":         cfg.Addon.Enabled,
+			"mode":            cfg.Addon.Mode,
+			"score_threshold": cfg.Addon.ScoreThres,
+			"bar_rise_pct":    cfg.Addon.BarRisePct,
+			"drop_pct":        cfg.Addon.DropPct,
+			"price_rise_pct":  cfg.Addon.PriceRise,
+			"margin_usdt":     cfg.Addon.MarginUSDT,
+			"ratio":           cfg.Addon.Ratio,
+			"max_times":       cfg.Addon.MaxTimes,
+			"min_gap_bars":    cfg.Addon.MinGapBars,
+			"rise_bar":        cfg.Addon.RiseBar,
+		},
+
+		// —— ⑥ 出场条件（★ 九期：从「只读展示」放开为可编辑）——
 		"exit": map[string]any{
 			"take_profit_pct":  cfg.Exit.TakeProfitPct,
 			"stop_loss_pct":    cfg.Exit.StopLossPct,
 			"max_hold_minutes": cfg.Exit.MaxHoldMinutes,
+			"max_hold_bars":    cfg.Exit.MaxHoldBars,
 			"boll_upper_exit":  cfg.Exit.BollUpperExit,
 		},
-		// —— 其他只读信息 ——
-		"bar":         cfg.Bar,
-		"dry_run":     cfg.DryRun,
-		"path":        s.strategy.Path(),
-		"serverNow":   time.Now().UnixMilli(),
-		"startTs":     s.startAt.UnixMilli(),
+
+		// —— ⑦ 风控 ——
+		"risk": map[string]any{
+			"account_equity_stop":    cfg.Risk.AccountEquityStop,
+			"daily_loss_stop_pct":    cfg.Risk.DailyLossStopPct,
+			"max_total_margin_pct":   cfg.Risk.MaxTotalMarginPct,
+			"min_available_usdt":     cfg.Risk.MinAvailableUSDT,
+			"consecutive_loss_pause": cfg.Risk.ConsecutiveLossPause,
+			"pause_on_api_error":     cfg.Risk.PauseOnAPIError,
+		},
+
+		// —— ⑧ 引擎节奏 ——
+		"live": map[string]any{
+			"live_exit_sec":  cfg.Live.ExitSec,
+			"live_entry_sec": cfg.Live.EntrySec,
+		},
+
+		// —— 只读信息 ——
+		"bar":       cfg.Bar,
+		"path":      s.strategy.Path(),
+		"serverNow": time.Now().UnixMilli(),
+		"startTs":   s.startAt.UnixMilli(),
 	}, nil
 }
 
@@ -433,9 +509,10 @@ func (s *Server) handleAdminSaveOrGetConfig(w http.ResponseWriter, r *http.Reque
 // 流程：鉴权（wrap 里做）→ 解析校验 → 原子写回 JSON → 立刻 Force 热重载 → 回显新值。
 //
 // ★ 为什么写完立刻 Force ★
-//   strategyStore 的 Watch 是 2 秒轮询，这里主动调一次 Force 把它提前到「立刻」，
-//   并且**当场返回写入后的真实值** —— 用户点保存后看到的就是生效值，
-//   不用自己去刷新对比（那个「改了到底有没有用」的问题就不再需要问了）。
+//
+//	strategyStore 的 Watch 是 2 秒轮询，这里主动调一次 Force 把它提前到「立刻」，
+//	并且**当场返回写入后的真实值** —— 用户点保存后看到的就是生效值，
+//	不用自己去刷新对比（那个「改了到底有没有用」的问题就不再需要问了）。
 func (s *Server) handleAdminSaveConfig(w http.ResponseWriter, r *http.Request) (any, error) {
 	if r.Method != http.MethodPost {
 		return nil, fmt.Errorf("只接受 POST")
@@ -492,26 +569,80 @@ func (s *Server) handleAdminSaveConfig(w http.ResponseWriter, r *http.Request) (
 }
 
 // snapshotEditable 取一份「管理台可编辑字段」的快照，用于保存前后对比回显。
+//
+// ★ 键名必须与 Patch 的 json tag **完全一致** ★
+//
+//	前端拿 before/after 直接显示「从 X 变成 Y」，键名对不上就显示成 undefined，
+//	用户看到的是「保存成功，但对比表是空的」。
+//	这也是「加一个字段要在三处登记」里的第三处
+//	（另两处：Patch 结构体、ParsePatch；第四处是 Patch.Empty() —— 已用反射兜住）。
+//
+//	九期踩过一次同类的：原来这里写的是 `addon_price_rise`，
+//	而 Patch 的 tag 是 `addon_rise_pct` —— 对比表里那一项永远是空的。
 func (s *Server) snapshotEditable() map[string]any {
 	cfg := s.cfg()
 	if cfg == nil {
 		return map[string]any{}
 	}
 	return map[string]any{
-		"buy_enabled":       cfg.Enabled,
-		"score_threshold":   cfg.ScoreThreshold,
-		"min_bar_rise_pct":  cfg.MinBarRisePct(),
-		"buy_margin_usdt":   cfg.Entry.MarginUSDT,
-		"max_margin_usdt":   cfg.Entry.MaxMarginUSDT,
-		"addon_enabled":     cfg.Addon.Enabled,
-		"addon_mode":        cfg.Addon.Mode,
-		"addon_score":       cfg.Addon.ScoreThres,
-		"addon_bar_rise":    cfg.Addon.BarRisePct,
-		"addon_drop_pct":    cfg.Addon.DropPct,
-		"addon_price_rise":  cfg.Addon.PriceRise,
-		"addon_margin_usdt": cfg.Addon.MarginUSDT,
-		"addon_ratio":       cfg.Addon.Ratio,
-		"addon_max_times":   cfg.Addon.MaxTimes,
+		// ① 总开关
+		"buy_enabled": cfg.Enabled,
+		"dry_run":     cfg.DryRun,
+
+		// ② 买入
+		"score_threshold":  cfg.ScoreThreshold,
+		"min_bar_rise_pct": cfg.MinBarRisePct(),
+		"buy_margin_usdt":  cfg.Entry.MarginUSDT,
+		"max_margin_usdt":  cfg.Entry.MaxMarginUSDT,
+		"leverage":         cfg.Entry.Leverage,
+		"margin_policy":    cfg.Entry.MarginPolicy,
+
+		// ③ 开仓闸门
+		//    cooldown_bars 十期已从页面下线（前端不再发这个键，Patch 里也不设置），
+		//    但仍然留在快照里：万一有人手工改了配置文件把它写成非 0，
+		//    这里能让它出现在"前后对比"里，而不是悄悄生效。
+		"cooldown_bars":            cfg.Entry.CooldownBars,
+		"max_concurrent_positions": cfg.Entry.MaxConcurrentPositions,
+		"daily_max_entries":        cfg.Entry.DailyMaxEntries,
+
+		// ④ 合约准入
+		"max_order_margin_usdt":    cfg.MaxOrderMarginUSDT,
+		"exclude_new_listing_days": cfg.ExcludeNewListingDays,
+		"exclude_delisting":        cfg.ExcludeDelisting,
+		"exclude_stock_etf":        cfg.ExcludeStockETF,
+		"min_quote_volume_24h":     cfg.MinQuoteVolume24h,
+		"top_n_by_volume":          cfg.TopNByVolume,
+
+		// ⑤ 加仓
+		"addon_enabled":      cfg.Addon.Enabled,
+		"addon_mode":         cfg.Addon.Mode,
+		"addon_score":        cfg.Addon.ScoreThres,
+		"addon_bar_rise":     cfg.Addon.BarRisePct,
+		"addon_drop_pct":     cfg.Addon.DropPct,
+		"addon_rise_pct":     cfg.Addon.PriceRise, // ★ 与 Patch 的 tag 同名（原来写错了）
+		"addon_margin_usdt":  cfg.Addon.MarginUSDT,
+		"addon_ratio":        cfg.Addon.Ratio,
+		"addon_max_times":    cfg.Addon.MaxTimes,
+		"addon_min_gap_bars": cfg.Addon.MinGapBars,
+		"addon_rise_bar":     cfg.Addon.RiseBar,
+
+		// ⑥ 出场
+		"take_profit_pct":  cfg.Exit.TakeProfitPct,
+		"stop_loss_pct":    cfg.Exit.StopLossPct,
+		"max_hold_minutes": cfg.Exit.MaxHoldMinutes,
+		"max_hold_bars":    cfg.Exit.MaxHoldBars,
+		"boll_upper_exit":  cfg.Exit.BollUpperExit,
+
+		// ⑦ 风控
+		"account_equity_stop":    cfg.Risk.AccountEquityStop,
+		"daily_loss_stop_pct":    cfg.Risk.DailyLossStopPct,
+		"max_total_margin_pct":   cfg.Risk.MaxTotalMarginPct,
+		"min_available_usdt":     cfg.Risk.MinAvailableUSDT,
+		"consecutive_loss_pause": cfg.Risk.ConsecutiveLossPause,
+		"pause_on_api_error":     cfg.Risk.PauseOnAPIError,
+
+		// ⑧ 引擎节奏
+		"live_exit_sec":  cfg.Live.ExitSec,
+		"live_entry_sec": cfg.Live.EntrySec,
 	}
 }
-

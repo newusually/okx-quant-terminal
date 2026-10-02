@@ -59,7 +59,7 @@ type StrategyExit struct {
 //	加仓次数不限；金额 = margin_usdt（>0）或 原保证金 × ratio。
 type StrategyAddon struct {
 	Enabled    bool    `json:"enabled"`
-	Mode       string  `json:"mode"`        // resonance（默认）| price
+	Mode       string  `json:"mode"`            // resonance（默认）| price
 	ScoreThres int     `json:"score_threshold"` // 共振模式：0 = 用顶层 score_threshold
 	Ratio      float64 `json:"ratio"`
 	DropPct    float64 `json:"drop_pct"`       // 价格模式：收盘价比买入价低 N%（默认 1）
@@ -67,6 +67,7 @@ type StrategyAddon struct {
 	PriceRise  float64 `json:"price_rise_pct"` // 价格模式：该根涨幅须 > N%（默认 1）
 	RiseBar    string  `json:"rise_bar"`       // auto = 用该仓位自己的周期
 	MaxTimes   int     `json:"max_times"`      // 0 = 不限
+	MinGapBars int     `json:"min_gap_bars"`   // ★ 九期：两次加仓至少隔 N 根（默认 1）；负数回默认，0 = 同一根也能加
 	MarginUSDT float64 `json:"margin_usdt"`    // 加仓金额（U）；>0 优先于 ratio
 }
 
@@ -94,6 +95,7 @@ type StrategyConfig struct {
 	Entry StrategyEntry `json:"entry"`
 	Exit  StrategyExit  `json:"exit"`
 	Addon StrategyAddon `json:"addon"`
+	Risk  StrategyRisk  `json:"risk"` // ★ 九期：风控段（管理台可编辑）
 	Live  StrategyLive  `json:"live"`
 
 	Path string `json:"path"` // 配置文件路径（不在 JSON 里）
@@ -126,6 +128,32 @@ type StrategyLive struct {
 	EntrySec int `json:"entry_sec"`
 }
 
+// StrategyRisk 风控参数（★ 九期新增 —— 管理台要能改这几条）
+//
+// 语义说明（注意：**0 在这些字段上是有意义的**，不是"没填"）：
+//
+//	AccountEquityStop    权益低于此值全停。0 = 不启用
+//	DailyLossStopPct     当日亏损超过权益的 N% 停止开仓。0 = 不按此停
+//	MaxTotalMarginPct    总保证金不超过权益的 N%
+//	MinAvailableUSDT     可用余额低于 N U 停止开仓
+//	ConsecutiveLossPause 连亏 N 笔暂停 2 小时。0 = 不暂停
+//	PauseOnAPIError      连续 N 次 API 错误暂停
+//
+// ⚠ 所以归一化里**绝不能**写「<= 0 → 回默认值」——
+//
+//	那会把用户显式关掉的保护悄悄重新打开。这是与
+//	max_concurrent_positions「0 = 不限」同一类坑，只是方向相反：
+//	一个是「0 被反压回限制」，一个是「0 被反压回保护」，
+//	共同点是**用户写的 0 没有生效，而且不报错**。
+type StrategyRisk struct {
+	AccountEquityStop    float64 `json:"account_equity_stop"`
+	DailyLossStopPct     float64 `json:"daily_loss_stop_pct"`
+	MaxTotalMarginPct    float64 `json:"max_total_margin_pct"`
+	MinAvailableUSDT     float64 `json:"min_available_usdt"`
+	ConsecutiveLossPause int     `json:"consecutive_loss_pause"`
+	PauseOnAPIError      int     `json:"pause_on_api_error"`
+}
+
 // LoadStrategy 读配置文件。带注释的 JSON 也能读（先把注释剥掉）。
 // 文件不存在时返回内置默认值 + error，调用方自己决定怎么处理。
 func LoadStrategy(path string) (*StrategyConfig, error) {
@@ -140,7 +168,7 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		BarsEnabled: []string{"3m", "5m", "15m"},
 		SignalBars:  []string{"3m", "5m", "15m"},
 		// ★ 2026-10-02 五期：阈值 4 → 3（用户口径「Score >= 3 且 RisePct < -0.7」，涨幅方向六期补全）
-		ScoreThreshold: 3,
+		ScoreThreshold:    3,
 		MinQuoteVolume24h: 1000000, TopNByVolume: 80,
 		// ★ 三期：品类过滤默认关闭（「取消美股 etf 不做的功能」）
 		ExcludeStockETF: false, ExcludeNewListingDays: 30, ExcludeDelisting: true,
@@ -151,22 +179,29 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		//      「已取消的规则」就会悄悄复活。
 		MaxOrderMarginUSDT: 1.0,
 		Entry: StrategyEntry{TdMode: "isolated", PosSide: "net", OrdType: "market",
-			// ★ 0 = 不限（用户口径「取消限制」）。这里只是「配置文件读不到」时的兜底，
-			//   与 conf.DefaultConfig 保持一致，免得兜底值把限制偷偷放回来。
-			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 0,
-			CooldownBars: 6, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
+			// ★ 十期：冷却取消 + 改成持仓数量限制 ★
+			//   CooldownBars = 0（不冷却）、MaxConcurrentPositions = 30（最多同时持 30 个）。
+			//   与 conf.defaultConfig / configs/okx_strategy.json 三处同值 ——
+			//   这里是「配置文件读不到」时的兜底，漏改会让页面显示的和引擎跑的不是一回事。
+			MarginUSDT: 0.1, Leverage: 20, MaxConcurrentPositions: 30,
+			CooldownBars: 0, DailyMaxEntries: 0, MarginPolicy: "min_one", MaxMarginUSDT: 1.0,
 			// ★ 五期：默认要求「这根 K 线真涨 > 0.5%」（指针对上局部变量，别共享全局）
 			MinBarRisePct: &minBarRiseDefault},
 		// ★ 七期：兜底也必须与 JSON 一致 —— 止盈 0.35、止损 300（形同虚设）、超时 1440。
 		//   否则配置缺失时布林上轨会静默复活（与三期 exclude_stock_etf 兜底同一个道理）。
 		Exit: StrategyExit{TakeProfitPct: 0.35, BollUpperExit: false,
 			MaxHoldMinutes: 1440, StopLossPct: 300},
-		// ★ 八期：两套加仓判据并存，mode 选一个。
-		//   兜底与 JSON 必须一致（当前 JSON 是 resonance），否则配置缺失时
+		// ★ 十期：加仓切到**价格模式 −3% 上涨 0.3%**（用户口径「加仓条件改成 -3% 上涨 0.3%」）。
+		//   兜底与 JSON 必须一致（当前 JSON 也是 price），否则配置缺失时
 		//   跑的是另一套判据 —— 那种「行为和配置对不上」最难查。
-		Addon: StrategyAddon{Enabled: true, Mode: conf.AddonModeResonance,
-			ScoreThres: 2, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 0.7, PriceRise: 1.0,
-			RiseBar: conf.AddonAutoBar, MaxTimes: 0},
+		Addon: StrategyAddon{Enabled: true, Mode: conf.AddonModePrice,
+			ScoreThres: 2, Ratio: 1.0 / 3.0, DropPct: 3.0, BarRisePct: 0.7, PriceRise: 0.3,
+			RiseBar: conf.AddonAutoBar, MaxTimes: 0, MinGapBars: 1},
+		// ★ 九期：风控段补进来 —— 管理台「风控」分区要能读能写。
+		//   兜底值与 configs/okx_strategy.json 的 risk 段**同值**，
+		//   这样「配置文件读不到」时页面显示的也是真实口径，不会骗人。
+		Risk: StrategyRisk{AccountEquityStop: 0, DailyLossStopPct: 50, MaxTotalMarginPct: 100,
+			MinAvailableUSDT: 0.1, ConsecutiveLossPause: 5, PauseOnAPIError: 10},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,
 	}
@@ -189,11 +224,39 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	if cfg.Bar == "" {
 		cfg.Bar = "15m"
 	}
-	// 资金口径归一化：只认 fixed / min_one，其余一律回到严格的 fixed
+	// —— entry 段归一化：逐条与 conf.fillDefaults 对齐 ——
+	//
+	// ★ 为什么必须对齐 ★
+	//   这份 StrategyConfig 是**前端 / 管理台看到的那一份**，而引擎实际跑的是
+	//   conf.Config。两边只要差一条，页面显示的值就不等于生效值 ——
+	//   那正是本项目头号故障形态（「改了没用」「显示的和跑的不一样」）。
+	//   九期把这么多字段开放给管理台编辑之后，这个对齐变得更要紧：
+	//   用户在页面上看到 30，引擎那边就必须真的是 30。
+	if cfg.Entry.MaxMarginUSDT <= 0 {
+		cfg.Entry.MaxMarginUSDT = def.Entry.MaxMarginUSDT
+	}
+	// 冷却根数：0 = 不冷却必须**活下来**（只有负数才回默认）—— 与 conf.fillDefaults 一致
+	if cfg.Entry.CooldownBars < 0 {
+		cfg.Entry.CooldownBars = def.Entry.CooldownBars
+	}
+	// 下面两个 0 = 不限，负数归 0（不是回默认）
+	if cfg.Entry.MaxConcurrentPositions < 0 {
+		cfg.Entry.MaxConcurrentPositions = 0
+	}
+	if cfg.Entry.DailyMaxEntries < 0 {
+		cfg.Entry.DailyMaxEntries = 0
+	}
+	// 资金口径归一化：只认 fixed / min_one。
+	//
+	// ★ 默认值取 def（当前 min_one），**不是写死 "fixed"** ★
+	//   conf.fillDefaults 对空值给的是 min_one（买不起 1 张时放大到刚好 1 张）。
+	//   若这里把空值归成 fixed，那么「JSON 里没写这个键」时会出现：
+	//     引擎按 min_one 跑（买得起就买），页面却显示 fixed（买不起就跳过）
+	//   两边说的不是一回事，而且**不报任何错** —— 最难查的那一类。
 	switch cfg.Entry.MarginPolicy {
 	case "min_one", "fixed":
 	default:
-		cfg.Entry.MarginPolicy = "fixed"
+		cfg.Entry.MarginPolicy = def.Entry.MarginPolicy
 	}
 	// 准入上限（max_order_margin_usdt）：**以 JSON 里写的为准**，
 	// 这里不做任何「要求」。
@@ -265,6 +328,39 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	// 加仓金额：负数无意义（0 = 用 ratio 比例，保持 0）
 	if cfg.Addon.MarginUSDT < 0 {
 		cfg.Addon.MarginUSDT = 0
+	}
+	// 加仓间隔根数：负数回默认 1（0 = 同一根也能加，是有意义的显式选择）
+	if cfg.Addon.MinGapBars < 0 {
+		cfg.Addon.MinGapBars = def.Addon.MinGapBars
+	}
+	// —— 风控段：负数一律归 0 ——
+	//
+	// ★ 这里**不能**照搬「<= 0 → 回默认值」那一套 ★
+	//   风控这几个字段上 0 是**有意义**的：
+	//     account_equity_stop=0    = 不启用这条保护
+	//     daily_loss_stop_pct=0    = 不按日亏损停
+	//     consecutive_loss_pause=0 = 连亏也不暂停
+	//   用「<=0 回默认」会把用户**显式关掉**的保护重新打开 ——
+	//   与 max_concurrent_positions「0 被反压回限制」是同一类坑，方向相反，
+	//   共同点是「用户写的 0 没生效，而且不报错」。
+	//   conf 侧对 risk 段只做「整段缺失就兜底」，这里保持一致。
+	if cfg.Risk.AccountEquityStop < 0 {
+		cfg.Risk.AccountEquityStop = 0
+	}
+	if cfg.Risk.DailyLossStopPct < 0 {
+		cfg.Risk.DailyLossStopPct = 0
+	}
+	if cfg.Risk.MaxTotalMarginPct < 0 {
+		cfg.Risk.MaxTotalMarginPct = 0
+	}
+	if cfg.Risk.MinAvailableUSDT < 0 {
+		cfg.Risk.MinAvailableUSDT = 0
+	}
+	if cfg.Risk.ConsecutiveLossPause < 0 {
+		cfg.Risk.ConsecutiveLossPause = 0
+	}
+	if cfg.Risk.PauseOnAPIError < 0 {
+		cfg.Risk.PauseOnAPIError = 0
 	}
 	// 加仓分数门槛：0 = 用顶层 score_threshold 联动；负数无意义
 	if cfg.Addon.ScoreThres < 0 {

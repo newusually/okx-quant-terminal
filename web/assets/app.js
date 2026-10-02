@@ -24,6 +24,25 @@ const state = {
   bfPollTimer: null,
   lastKlineKey: '',
 
+  // ---- ★ 十一期：持仓均价虚线（60% 透明度）----
+  // 存已创建的 priceLine 句柄，换合约 / 持仓变化时先整组撤掉再重建。
+  // 不这么做的话，lightweight-charts 的 priceLine 会越叠越多，
+  // 旧合约的均价线留在新合约的图上 —— 那是**错误数据**，比没有更糟。
+  entryLines: [],
+  entryLineKey: '',     // 上次画线时的 instId+bar，变了才重建（省一点重绘）
+
+  // ---- ★ 十一期：画图工具（趋势线 / 水平线 / 矩形 / 画笔 / 橡皮擦）----
+  draw: {
+    canvas: null, ctx: null,
+    tool: null,          // null = 没在画图模式（叠加层不接收鼠标事件）
+    color: '#ffd54f',
+    items: [],           // 当前合约+周期的画痕，按创建顺序
+    drawing: null,       // 正在画的那一条（拖动过程中）
+    drag: false,
+    lastMove: null,      // 画笔的上一采样点
+    key: '',             // localStorage 的键：okxDraw:<inst>:<bar>
+  },
+
   // ---- K 线分页：初始一页，向左滚动自动向前翻 ----
   klines: [],           // 已加载的 K 线（升序），翻页时不断往前拼
   ind: {},              // 指标序列 {ma7:[], ma25:[], ...}，同样按 ts 合并
@@ -288,6 +307,31 @@ function initChart() {
   }).observe(el);
   state.chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
 
+  // syncChartSize 手动把图表尺寸对齐到容器。
+  //
+  // ★ 为什么不依赖 ResizeObserver 就够了：观察的是 #chart 这个元素，
+  //   但「切合约」这个动作本身不会改变它的尺寸 —— 改变的是**它的父级**
+  //   （.chart-head 换行数变多 → .chart-box 变矮）。
+  //   ResizeObserver 对祖先尺寸变化也会触发，但时序上可能在
+  //   setData 之后才回调，那一帧用户看到的还是旧尺寸 → 图看着缺一块。
+  //   所以切合约时**显式**对一次尺寸，不等观察器。
+  window.__syncChartSize = () => {
+    state.chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+  };
+
+  // ★ 十一期：**只读**调试句柄。
+  //   没有任何写入口，只是让控制台能回答「现在加载了几根 K 线 /
+  //   当前合约是谁 / 画了几条线 / 均价线建了没有」这类问题。
+  //   没有它，每次诊断都只能靠截图猜 —— 而截图猜出来的结论经常是错的。
+  window.__okx = {
+    state,
+    chart: () => state.chart,
+    syncSize: () => window.__syncChartSize && window.__syncChartSize(),
+    markers: () => state.markers.length,
+    drawings: () => state.draw.items.length,
+    entryLines: () => state.entryLines.length,
+  };
+
   // 十字光标联动：图例 + 悬浮提示框 + 买卖标记气泡
   state.chart.subscribeCrosshairMove((param) => {
     if (!param || param.time === undefined || !param.seriesData) {
@@ -312,11 +356,69 @@ function initChart() {
   // 向左滚动 → 自动加载更早的 K 线（每次一页 1000 根）
   state.scrollGuardUntil = Date.now() + 3000;   // 首屏渲染期间不触发
   state.chart.timeScale().subscribeVisibleLogicalRangeChange(onScroll);
+
+  // ★ 十一期：画图工具（要在 state.chart 建好之后 —— 换算坐标全靠它）
+  initDrawTools();
+  // ★ 十一期：图例可拖动（⠿ 手柄按住拖、双击复位、位置存 localStorage）
+  initLegendDrag();
 }
 
 /* ------------------------------------------------------------------ */
 /* 图例（左上角，跟随十字光标实时刷新）                                  */
 /* ------------------------------------------------------------------ */
+
+// initLegendDrag：让图例可以拖到任意位置。只有 ⠿ 手柄接收鼠标事件
+// （其余 pointer-events:none 穿透给图表），拖动范围钳在 .chart-box 内，
+// 位置存 localStorage('okxLegendPos')，双击手柄复位到默认左上角。
+function initLegendDrag() {
+  const legend = $('legend'), grip = $('lgGrip');
+  if (!legend || !grip) return;
+  const box = legend.parentElement;                 // .chart-box
+  const KEY = 'okxLegendPos';
+
+  // 恢复上次拖动的位置
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
+      legend.style.left = saved.x + 'px';
+      legend.style.top = saved.y + 'px';
+    }
+  } catch (e) { /* 坏数据当没存过 */ }
+
+  let drag = null;
+  grip.addEventListener('mousedown', (e) => {
+    e.preventDefault(); e.stopPropagation();        // 别触发魔法棒/爆星星
+    const r = legend.getBoundingClientRect(), b = box.getBoundingClientRect();
+    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, b };
+    document.body.classList.add('legend-dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    const lr = legend.getBoundingClientRect(), b = drag.b;
+    // 钳在图表框内，拖不丢
+    const x = Math.max(0, Math.min(e.clientX - b.left - drag.dx, b.width - lr.width));
+    const y = Math.max(0, Math.min(e.clientY - b.top - drag.dy, b.height - lr.height));
+    legend.style.left = x + 'px';
+    legend.style.top = y + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null;
+    document.body.classList.remove('legend-dragging');
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        x: parseFloat(legend.style.left) || 0,
+        y: parseFloat(legend.style.top) || 0,
+      }));
+    } catch (e) { /* 存不了就算了，下次再拖 */ }
+  });
+  grip.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    legend.style.left = '';                         // 回到 CSS 默认 12px/20px
+    legend.style.top = '';
+    try { localStorage.removeItem(KEY); } catch (err) { /* 同上 */ }
+  });
+}
 
 const lgCls = (v) => (v >= 0 ? 'up' : 'down');
 
@@ -479,9 +581,31 @@ function resetMarkers() {
 }
 
 // paintMarkers 把标记贴到蜡烛系列上（整幅重绘时调一次）
+//
+// ★ 十一期：按密度决定要不要带文字 ★
+//   一根 K 线只有几个像素宽时（100 根挤在 998px 里 ≈ 9px/根），
+//   「买入 2.68U×4」这种 60px 宽的标签必然互相压成一团，
+//   把底下的蜡烛全盖住 —— 用户看到的就是「K 线图显示不完全」。
+//   所以：**空间够才显示文字，空间不够只留箭头**。
+//   每笔的金额 / 张数 / 时间在下方「交易明细」和悬浮框里都能查到，
+//   信息没丢，只是不再糊在图上。
 function paintMarkers() {
   if (!state.candle) return;
-  state.candle.setMarkers(state.markers);
+  let sparse = true;
+  try {
+    const ts = state.chart.timeScale();
+    const x0 = ts.logicalToCoordinate(0);
+    const x1 = ts.logicalToCoordinate(20);
+    // 用「20 根 K 线的像素宽 ÷ 20」算间距，比拿面板宽度除根数更准
+    //（面板宽里还含着右侧价格轴，直接除会偏小）
+    const spacing = (x0 !== null && x1 !== null) ? Math.abs(x1 - x0) / 20 : 99;
+    sparse = spacing < 14;
+  } catch (_) { sparse = true; }
+
+  const list = sparse
+    ? state.markers.map((m) => Object.assign({}, m, { text: undefined }))
+    : state.markers;
+  state.candle.setMarkers(list);
 }
 
 function initPnlChart() {
@@ -987,6 +1111,8 @@ function renderKline(tickSize, keepRange) {
   buildIdx();
   paintAll();
   paintMarkers();
+  paintEntryLines();   // ★ 十一期：均价虚线（换合约时这里会把旧线撤掉）
+  drawOnInstChange();  // ★ 十一期：换合约/周期 → 换一套画痕并重绘
 
   if (lr && state.klines.length > prevCount) {
     // 往前插了 bar，逻辑索引整体右移，可视区跟着右移同样的量
@@ -1045,6 +1171,7 @@ function paintTail(n) {
   updateLineTail(state.bollUp, state.ind.bollUp, from, len);
   updateLineTail(state.bollMid, state.ind.bollMid, from, len);
   updateLineTail(state.bollLo, state.ind.bollLo, from, len);
+  drawRender();   // ★ 十一期：数据动了 → 画痕的像素位置可能变，重算一遍
 }
 
 // updateLineTail 指标序列只 update 落在 [from,to) 区间里的点
@@ -1059,6 +1186,391 @@ function updateLineTail(series, arr, from, to) {
       series.update({ time: Math.floor(ts / 1000), value: arr[i].v });
     }
   }
+}
+
+/* ================================================================== */
+/* ★ 十一期：持仓均价虚线（60% 透明度）                                */
+/* ================================================================== */
+/* 用户原话：「持仓平均价画虚线 透明度60%」。
+ *
+ * 实现选 createPriceLine 而不是自己画 canvas：
+ *   · createPriceLine 自带右侧价格轴标签 + 跟随缩放平移，
+ *     用户滚到哪它都贴在正确的价格上 —— 自己画 canvas 就得自己
+ *     处理 priceToCoordinate / 重绘时机，等于重造一遍它已经做好的事；
+ *   · lineStyle 用 LineStyle.Dashed（虚线），颜色用 rgba(...,0.6)。
+ *
+ * ★ 关键纪律：换合约时必须把上一组线**全部撤掉**。
+ *   priceLine 是挂在 series 上的，setData 换数据不会清掉它 ——
+ *   不撤的话，BTC 的均价线会留在 CAP 的图上，那是凭空多出来的一条假线。 */
+const AVG_LINE_COLOR = 'rgba(255, 213, 79, 0.6)';   // 十一期：透明度 60%
+
+function clearEntryLines() {
+  state.entryLines.forEach((pl) => {
+    try { state.candle.removePriceLine(pl); } catch (_) { /* 已被 setData 清掉 */ }
+  });
+  state.entryLines = [];
+  state.entryLineKey = '';
+}
+
+// paintEntryLines 给**当前合约**的每笔持仓画一条均价虚线。
+// 一个合约同时只会有一个仓位（trader.go 的「该合约已持仓」闸门），
+// 但这里按数组写，万一以后放开同合约多仓，代码不用改。
+function paintEntryLines() {
+  if (!state.candle || !state.curInst) return;
+
+  const key = state.curInst + '|' + state.curBar;
+  // 持仓数据 3 秒刷一次，均价基本不动；key 没变就别反复拆建（会闪）
+  const pxs = (state.positions || [])
+    .filter((p) => p.instId === state.curInst && Number(p.entryPx) > 0)
+    .map((p) => ({ px: Number(p.entryPx), sz: Number(p.sz) || 0, lev: p.leverage }));
+  const sig = key + '#' + pxs.map((x) => x.px).join(',');
+
+  if (sig === state.entryLineKey && state.entryLines.length) return;
+
+  clearEntryLines();
+  state.entryLineKey = sig;
+
+  pxs.forEach((p) => {
+    try {
+      const pl = state.candle.createPriceLine({
+        price: p.px,
+        color: AVG_LINE_COLOR,
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,   // ★ 虚线
+        axisLabelVisible: true,
+        title: '均价',
+      });
+      state.entryLines.push(pl);
+    } catch (e) { console.warn('画均价线失败', e); }
+  });
+}
+
+/* ================================================================== */
+/* ★ 十一期：OKX 式画图工具（趋势线 / 水平线 / 矩形 / 画笔 / 橡皮擦）    */
+/* ================================================================== */
+/*
+ * 用户原话：「优化K线图 要求有OKX的可以画线 画图 还有可以擦除的功能」。
+ *
+ * ── 为什么用一块**独立叠加 canvas**，而不是往 lightweight-charts 里塞 series ──
+ *   画图要的是「自由落笔」，series 只能画「时间 → 值」的序列，一根 K 线一个点，
+ *   画矩形 / 画笔都得硬凑，而且会和指标抢图例。独立 canvas 想画什么画什么。
+ *
+ * ── 最容易踩的坑：鼠标事件归谁 ──
+ *   叠加层盖在图表上面。要是它一直 pointer-events:auto，
+ *   用户就没法滚轮缩放、拖动平移了 —— 图直接废掉。
+ *   所以：**只有选中某个工具时才把 pointer-events 打开**（CSS #drawCanvas.active），
+ *   平时 none，事件全部穿透到图表。
+ *
+ * ── 坐标系：画痕存「时间 + 价格」，不存像素 ──
+ *   存像素的话，用户一缩放画痕就错位；存「逻辑索引 + 价格」的话，
+ *   向左翻页会把索引整体推移，画痕照样漂移。
+ *   所以统一存 (time, price)，显示时再换算成像素 ——
+ *   换算是**每次重绘现算**的，数据怎么翻页、怎么缩放都不会漂。
+ *   时间超出已加载数据范围（比如线拖到最右边空白区）时按周期外推，
+ *   不然 lightweight-charts 的 timeToCoordinate 会返回 null，线就断了一截。
+ */
+
+const DRAW_TOOLS = ['trend', 'hline', 'rect', 'brush', 'erase'];
+const DRAW_HIT_PX = 9;      // 橡皮擦的判定半径（逻辑像素）
+const DRAW_BRUSH_MIN_PX = 3; // 画笔采样的最小间距，太密存起来没意义
+
+// —— 时间 ↔ 像素（经逻辑索引中转，支持数据范围外的时间）——
+function drawLogicalToTs(logical) {
+  const ks = state.klines;
+  const n = ks.length;
+  if (!n) return null;
+  const i = Math.round(logical);
+  if (i >= 0 && i < n) return ks[i].ts;
+  const barMs = BAR_MS[state.curBar] || 900000;
+  return (i < 0) ? ks[0].ts + i * barMs : ks[n - 1].ts + (i - (n - 1)) * barMs;
+}
+function drawTsToLogical(ts) {
+  const ks = state.klines;
+  if (!ks.length) return 0;
+  const barMs = BAR_MS[state.curBar] || 900000;
+  return (ts - ks[0].ts) / barMs;
+}
+function drawXToTime(x) {
+  const logical = state.chart.timeScale().coordinateToLogical(x);
+  return (logical === null) ? null : drawLogicalToTs(logical);
+}
+function drawTimeToX(ts) {
+  if (ts === null || ts === undefined) return null;
+  return state.chart.timeScale().logicalToCoordinate(drawTsToLogical(ts));
+}
+function drawYToPrice(y) { return state.candle.coordinateToPrice(y); }
+function drawPriceToY(p) { return state.candle.priceToCoordinate(p); }
+
+// —— 存取（按 合约+周期 隔离，刷新页面还在）——
+function drawKey() { return 'okxDraw:' + (state.curInst || '?') + ':' + (state.curBar || '?'); }
+function drawLoad() {
+  state.draw.key = drawKey();
+  try {
+    const raw = localStorage.getItem(state.draw.key);
+    state.draw.items = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(state.draw.items)) state.draw.items = [];
+  } catch (_) { state.draw.items = []; }
+}
+function drawSave() {
+  try {
+    // 画笔点可能很多，超 64KB 就丢最老的几条 —— 不然 localStorage 会满
+    let raw = JSON.stringify(state.draw.items);
+    while (raw.length > 65536 && state.draw.items.length) {
+      state.draw.items.shift();
+      raw = JSON.stringify(state.draw.items);
+    }
+    localStorage.setItem(drawKey(), raw);
+  } catch (_) { /* 隐私模式 / 配额满：画痕只在本次会话内有效，不打断用户 */ }
+}
+
+// —— 画痕的像素化 ——
+// 返回一组折线（每条是 [x,y] 数组），矩形会变成 4 条边、水平线 1 条贯穿线。
+function drawItemToPolylines(it) {
+  const w = state.draw.canvas.clientWidth, h = state.draw.canvas.clientHeight;
+  const pts = (it.pts || []).map((p) => {
+    const x = drawTimeToX(p.t), y = drawPriceToY(p.p);
+    return (x === null || y === null) ? null : [x, y];
+  });
+  if (pts.some((p) => p === null)) return null;   // 有一个点算不出来就整条先不画
+
+  if (it.type === 'hline') {
+    const y = pts[0][1];
+    return [[[0, y], [w, y]]];
+  }
+  if (it.type === 'rect') {
+    const [a, b] = pts;
+    return [[
+      [a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]], [a[0], a[1]],
+    ]];
+  }
+  return [pts.filter(Boolean)];
+}
+
+function drawRender() {
+  const cvs = state.draw.canvas, ctx = state.draw.ctx;
+  if (!cvs || !ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cvs.clientWidth, cvs.clientHeight);
+
+  const all = state.draw.drawing ? state.draw.items.concat([state.draw.drawing]) : state.draw.items;
+  all.forEach((it) => {
+    const polys = drawItemToPolylines(it);
+    if (!polys) return;
+    ctx.strokeStyle = it.color || state.draw.color;
+    ctx.lineWidth = it.type === 'brush' ? 2 : 1.6;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    // 矩形填充一点淡淡的同色，看得出「这是一块区域」
+    if (it.type === 'rect' && polys[0].length === 5) {
+      const [a, b] = it.pts.map((p) => [drawTimeToX(p.t), drawPriceToY(p.p)]);
+      ctx.fillStyle = (it.color || state.draw.color) + '22';
+      ctx.fillRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+        Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+    }
+    polys.forEach((poly) => {
+      if (poly.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0], poly[0][1]);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+      ctx.stroke();
+    });
+  });
+}
+
+// —— 橡皮擦：点中哪条删哪条 ——
+function distToSeg(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + t * dx, cy = y1 + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+function drawEraseAt(x, y) {
+  // 从最新往回找：重叠时优先删最近画的那条，符合直觉
+  for (let i = state.draw.items.length - 1; i >= 0; i--) {
+    const polys = drawItemToPolylines(state.draw.items[i]);
+    if (!polys) continue;
+    for (const poly of polys) {
+      for (let k = 1; k < poly.length; k++) {
+        if (distToSeg(x, y, poly[k - 1][0], poly[k - 1][1], poly[k][0], poly[k][1]) <= DRAW_HIT_PX) {
+          state.draw.items.splice(i, 1);
+          drawSave();
+          drawRender();
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// —— 事件（只在选中工具时才接管鼠标）——
+function drawPos(e) {
+  const r = state.draw.canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+function initDrawTools() {
+  const cvs = $('drawCanvas');
+  const box = document.querySelector('.chart-box');
+  if (!cvs || !box || !cvs.getContext) return;
+  state.draw.canvas = cvs;
+  state.draw.ctx = cvs.getContext('2d');
+
+  // 尺寸跟容器走（DPR 对齐，线条才不糊）
+  const fit = () => {
+    const r = box.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    cvs.width = Math.max(1, Math.round(r.width * dpr));
+    cvs.height = Math.max(1, Math.round(r.height * dpr));
+    drawRender();
+  };
+  fit();
+  window.addEventListener('resize', fit);
+  new ResizeObserver(fit).observe(box);
+
+  // 图表一缩放/平移就重算像素（画痕存的是时间+价格，必须跟着换算）。
+  // 顺带重算标记密度：放大之后空间够了，文字标签要**自动长回来**；
+  // 缩小之后挤了，又要自动收起来。只靠 renderKline 时算一次是不够的 ——
+  // 用户一滚轮，密度就变了。
+  state.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    drawRender();
+    paintMarkers();
+  });
+
+  const setTool = (tool) => {
+    state.draw.tool = (state.draw.tool === tool) ? null : tool;
+    state.draw.drawing = null;
+    document.querySelectorAll('.draw-tool[data-tool]').forEach((b) =>
+      b.classList.toggle('on', b.dataset.tool === state.draw.tool));
+    cvs.classList.toggle('active', !!state.draw.tool);
+    cvs.classList.toggle('erasing', state.draw.tool === 'erase');
+    drawRender();
+  };
+  document.querySelectorAll('.draw-tool[data-tool]').forEach((b) => {
+    b.addEventListener('click', () => setTool(b.dataset.tool));
+  });
+
+  const toggle = $('drawToggle');
+  toggle.addEventListener('click', () => {
+    const bar = $('drawBar');
+    bar.classList.toggle('hidden');
+    toggle.classList.toggle('on', !bar.classList.contains('hidden'));
+  });
+
+  document.querySelectorAll('.draw-c').forEach((b) => {
+    b.addEventListener('click', () => {
+      state.draw.color = b.dataset.c;
+      document.querySelectorAll('.draw-c').forEach((x) =>
+        x.classList.toggle('on', x === b));
+    });
+  });
+  // 默认黄色
+  const first = document.querySelector('.draw-c');
+  if (first) { state.draw.color = first.dataset.c; first.classList.add('on'); }
+
+  $('drawUndo').addEventListener('click', () => {
+    state.draw.items.pop();
+    drawSave(); drawRender();
+  });
+  $('drawClear').addEventListener('click', () => {
+    if (!state.draw.items.length) return;
+    if (!confirm('清空当前合约当前周期的所有画痕？')) return;
+    state.draw.items = [];
+    drawSave(); drawRender();
+  });
+
+  // —— 画布上的鼠标（选中工具才收事件；CSS 已把 pointer-events 打开）——
+  cvs.addEventListener('mousedown', (e) => {
+    if (!state.draw.tool) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.button !== 0) return;
+    const [x, y] = drawPos(e);
+
+    if (state.draw.tool === 'erase') {
+      drawEraseAt(x, y);
+      return;
+    }
+    const t = drawXToTime(x), p = drawYToPrice(y);
+    if (t === null || p === null || !isFinite(p)) return;
+
+    state.draw.drag = true;
+    if (state.draw.tool === 'hline') {
+      // 水平线点一下即成，不用拖
+      state.draw.items.push({ type: 'hline', color: state.draw.color, pts: [{ t, p }] });
+      drawSave(); drawRender();
+      state.draw.drag = false;
+      return;
+    }
+    state.draw.drawing = { type: state.draw.tool, color: state.draw.color, pts: [{ t, p }] };
+    if (state.draw.tool === 'brush') state.draw.lastMove = [x, y];
+    drawRender();
+  });
+
+  cvs.addEventListener('mousemove', (e) => {
+    if (!state.draw.tool) return;
+    // 画图模式下别让鼠标事件冒泡到 .chart-box —— 那里绑着七期的
+    // 「600px 魔法棒跟随」和「点一下爆星星」，画线时满屏星星会把画痕盖住。
+    e.stopPropagation();
+    if (!state.draw.drag || !state.draw.drawing) return;
+    e.preventDefault();
+    const [x, y] = drawPos(e);
+    const t = drawXToTime(x), p = drawYToPrice(y);
+    if (t === null || p === null || !isFinite(p)) return;
+
+    if (state.draw.tool === 'brush') {
+      // 画笔按像素距离采样：太密除了拖慢保存没别的用处
+      const lm = state.draw.lastMove;
+      if (lm && Math.hypot(x - lm[0], y - lm[1]) < DRAW_BRUSH_MIN_PX) return;
+      state.draw.lastMove = [x, y];
+      state.draw.drawing.pts.push({ t, p });
+    } else if (state.draw.tool === 'trend' || state.draw.tool === 'rect') {
+      state.draw.drawing.pts[1] = { t, p };
+    }
+    drawRender();
+  });
+
+  const finish = (e) => {
+    if (!state.draw.drag) return;
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    state.draw.drag = false;
+    state.draw.lastMove = null;
+    const d = state.draw.drawing;
+    state.draw.drawing = null;
+    if (!d) { drawRender(); return; }
+    // 只点了一下没拖（趋势线/矩形）→ 没有形状，丢弃，不当成垃圾存起来
+    if (d.pts.length < 2 && d.type !== 'hline') { drawRender(); return; }
+    if (d.type === 'trend' && d.pts[1] &&
+        Math.abs(drawTimeToX(d.pts[1].t) - drawTimeToX(d.pts[0].t)) < 3 &&
+        Math.abs(drawPriceToY(d.pts[1].p) - drawPriceToY(d.pts[0].p)) < 3) {
+      drawRender(); return;
+    }
+    state.draw.items.push(d);
+    drawSave();
+    drawRender();
+  };
+  cvs.addEventListener('mouseup', finish);
+  cvs.addEventListener('mouseleave', finish);
+
+  // 画图模式下别让点击冒泡到 .chart-box —— 那里绑着七期的「点一下爆星星」，
+  // 画一条线爆十颗星星会把画痕盖住，用户会以为图坏了。
+  cvs.addEventListener('click', (e) => {
+    if (state.draw.tool) { e.preventDefault(); e.stopPropagation(); }
+  });
+
+  // 换合约 / 换周期 → 换一套画痕（localStorage 按键隔离）
+  drawLoad();
+  drawRender();
+}
+
+// drawOnInstChange 换合约 / 换周期时由 renderKline 调用：
+// 键变了就重读那一套画痕，然后重绘。
+function drawOnInstChange() {
+  if (!state.draw.canvas) return;
+  if (drawKey() !== state.draw.key) drawLoad();
+  drawRender();
 }
 
 // loadOlder 向左翻一页：拿 state.klines 第一根之前的那 KLINE_PAGE 根
@@ -1245,6 +1757,10 @@ async function loadKline(reset) {
 
   // 定时刷新走「只重画尾巴」：整幅 setData 会让可视区抖动，而且越到后面越卡
   if (reset) {
+    // ★ 十一期：先对齐尺寸再铺数据。切合约时图表头可能换行数变多，
+    //   容器高度变了；不先对齐，铺完的那一帧用的是旧尺寸 → **图显示不完全**
+    //   （右边/下面缺一条，或整幅被压扁），用户看到的正是这个。
+    if (window.__syncChartSize) window.__syncChartSize();
     renderKline(tickSize, false);
   } else {
     setCandleFormat(tickSize);
@@ -1255,8 +1771,21 @@ async function loadKline(reset) {
   }
 
   if (reset || state.lastKlineKey !== key) {
-    state.chart.timeScale().fitContent();
-    state.scrollGuardUntil = Date.now() + 1200;   // fitContent 也会触发可视区回调，先压住
+    // ★ 十一期：换成带左右留白的「完整可见」，不再用 fitContent()
+    //
+    //   fitContent() 会把可视区间压成 [0, 根数-1]，第一根 K 线的圆心
+    //   正好落在面板左边缘 —— **左边那根被切掉一半**，时间轴第一个标签
+    //   也只剩半截（实测看到的是残缺的「:30」）。用户说的
+    //   「K 线图显示不完全」就是这个：图是在，但最左边的 K 线缺了一块。
+    //
+    //   改成显式给可视区间：左边留 2 根空位、右边留 6 根空位，
+    //   所有 K 线完整落在面板里，两侧各有一段呼吸空间。
+    //   右侧留白同时给「最新价」标签和画图工具的延伸区让出地方。
+    const n = state.klines.length;
+    if (n > 0) {
+      state.chart.timeScale().setVisibleLogicalRange({ from: -2, to: n - 1 + 6 });
+    }
+    state.scrollGuardUntil = Date.now() + 1200;   // 改可视区也会触发回调，先压住
     state.lastKlineKey = key;
   }
 
@@ -1418,6 +1947,20 @@ async function loadPositions() {
 
   // 顶栏的持仓数也跟着走，别等下一次 /api/account
   $('stPos').textContent = rows.length;
+
+  // ★ 十一期：顶栏「持仓金额」★
+  // 用户原话：「持仓多少钱 右上角不显示 要求显示」。
+  // 主数字给**保证金合计**（自己真金白银押进去多少），小字给**名义价值合计**
+  // （杠杆放大后的仓位规模）。两个都是从这份 rows 现算的 ——
+  // 和下面表格里每一行显示的是同一份真实数据，不存在"顶栏一个口径、表格一个口径"。
+  const sumMargin = rows.reduce((s, p) => s + (Number(p.margin) || 0), 0);
+  const sumNotional = rows.reduce((s, p) => s + (Number(p.notional) || 0), 0);
+  $('stPosAmt').textContent = fmtNum(sumMargin, 2) + ' U';
+  $('stPosAmt').className = sumMargin > 0 ? 'accent' : '';
+  $('stPosAmtSub').textContent = '名义 ' + fmtVol(sumNotional) + ' U';
+
+  // 持仓变了 → 均价线跟着重画（renderKline 里也调一次，负责换合约的场景）
+  try { paintEntryLines(); } catch (e) { console.warn('均价线刷新失败', e); }
 }
 
 // ★ 历史窗口：30 天（2026-10-01 由 3 天改为 30 天）。

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"finally-main/internal/conf"
 )
 
 // TestRealConfig_WriteNeverCorrupts 用**真源配置**跑一次写回：
@@ -88,4 +90,58 @@ func TestRealConfig_WriteNeverCorrupts(t *testing.T) {
 	for _, c := range changed {
 		t.Logf("    · %s", c)
 	}
+}
+
+// TestRealConfig_TenPhaseValues 直接读**仓库里那份真源**，断言它就是十期口径。
+//
+// 为什么值得单独测一次：
+//
+//	十期改了四个副本（okx_strategy.json / .example.json / conf.defaultConfig /
+//	service.LoadStrategy 的 def）。单测能证明"默认值构造器对了"，但证明不了
+//	**磁盘上那份 JSON 也对了** —— 而引擎线上读的恰恰是磁盘这份。
+//	漏改 JSON 的症状是：单测全绿、配置文件里还是旧值、用户改了页面也不生效。
+//
+//	所以这条测试不看任何构造器，只读 configs/okx_strategy.json，
+//	用跟引擎同一条 LoadStrategy 解析，逐项比对。
+func TestRealConfig_TenPhaseValues(t *testing.T) {
+	src := filepath.Join("..", "..", "configs", "okx_strategy.json")
+	if _, err := os.Stat(src); err != nil {
+		t.Skip("真源配置不存在，跳过")
+	}
+	cfg, err := LoadStrategy(src)
+	if err != nil {
+		t.Fatalf("真源配置解析失败：%v", err)
+	}
+
+	// —— ③ 开仓闸门：冷却下线、改成持仓数量（用户原话「持仓数量要求<30」）——
+	if cfg.Entry.CooldownBars != 0 {
+		t.Errorf("十期：entry.cooldown_bars 应为 0（冷却已删除），实际 %d —— "+
+			"非 0 会让 trader.go 重新拦「冷却中（距上次开仓不足 N 根）」",
+			cfg.Entry.CooldownBars)
+	}
+	if cfg.Entry.MaxConcurrentPositions != 30 {
+		t.Errorf("十期：entry.max_concurrent_positions 应为 30，实际 %d",
+			cfg.Entry.MaxConcurrentPositions)
+	}
+
+	// —— ⑤ 加仓：价格模式，跌 3% + 该根涨 0.3% ——
+	if cfg.Addon.Mode != conf.AddonModePrice {
+		t.Errorf("十期：addon.mode 应为 %q，实际 %q", conf.AddonModePrice, cfg.Addon.Mode)
+	}
+	if cfg.Addon.DropPct != 3.0 {
+		t.Errorf("十期：addon.drop_pct 应为 3（跌破买价 3%%），实际 %v", cfg.Addon.DropPct)
+	}
+	if cfg.Addon.PriceRise != 0.3 {
+		t.Errorf("十期：addon.price_rise_pct 应为 0.3，实际 %v", cfg.Addon.PriceRise)
+	}
+	// 共振模式的参数要**留着**，切回 resonance 时不用重填（八期的坑：
+	// 两套参数共用键会互相污染，所以是两套独立的键，谁不生效就留着不删）。
+	if cfg.Addon.BarRisePct != 0.7 {
+		t.Errorf("十期：addon.bar_rise_pct 应保留 0.7（共振模式参数），实际 %v", cfg.Addon.BarRisePct)
+	}
+
+	t.Logf("✓ 真源配置 == 十期口径：cooldown_bars=%d / max_concurrent_positions=%d / "+
+		"addon.mode=%s / drop=%.2f%% / price_rise=%.2f%% （共振参数 bar_rise=%.2f%% 保留）",
+		cfg.Entry.CooldownBars, cfg.Entry.MaxConcurrentPositions, cfg.Addon.Mode,
+		cfg.Addon.DropPct, cfg.Addon.PriceRise, cfg.Addon.BarRisePct)
 }

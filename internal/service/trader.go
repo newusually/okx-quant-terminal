@@ -723,6 +723,54 @@ func dropClosed(pos []repo.OpenPos, closedIDs map[int64]bool) []repo.OpenPos {
 // 入场（对应文案 §7.6 的判定顺序）
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// cooldownBlocked —— 同一合约的「开仓冷却」闸门
+// ---------------------------------------------------------------------------
+//
+// ★★ 2026-10-02 十期新增：这道守卫是为一个**已经写出来的 bug** 上的锁 ★★
+//
+// 原来的判定内联写在 runEntries 里，长这样：
+//
+//	if last, ok := ctr.LastEntryTs[id]; ok && last > 0 && durMs > 0 &&
+//	    s.Ts-last < int64(cfg.Entry.CooldownBars)*durMs {
+//	    skip("冷却中（距上次开仓不足 N 根）")
+//	}
+//
+// 看着没问题：CooldownBars=0 时右边是 0，只要 s.Ts >= last，左边 ≥ 0，比较为假。
+//
+// 但它**暗含了一个没说出口的前置条件：s.Ts >= last**。
+// 一旦信号时间戳早于上次开仓时间戳 —— K 线回填、补历史数据、同一根被重扫 ——
+// s.Ts-last 是负数，而 `负数 < 0` **恒为真**，于是：
+//
+//	· 一个已经「关闭」的冷却反过来把信号拦了；
+//	· 日志写的还是自相矛盾的一句「冷却中（距上次开仓不足 0 根）」。
+//
+// 这跟上面两条上限（MaxConcurrentPositions / DailyMaxEntries「0 = 不限」）
+// 是同一个坑的另一副面孔，本项目已经踩过三次：
+//   **「关闭值」必须在判定式里被显式排除，不能指望算术上的巧合。**
+//
+// 所以这里把 `cd > 0` 作为**第一条件**写死。
+// 顺带解决第二件事：把它抽成纯函数，才能直接对它写单测（见 trader_gate_test.go）——
+// 留在 runEntries 里的话，测它得先把 OKX 客户端、合约信息、账户全都造出来。
+//
+// 参数：
+//
+//	cd     冷却根数；<= 0 表示冷却未启用（十期口径：0 = 真的完全不做冷却）
+//	lastTs 该合约上次开仓的 K 线时间戳；0 表示没有历史（map 里取不到就是这个值）
+//	sigTs  当前这根信号所在 K 线的时间戳
+//	durMs  一根 K 线多少毫秒；<= 0 表示周期未知
+//
+// 返回 true = 应当拦下（还在冷却里）。
+func cooldownBlocked(cd int, lastTs, sigTs, durMs int64) bool {
+	if cd <= 0 || lastTs <= 0 || durMs <= 0 {
+		return false
+	}
+	// 边界刻意保持原样：间隔**恰好**等于 cd 根时**放行**（严格小于才拦）。
+	// sigTs < lastTs（乱序）时这里自然为真 = 拦，跟修之前的行为一致 ——
+	// 乱序数据下"宁可少开一笔"，但绝不能把冷却关掉时也走这条路。
+	return sigTs-lastTs < int64(cd)*durMs
+}
+
 // runEntries 对某个周期的扫描结果过闸门并下单。
 //
 // 返回值第三个 extra 是本轮**新开的仓**（只带 InstID/Margin 这两个下游会用到的字段）。
@@ -784,9 +832,14 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 			skip("策略暂停：" + why)
 			continue
 		}
-		// ★ 下面两条上限都是「<= 0 = 不限」（2026-10-01，用户口径「取消限制」）★
+		// ★ 下面这几条闸门的值都是「<= 0 = 不限 / 不启用」
+		//   （2026-10-01 用户口径「取消限制」）★
 		// 所以判定必须先 `> 0` 再看有没有超 —— 不然 0 会变成「已达上限 0」，
 		// 第一笔信号就被拦掉，症状跟用户反馈的「买得太少」一模一样。
+		// ★ 十期（2026-10-02）把冷却也纳进了这条规律：原来它内联在这里、
+		//   没有 `> 0` 守卫，靠 `s.Ts-last < 0` 的算术巧合"顺手"放行 ——
+		//   时间戳乱序时会反过来把已关闭的冷却激活。现已抽成
+		//   cooldownBlocked()，`cd <= 0` 是它第一条放行条件。
 		if cfg.Entry.MaxConcurrentPositions > 0 &&
 			len(openPos)+opened >= cfg.Entry.MaxConcurrentPositions {
 			skip(fmt.Sprintf("持仓数已达上限 %d", cfg.Entry.MaxConcurrentPositions))
@@ -796,8 +849,7 @@ func runEntries(cfg *conf.Config, cli *OKXClient, store *repo.Store, res *ScanRe
 			skip("该合约已持仓")
 			continue
 		}
-		if last, ok := ctr.LastEntryTs[s.InstID]; ok && last > 0 && durMs > 0 &&
-			s.Ts-last < int64(cfg.Entry.CooldownBars)*durMs {
+		if cooldownBlocked(cfg.Entry.CooldownBars, ctr.LastEntryTs[s.InstID], s.Ts, durMs) {
 			skip(fmt.Sprintf("冷却中（距上次开仓不足 %d 根）", cfg.Entry.CooldownBars))
 			continue
 		}

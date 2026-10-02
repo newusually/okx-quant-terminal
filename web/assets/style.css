@@ -44,7 +44,9 @@ html, body {
 /* ---------------- 顶栏 ---------------- */
 .topbar {
   display: flex; align-items: center; gap: 24px;
-  height: 56px; padding: 0 18px;
+  /* ★ 十一期：高度自适应（原来写死 56px）。加了「持仓金额」之后
+     窄屏会换到第二行，写死会把第二行顶出去看不见。 */
+  min-height: 56px; padding: 6px 18px;
   background: linear-gradient(180deg, #12161b, var(--bg-2));
   border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 30;
@@ -61,10 +63,18 @@ html, body {
   padding: 1px 7px; border-radius: 20px;
 }
 
-.stats { display: flex; gap: 22px; margin-left: auto; flex-wrap: nowrap; overflow: hidden; }
+.stats {
+  /* ★ 十一期：顶栏从 9 项涨到 10 项（多了「持仓金额」）。
+     原来 nowrap + overflow:hidden，塞不下就**静默裁掉**最右边 ——
+     那正是用户要求显示的那一项。改成可换行、顶栏高度自适应，
+     窄屏时第二行接住，一个数字都不许被吃掉。 */
+  display: flex; gap: 6px 18px; margin-left: auto; flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .stat { display: flex; flex-direction: column; line-height: 1.25; white-space: nowrap; }
 .stat label { font-size: 11px; color: var(--muted); }
 .stat b { font-size: 14px; font-family: var(--mono); font-weight: 600; }
+.stat .sub { font-size: 10px; color: var(--muted); font-style: normal; font-family: var(--mono); }
 
 .conn { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
@@ -157,21 +167,43 @@ html, body {
 .inst-row .cg { font-size: 10.5px; font-family: var(--mono); }
 
 /* ---------------- 图表区 ---------------- */
-.center { display: flex; flex-direction: column; height: 592px; }
+/* ★ 十一期：592 → 620。图表头从一行拆成两行后多了 ~28px，
+   不补回来的话画布就矮一截，用户看到的就是「图显示不完全」。 */
+.center { display: flex; flex-direction: column; height: 620px; }
+
+/* ★ 十一期：图表头从「七个元素挤一行」改成**两行** ★
+ *
+ *   第一行 ch-main：合约名 / 价格 / 涨跌幅 / 收盘倒计时 ……（右侧）时间周期
+ *   第二行 ch-sub ：OHLC ……（右侧）指标开关 / 画图工具 / 回补 / 刷新
+ *
+ * 为什么必须拆：
+ *   原来七个元素靠 flex-wrap 换行，而 .tf-group 带着 margin-left:auto ——
+ *   空间一紧，它就被甩到第二行的**中间**，右边还跟着指标/回补/刷新，
+ *   用户看到的就是「右上角的分钟线选项卡不见了」。
+ *   现在周期按钮固定在第一行最右，任何宽度下都在右上角。
+ */
 .chart-head {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg-3);
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-3);
 }
+.ch-row { display: flex; align-items: center; gap: 12px; min-width: 0; flex-wrap: wrap; }
+.ch-main .tf-group { margin-left: auto; }
+.ch-sub .ind-group { flex-shrink: 0; }
+.ch-sub #btnBackfill { margin-left: auto; }
 .pair { display: flex; flex-direction: column; line-height: 1.25; }
 .pair-name { font-size: 16px; font-weight: 700; }
 .pair-inst { font-size: 10.5px; font-family: var(--mono); }
 .pair-price { display: flex; align-items: baseline; gap: 8px; }
 .pair-price b { font-size: 20px; font-family: var(--mono); font-weight: 700; }
 .pair-price .chg { font-size: 12px; font-family: var(--mono); }
-.pair-ohlc { font-size: 11px; font-family: var(--mono); }
+.pair-ohlc {
+  font-size: 11px; font-family: var(--mono);
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .chg.flat { color: var(--muted); }
 
-.tf-group { display: flex; gap: 4px; margin-left: auto; }
+.tf-group { display: flex; gap: 4px; flex-shrink: 0; }
 .tf {
   min-width: 40px; height: 26px; padding: 0 9px;
   background: var(--bg-2); border: 1px solid var(--line-2); color: var(--text-2);
@@ -192,17 +224,86 @@ html, body {
 
 .chart-box { position: relative; flex: 1; min-height: 0; }
 #chart { position: absolute; inset: 0; }
+
+/* ★ 十一期：画图叠加层 ★
+ * 平时 pointer-events:none —— 图表的滚轮缩放 / 拖动平移照常工作；
+ * 选了画图工具才切成 all，鼠标事件被这层接走，图表不会被顺手拖走。
+ * z-index 高于图表、低于图例：图例（左上角）必须仍然可见、可读。 */
+#drawCanvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 4; pointer-events: none;
+}
+#drawCanvas.active { pointer-events: auto; cursor: crosshair; }
+#drawCanvas.erasing { cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='9' fill='none' stroke='%23f6465d' stroke-width='2'/><line x1='6' y1='18' x2='18' y2='6' stroke='%23f6465d' stroke-width='2'/></svg>") 12 12, crosshair; }
+
+/* 画图工具条：默认收起，点 ✏️ 展开。挂在第二行右侧，不占图表空间。 */
+.draw-group { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.draw-toggle {
+  height: 24px; padding: 0 8px; font-size: 12px; cursor: pointer;
+  background: var(--bg-3); color: var(--text-2);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.draw-toggle:hover { color: var(--text); border-color: #40474f; }
+.draw-toggle.on { color: var(--accent); border-color: var(--accent); }
+.draw-bar {
+  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+  padding: 2px 4px; background: var(--bg-2);
+  border: 1px solid var(--line-2); border-radius: 5px;
+}
+.draw-tool {
+  height: 22px; padding: 0 7px; font-size: 11px; cursor: pointer;
+  background: transparent; color: var(--text-2);
+  border: 1px solid transparent; border-radius: 4px; white-space: nowrap;
+}
+.draw-tool:hover { color: var(--text); border-color: #40474f; }
+.draw-tool.on { color: #101010; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.draw-sep { width: 1px; height: 14px; background: var(--line-2); margin: 0 2px; }
+.draw-colors { display: flex; align-items: center; gap: 3px; }
+.draw-c {
+  width: 14px; height: 14px; padding: 0; cursor: pointer;
+  border: 2px solid transparent; border-radius: 50%;
+}
+.draw-c.on { border-color: #fff; box-shadow: 0 0 0 1px #000; }
+.sw-yellow { background: #ffd54f; }
+.sw-cyan   { background: #4facfe; }
+.sw-green  { background: #0ecb81; }
+.sw-red    { background: #f6465d; }
+.sw-purple { background: #b39dff; }
+
+/* 持仓均价虚线：画在图上，60% 透明度，右侧价格轴带标签 */
+.chart-box .avg-note {
+  position: absolute; right: 74px; z-index: 3; pointer-events: none;
+  font-size: 10px; font-family: var(--mono); color: rgba(255, 213, 79, .9);
+  text-shadow: 0 1px 2px rgba(0,0,0,.8);
+}
+
 .chart-hint {
   position: absolute; top: 10px; left: 12px; font-size: 11px; color: var(--muted);
   background: rgba(11,14,17,.7); padding: 3px 8px; border-radius: 4px; pointer-events: none;
 }
 
-/* ---------------- 图例（左上角，跟随十字光标）---------------- */
+/* ---------------- 图例（左上角，跟随十字光标）----------------
+ * ★ 十一期反馈：图例贴着图表头第二行、文字直接叠在 K 线上看不清。
+ * 修法：默认 top 8→20px（和图表头拉开距离）+ 半透明底座，
+ * 文字从 K 线上「浮」出来；左侧 ⠿ 手柄可拖动（位置存 localStorage，
+ * 双击复位）。除手柄外整块仍 pointer-events:none，十字光标与图表
+ * 交互不受影响。 */
 .legend {
-  position: absolute; top: 8px; left: 12px; z-index: 3;
+  position: absolute; top: 20px; left: 12px; z-index: 5;
   pointer-events: none; font-size: 11px; font-family: var(--mono);
   line-height: 1.65; text-shadow: 0 1px 2px rgba(0,0,0,.75);
+  background: rgba(11, 14, 17, .68);
+  border: 1px solid rgba(255,255,255,.06); border-radius: 6px;
+  padding: 4px 10px 5px;
 }
+/* 拖动手柄：唯一可交互的点，其余区域照常穿透给图表 */
+.legend .lg-grip {
+  pointer-events: auto; cursor: grab; user-select: none;
+  color: var(--muted); font-size: 12px; padding: 0 3px 0 0;
+}
+.legend .lg-grip:hover { color: var(--text); }
+body.legend-dragging { user-select: none; cursor: grabbing !important; }
+body.legend-dragging .legend .lg-grip { cursor: grabbing; }
 .legend .lg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .legend .lg-sym { font-size: 12.5px; font-weight: 700; color: var(--text); letter-spacing: .3px; }
 .legend .lg-tf {
@@ -243,7 +344,14 @@ html, body {
 .chart-foot {
   display: flex; align-items: center; height: 30px; padding: 0 12px;
   border-top: 1px solid var(--line); font-size: 11px; color: var(--text-2);
+  /* ★ 十一期：这排有 6 段文字 + 1 个按钮，窄一点就互相叠字。
+     收不了就让它省略号，绝不让文字叠在一起看不清。 */
+  gap: 4px; overflow: hidden; white-space: nowrap;
 }
+.chart-foot > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chart-foot > span.mk-legend,
+.chart-foot > span.dot { flex: 0 0 auto; overflow: visible; }
+.chart-foot .sep { flex: 0 0 auto; }
 .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 5px; }
 .dot.up { background: var(--up); }
 .dot.down { background: var(--down); }
@@ -638,7 +746,7 @@ main .center.jump-flash {
   box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
   overflow: hidden;
 }
-.adm-dlg.wide { width: min(860px, 100%); }
+.adm-dlg.wide { width: min(1000px, 100%); }
 
 .adm-hd {
   display: flex; align-items: center; gap: 10px;
@@ -705,6 +813,43 @@ main .center.jump-flash {
 .adm-cond select { width: auto; min-width: 130px; font-family: inherit; }
 .adm-cond input:disabled, .adm-cond select:disabled { opacity: .38; cursor: not-allowed; }
 .adm-cond .adm-unit { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+
+/* ★ 九期：字段从 15 个涨到 40+，单列会滚很久 → 两列栅格排布 ★
+   窄屏（<720px）自动退回单列，免得输入框被挤成一条线。 */
+.adm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; }
+.adm-grid .adm-cond { margin-bottom: 0; }
+@media (max-width: 720px) { .adm-grid { grid-template-columns: 1fr; } }
+
+/* 无勾选框的「纯输入」行。
+   为什么要有这个变体见 admin.js 的 numRow 注释：
+   有些字段（杠杆、加仓比例、保证金口径…）根本没有「关闭值」，
+   给它们套一个勾选框会造出**假的开关** —— 取消了保存，回来看还是原值。 */
+.adm-cond.adm-plain > label { cursor: default; }
+
+/* ★ 十期：可选择 + 可输入的组合控件（见 admin.js 的 comboRow）★
+   左边是原来的数字输入框，右边挂一个**窄的**「预设」下拉 —— 选一下就把值
+   填进左边的框、自己弹回占位项。三条刻意的设计：
+
+     1. 下拉做窄、做次要（灰字、小号）。它是「快捷填入」，不是字段本身。
+        做宽了会让人误以为"持仓上限"有两个参数要填。
+     2. 默认 96px 的输入框宽度不变，所以老代码里按宽度对齐的观感不会被打破。
+     3. 预设下拉必须压过 `.adm-cond select { min-width: 130px }` 那条规则 ——
+        所以选择器写成 `.adm-cond .adm-pair select.adm-preset`（三段 > 一段）。 */
+.adm-pair { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.adm-cond .adm-pair select.adm-preset {
+  width: auto; min-width: 0; max-width: 78px;
+  color: var(--muted); font-size: 11px; padding: 0 4px;
+}
+.adm-cond .adm-pair select.adm-preset option { color: var(--text); }
+.adm-cond .adm-pair select.adm-preset:focus { color: var(--text); }
+
+/* 选中预设 → 值被填进输入框时闪一下，给"确实填进去了"一个反馈。
+   没有这个反馈的话，选完下拉立刻弹回「预设…」，用户会怀疑到底成没成。 */
+.adm-cond input.flash { animation: adm-flash .55s ease-out; }
+@keyframes adm-flash {
+  from { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(252, 213, 53, .20); }
+  to   { border-color: var(--line-2); box-shadow: none; }
+}
 
 /* 模式切换（加仓两套判据）*/
 .adm-modes { display: flex; gap: 8px; margin-bottom: 10px; }

@@ -33,8 +33,23 @@ import (
 const barMs = 15 * 60 * 1000
 
 // mkAddonCfg 一套最小可用的配置（用内置兜底值，再按需覆盖）
+//
+// ★ 十期：把加仓的两个价格参数**显式钉死**在 1% / 1% ★
+//
+//	为什么必须显式写：本文件里的测试数据（比买价低 1.25%、涨幅 +2%）是按
+//	「跌幅门槛 1%、涨幅门槛 1%」构造出来的。
+//	如果让它依赖 conf.DefaultConfig() 的当前值，那么**每次按用户口径调整
+//	生产默认值，这里就会红一片** —— 而红的其实是测试的假设过时了，不是代码坏了。
+//	十期把生产默认改成 3.0 / 0.3 时就正好踩到这个：9 个用例一起变红，
+//	排查成本全花在「到底是我改错了还是测试过时了」上面。
+//
+//	显式写死之后，生产默认值怎么改都不影响这批用例 ——
+//	它们测的是「decideAddon 在**给定参数**下的判定逻辑」，本来就该与默认值无关。
 func mkAddonCfg() *conf.Config {
-	return conf.DefaultConfig()
+	c := conf.DefaultConfig()
+	c.Addon.DropPct = 1.0
+	c.Addon.PriceRisePct = 1.0
+	return c
 }
 
 // mkIns 造一个「每张名义 ≈ 1.6U」的合约：0.1U×20x=2U 名义刚好买 1 张
@@ -231,7 +246,7 @@ func TestAddon_MaxTimesZeroIsUnlimited(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
 	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
-	cfg.Addon.MaxTimes = 0 // 不限
+	cfg.Addon.MaxTimes = 0               // 不限
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -297,7 +312,7 @@ func TestAddon_RatioIsOneThird(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
 	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
-	cfg.Addon.MarginUSDT = 0 // 走 ratio 口径
+	cfg.Addon.MarginUSDT = 0             // 走 ratio 口径
 	cfg.ScoreThreshold = 8
 	if cfg.Addon.Ratio < 0.3332 || cfg.Addon.Ratio > 0.3334 {
 		t.Fatalf("默认 ratio 应为 1/3，实际 %.6f", cfg.Addon.Ratio)
@@ -444,28 +459,38 @@ func TestAddon_ScoreNoLongerMatters(t *testing.T) {
 func TestAddon_BarRisePctGate(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	// ★ 十期必须显式选价格模式 ★
+	//   八期时这个用例是「蹭」默认 mode=resonance 过的（设 BarRisePct=0 关掉
+	//   共振模式的涨幅条件）。十期默认切成 price 后它就走价格分支，
+	//   而价格分支读的是 PriceRisePct —— 原来那行 BarRisePct=0 就失效了。
+	//   显式指定模式，用例的意图才和走的分支对上。
+	cfg.Addon.Mode = conf.AddonModePrice
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
 
 	ins := mkIns()
 	p := basePos(1.6000)
 
-	// 关掉涨幅条件（BarRisePct=0）：下跌的 K 线 + 收盘价够低也能加
+	// 关掉涨幅条件（价格模式读 PriceRisePct；<=0 会退回 BarRisePct，所以两个都置 0）：
+	// 下跌的 K 线 + 收盘价够低也能加
+	cfg.Addon.PriceRisePct = 0
 	cfg.Addon.BarRisePct = 0
+	cfg.Addon.DropPct = 0.3 // 门槛调低，好把"只剩跌幅这一条"单独看出来
 	sig := mkSignal(8, barMs*11)
 	sig.RisePct = -3.0
 	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
-		t.Fatalf("bar_rise_pct=0 表示关闭涨幅条件，收盘价够低就应当加仓")
+		t.Fatalf("price_rise_pct=0 表示关闭涨幅条件，收盘价够低就应当加仓")
 	}
 
 	// 关掉跌幅条件（DropPct=0）：收盘价再高也能加（只剩涨幅条件）
 	cfg.Addon.DropPct = 0
+	cfg.Addon.PriceRisePct = 1.0
 	sig.Close = 1.6500 // 比买入价还高
 	sig.RisePct = 2.0
 	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
 		t.Fatalf("drop_pct=0 表示关闭跌幅条件，只看涨幅应当加仓")
 	}
-	t.Log("✓ bar_rise_pct / drop_pct 两个闸门都真实接在判定上，置 0 即关闭")
+	t.Log("✓ 价格模式的两个闸门都真实接在判定上，置 0 即关闭")
 }
 
 // ---------------------------------------------------------------------------
