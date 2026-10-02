@@ -62,10 +62,10 @@ import (
 var (
 	addr    = flag.String("addr", "127.0.0.1:8090", "网页监听地址（Apache 反代到这里）")
 	proxy   = flag.String("proxy", "", "HTTP/SOCKS5 代理，如 http://127.0.0.1:7890；留空直连")
-	// ★ 2026-10-01 二期：默认天数改成 0 = 「跟着 kline_retain_days 走」（当前 10 天）。
+	// ★ 2026-10-01 二期：默认天数改成 0 = 「跟着 kline_retain_days 走」（当前 30 天）。
 	//   写死 365 会让首次回补去拉一年 —— 而库里只留 10 天，
 	//   拉回来的 355 天转头就被每日任务删掉，纯属白烧 OKX 限频与磁盘 IO。
-	days    = flag.Int("days", 0, "K 线回补天数（0 = 用配置里的 kline_retain_days，当前 10 天）")
+	days    = flag.Int("days", 0, "K 线回补天数（0 = 用配置里的 kline_retain_days，当前 30 天）")
 	focus   = flag.String("focus", "", "启动即回补的合约，逗号分隔；留空 = 按成交额取 TopN")
 	focusN  = flag.Int("focusn", 8, "focus 留空时取成交额前 N 名")
 	workers = flag.Int("workers", 10, "回补并发数（受 OKX 限频约束，10 已接近上限）")
@@ -202,7 +202,7 @@ func main() {
 		return
 	}
 
-	// ---- 每日 K 线清理：删掉早于 KlineRetainDays（当前 10 天）的 K 线 ----
+	// ---- 每日 K 线清理：删掉早于 KlineRetainDays（当前 30 天）的 K 线 ----
 	//  用户口径「只能查询保存最近 10 天数据 + 自动每天凌晨删除数据一次」。
 	//  常驻服务里每天凌晨自动跑一次，这两个开关是给手工核对用的。
 	if *maintDaily || *maintDailyDry {
@@ -1153,7 +1153,7 @@ func walkUpToRoot(dir string, max int) string {
 // resolveBackfillDays 把 -days 解析成真正要回补的天数。
 //
 //	-days > 0  → 用它（运维想临时多拉几天历史时用）
-//	-days <= 0 → 用配置里的 kline_retain_days（当前 10 天）
+//	-days <= 0 → 用配置里的 kline_retain_days（当前 30 天）
 //
 // 为什么要这个函数而不是把 flag 默认值写成 10：
 // 保留窗口的唯一真源是 configs/okx_strategy.json，写死两份迟早走岔

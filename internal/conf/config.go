@@ -271,14 +271,24 @@ type StoreCfg struct {
 	// KeepKlineBars 旧字段（按根数），已废弃，只在老配置里出现时做换算兜底。
 	KeepKlineBars int `json:"keep_kline_bars,omitempty"`
 
-	// KlineRetainDays **K 线**保留窗口（天），默认 365。
+	// KlineRetainDays **K 线**保留窗口（天）。
 	//
-	// ★ 2026-10-01 用户口径：「15 分钟一年数据保留」★
-	//   K 线从 30 天扩到 1 年，因为它是唯一值得长期留存的东西 ——
-	//   回测、筹码分布、指标校验都要一年以上的 15m 历史。
+	// ★ 2026-10-02 十九期：**当前口径 30 天** ★
+	//   二期曾是 10 天，本次放宽到 30（用户要「全市场 5m 30 天数据入库」）。
 	//
-	// 与 RetainDays（记录表 30 天）**分开**：日线级的历史行情要留，
-	// 但每 3 秒一条的权益曲线没必要跟着留一年（那是 1000 万行/年）。
+	// ⚠ 本字段是「多副本口径」，改动时必须四处同步，否则会出现
+	// 「文件里写了 30、兜底却是别的值」这种静默不一致：
+	//   ① configs/okx_strategy.json          ② configs/okx_strategy.example.json
+	//   ③ defaultConfig()（本函数）            ④ 旧键 keep_kline_days 保持 0
+	//
+	// ⚠ 改本值还有两个**非配置文件**的连带项（本项目真实踩过）：
+	//   · 分区：kline 按天分区只铺「now-HotDays → now+Ahead」，往前不自动补。
+	//     保留期变大而分区没扩 → 旧数据全挤进第一个日分区，
+	//     将来那个分区整段 DROP 时会连带删掉还没到期的数据。需手动 REORGANIZE。
+	//   · 回补：resolveBackfillDays 跟随本值，但只在进程启动时读一次 → 必须重启服务。
+	//
+	// 与 RetainDays（记录表 30 天）**分开**：权益曲线每 3 秒一条、
+	// 一年 1000 万行，没必要跟 K 线一个窗口。
 	KlineRetainDays int `json:"kline_retain_days"`
 
 	// RetainDays **记录表**保留窗口（天），默认 30。
@@ -699,17 +709,21 @@ func defaultConfig() *Config {
 			Host: "127.0.0.1", Port: 3306,
 			User: MySQLUser(), Password: mysqlPass, Database: DefaultMySQLDatabase,
 			MaxOpenConns: 64, MaxIdleConns: 32, BatchSize: 500,
-			// ★ 2026-10-01 二期：K 线保留 365 天 → **10 天**（用户口径
-			//   「只能查询保存最近 10 天数据，不能多，多出来就删除」）。
+			// ★ 2026-10-02 十九期：K 线保留 **10 天 → 30 天** ★
+			//   用户口径：「补充所有符合要求的合约的 5m 30 天数据，
+			//   保存在数据库，然后计算出买入信号入库，网页打开 ETH 5m 直接显示」。
+			//   二期（2026-10-01）曾是 10 天，本次放宽到 30。
+			//   ⚠ 与 configs 里那两个键**必须同口径**，否则「文件没写、
+			//   兜底生效」时会静默回到另一个值（本项目已踩过 4 次）。
 			//   记录表仍是独立的 30 天红线，两者互不影响。
 			//
-			// ★ KeepKlineDays（废弃的老键）的兜底值也顺手改成 0 ★
+			// ★ KeepKlineDays（废弃的老键）的兜底值保持 0 ★
 			//   原来它是 30，而归一化的顺序是「先把 KeepKlineDays 兜成 30，
 			//   再让 KlineRetainDays 去沿用 KeepKlineDays」——
-			//   于是「两个键都没写」时拿到的是 30 而不是 10，
-			//   真实口径被一个废弃字段的默认值劫持。改成 0 之后，
+			//   于是「两个键都没写」时拿到的是废弃字段的值，
+			//   真实口径被一个废弃字段的默认值劫持。保持 0 之后，
 			//   只有老配置文件里**显式写了** keep_kline_days 才会被沿用。
-			KeepKlineDays: 0, KlineRetainDays: 10, RetainDays: 30, LogRetainDays: 30,
+			KeepKlineDays: 0, KlineRetainDays: 30, RetainDays: 30, LogRetainDays: 30,
 			ArchiveDir: "archive", ArchiveMinFreeGB: 10,
 			LogDir: "logs", LogMaxMB: 20, LogKeep: 5,
 		},

@@ -319,16 +319,62 @@ func (m *BackfillManager) buildPlan() []BackfillTask {
 	//   5m 约 3 页、15m 约 1 页 ⇒ 480 个 live 合约全量约 1.1 万次
 	//   history-candles 调用，令牌桶 20 次/2 秒 ⇒ 约 20 分钟跑完；
 	//   期间实时行情与下单不受影响。
-	pick := func(dst []BackfillTask) []BackfillTask {
-		return appendAll(dst, all, m.cfg.Bars...)
-	}
+	// Light 遍：沿用 cfg.Bars 原序。
+	//
+	// 每个 (合约,周期) 只要 1 次请求，全部任务合起来两三分钟就跑完 ——
+	// 顺序无所谓，重点是让每个周期的图先有近期数据（历史信号要 200 根
+	// 暖机，没这一段图就是空的、信号一条都出不来）。
+	light := appendAll([]BackfillTask{}, all, m.cfg.Bars...)
 
-	full := pick([]BackfillTask{})
-	out := make([]BackfillTask, 0, len(full)*2)
-	for _, t := range full {
+	// Full 遍：★ 2026-10-02 十九期改为「5m 优先」★ —— 见 preferredBackfillBars。
+	full := appendAll([]BackfillTask{}, all, preferredBackfillBars(m.cfg.Bars)...)
+
+	out := make([]BackfillTask, 0, len(light)+len(full))
+	for _, t := range light {
 		out = append(out, BackfillTask{InstID: t.InstID, Bar: t.Bar, Light: true})
 	}
 	return append(out, full...)
+}
+
+// preferredBackfillBars 把回补周期按**优先级**重排：5m 提到最前，其余保持原序。
+//
+// ★ 2026-10-02 十九期新增 ★
+//
+// 起因：用户要「补充所有符合要求的合约的 5m 30 天数据」。
+// Full 遍原本按 cfg.Bars 的原序翻页（3m → 5m → 15m），30 天口径下：
+//
+//	3m  每合约约 144 页   5m 约 87 页   15m 约 29 页
+//	约 480 个 live 合约合计 ≈ 12.5 万次 history-candles
+//	令牌桶 20 次/2 秒 ⇒ 全部跑完约 3.5 小时
+//
+// 按原序 5m 要等 3m 全部翻完（约 116 分钟）才轮到 —— 用户最常看的那个
+// 周期反而最晚可用。重排后 5m 第一顺位，约 35 分钟就能铺满 30 天。
+//
+// ⚠ **只用于回补顺序**，绝不能拿去改 model.EnabledBars：
+//   那个是「前端选项卡顺序 + 扫描周期」的权威定义
+//   （internal/service/feed.go 的 SupportedBars 直接转发它），
+//   动它会把网页上的 3m/5m/15m 按钮顺序一起改掉。
+func preferredBackfillBars(bars []string) []string {
+	const first = "5m"
+	out := make([]string, 0, len(bars))
+	taken := make([]bool, len(bars))
+	for i, b := range bars {
+		if strings.EqualFold(strings.TrimSpace(b), first) {
+			out = append(out, b)
+			taken[i] = true
+		}
+	}
+	for i, b := range bars {
+		if !taken[i] {
+			out = append(out, b)
+		}
+	}
+	// 万一 cfg.Bars 里没有 5m（例如 -bars 3m）→ 原样返回，不要凭空塞一个
+	// 白名单外的周期进去，否则 /api/kline 与信号回算会一起拒绝它。
+	if len(out) != len(bars) {
+		return bars
+	}
+	return out
 }
 
 // liveIDs 全部 live 状态的合约
