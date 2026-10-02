@@ -78,6 +78,13 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) (any, error
 		"dbPath":             s.db.Path(),
 		"tables":             counts,
 		"uptimeSec":    int(time.Since(s.startAt).Seconds()),
+		// startTs 进程启动时间戳（毫秒）。
+		// ★ 八期新增：管理台保存配置后要能回答「到底生效了没有」。
+		//   靠轮询配置值变化判断会有竞态（值可能本来就等于新值），
+		//   所以前端改用「startTs 变没变」来判断进程是否被重启过 ——
+		//   但本项目的保存是**热重载不重启进程**，所以正常情况 startTs 不变、
+		//   而是 strategy 里的值变了。两个信号一起看，看得最清楚。
+		"startTs":      s.startAt.UnixMilli(),
 		"queueLen":     s.bf.QueueLen(),
 		"backfillDays": s.bf.Config().Days,
 		// 三条独立的数据保留红线（2026-10-01 起）：

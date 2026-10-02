@@ -80,6 +80,7 @@ func basePos(entryPx float64) repo.OpenPos {
 func TestAddon_FiresOnPriceConditions(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -122,6 +123,7 @@ func TestAddon_FiresOnPriceConditions(t *testing.T) {
 func TestAddon_SkipWhenPriceNotReached(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
 
@@ -161,6 +163,7 @@ func TestAddon_SkipWhenPriceNotReached(t *testing.T) {
 func TestAddon_SkipWhenNotReady(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -181,6 +184,7 @@ func TestAddon_SkipWhenNotReady(t *testing.T) {
 func TestAddon_SkipOnSameBarAsEntry(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -196,6 +200,7 @@ func TestAddon_SkipOnSameBarAsEntry(t *testing.T) {
 func TestAddon_SkipWhenGapNotReached(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Addon.MinGapBars = 2
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
@@ -225,6 +230,7 @@ func TestAddon_SkipWhenGapNotReached(t *testing.T) {
 func TestAddon_MaxTimesZeroIsUnlimited(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Addon.MaxTimes = 0 // 不限
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
@@ -251,6 +257,7 @@ func TestAddon_MaxTimesZeroIsUnlimited(t *testing.T) {
 func TestAddon_SkipAtMaxTimes(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Addon.MaxTimes = 3
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
@@ -289,6 +296,7 @@ func TestAddon_SkipWhenDisabled(t *testing.T) {
 func TestAddon_RatioIsOneThird(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.Addon.MarginUSDT = 0 // 走 ratio 口径
 	cfg.ScoreThreshold = 8
 	if cfg.Addon.Ratio < 0.3332 || cfg.Addon.Ratio > 0.3334 {
@@ -317,6 +325,7 @@ func TestAddon_RatioIsOneThird(t *testing.T) {
 func TestAddon_WeightedAverage(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // 七期价格口径：现在是可选模式，测试须显式选它
 	cfg.ScoreThreshold = 8
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.MaxMarginUSDT = 0.5
@@ -415,15 +424,16 @@ func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }
 func TestAddon_ScoreNoLongerMatters(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice // ★ 八期：这条守的是**价格模式**，须显式选它
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
 	cfg.Entry.MaxMarginUSDT = 0.5
 
 	p := basePos(1.6000)
 	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, mkIns()); !d.Add {
-		t.Fatalf("score=0 但价格条件满足 → 应当加仓（七期加仓不看 score）")
+		t.Fatalf("score=0 但价格条件满足 → 应当加仓（价格模式加仓不看 score）")
 	}
-	t.Log("✓ score=0 也能加 —— 加仓触发只认价格条件，与共振分数无关")
+	t.Log("✓ 价格模式下 score=0 也能加 —— 触发只认价格条件，与共振分数无关")
 }
 
 // TestAddon_BarRisePctGate 接在判定上的涨幅闸门必须真的可关/可调。
@@ -456,4 +466,199 @@ func TestAddon_BarRisePctGate(t *testing.T) {
 		t.Fatalf("drop_pct=0 表示关闭跌幅条件，只看涨幅应当加仓")
 	}
 	t.Log("✓ bar_rise_pct / drop_pct 两个闸门都真实接在判定上，置 0 即关闭")
+}
+
+// ---------------------------------------------------------------------------
+// ★ 八期（2026-10-02）：加仓双模式 —— resonance（共振） / price（价格）
+//
+// 为什么要有这组测试：
+//   加仓口径在一/二/七期之间来回改了三次（价格 → 共振 → 价格），每次推翻都
+//   要重写一遍调用方。八期改为**两套并存 + mode 开关**：口径再不合适就换模式，
+//   而不是改判定。mode 一旦串线（比如读错字段、两套判据混着用），
+//   加仓就会在错误的时机触发 —— 这是直接烧钱的事，必须钉死。
+// ---------------------------------------------------------------------------
+
+// TestAddon_ModeResonance_UsesScoreNotPrice 共振模式下判据是 score，
+// 价格跌得再狠也与加仓无关。
+func TestAddon_ModeResonance_UsesScoreNotPrice(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModeResonance
+	cfg.Addon.ScoreThreshold = 5
+	cfg.Addon.BarRisePct = 0.7 // 只留涨幅条件，与分数条件一起判
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	ins := mkIns()
+
+	// 价格「该加」的样子：跌破买价 1%+ 且涨 2%。但 score=3 ≤ 5 → 不加。
+	sig := mkSignal(3, barMs*11) // Close=1.58, RisePct=2.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
+		t.Fatalf("共振模式下 score=3 未超过门槛 5，即使价格条件满足也不该加仓（说明价格判据串进了共振模式）")
+	}
+
+	// score=6 > 5 且涨幅 2% > 0.7 → 加。此时与价格无关，收盘价造得比买价还高。
+	sig2 := mkSignal(6, barMs*12)
+	sig2.Close = 1.7000 // 远高于买价 —— 价格模式绝不会加的形状
+	if d := decideAddon(cfg, p, 1.5950, sig2, barMs, ins); !d.Add {
+		t.Fatalf("共振模式下 score=6 > 5 且涨幅达标 → 应当加仓（收盘价高于买价不影响共振判据）")
+	}
+	t.Log("✓ 共振模式只认 score + 该根涨幅，与「跌破买价」无关")
+}
+
+// TestAddon_ModeResonance_ScoreIsStrictlyGreater 共振模式分数门槛是**严格大于**。
+//
+// ★ 与买入刻意不同：买入是 score ≥ 门槛，加仓是 score > 门槛。
+//   用户八期明确给出 `score_threshold > 2`。差这一个等号，
+//   会让「恰好 2 分」这种最常见的边界走进加仓，属于会真实亏钱的差异。
+func TestAddon_ModeResonance_ScoreIsStrictlyGreater(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModeResonance
+	cfg.Addon.ScoreThreshold = 2
+	cfg.Addon.BarRisePct = 0 // 关掉涨幅条件，只测分数边界
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+	p := basePos(1.6000)
+	ins := mkIns()
+
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(2, barMs*11), barMs, ins); d.Add {
+		t.Fatalf("score 恰好 == 门槛 2，加仓口径是严格大于 → 不该加（若这里过了，说明用成了买入的 >=）")
+	}
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(3, barMs*11), barMs, ins); !d.Add {
+		t.Fatalf("score=3 > 门槛 2 → 应当加仓")
+	}
+	t.Log("✓ 加仓分数门槛为严格大于（与买入的 >= 刻意区分）")
+}
+
+// TestAddon_ModeResonance_ThresholdZeroFollowsEntry 门槛写 0 时跟随买入阈值。
+func TestAddon_ModeResonance_ThresholdZeroFollowsEntry(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModeResonance
+	cfg.Addon.ScoreThreshold = 0 // 跟随买入
+	cfg.Addon.BarRisePct = 0
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	th := cfg.ThresholdFor("TEST-USDT-SWAP")
+	p := basePos(1.6000)
+	ins := mkIns()
+
+	// 恰好等于买入门槛（不严格大于）→ 不加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(th, barMs*11), barMs, ins); d.Add {
+		t.Fatalf("score=买入门槛 %d（不严格大于）不该加仓", th)
+	}
+	// 超一个 → 加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(th+1, barMs*11), barMs, ins); !d.Add {
+		t.Fatalf("score=%d > 买入门槛 %d → 应当加仓", th+1, th)
+	}
+	t.Logf("✓ 加仓 score_threshold=0 时跟随买入门槛 %d", th)
+}
+
+// TestAddon_ModePrice_IgnoresScore price 模式下 score 归零也照样加。
+func TestAddon_ModePrice_IgnoresScore(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice
+	cfg.Addon.DropPct = 1.0
+	cfg.Addon.PriceRisePct = 1.0
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	ins := mkIns()
+	// score=0（一个因子都没中）但价格条件齐备 → 必须加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, ins); !d.Add {
+		t.Fatalf("价格模式下 score=0 只要价格条件满足就应当加仓（说明共振判据串进了价格模式）")
+	}
+	t.Log("✓ 价格模式只认「跌破买价 + 该根涨幅」，与 score 无关")
+}
+
+// TestAddon_ModePrice_UsesPriceRiseNotBarRise 价格模式的涨幅门槛是
+// price_rise_pct，**不是** bar_rise_pct。
+//
+// 为什么要单独测：切模式时最容易犯的错就是两套参数互相污染 ——
+// 页面在价格模式改了「该根涨幅」，结果代码读的是共振模式的 bar_rise_pct，
+// 界面上改了半天没反应，正是本项目最典型的「改了没用」故障。
+func TestAddon_ModePrice_UsesPriceRiseNotBarRise(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice
+	cfg.Addon.DropPct = 1.0
+	cfg.Addon.BarRisePct = 0.2   // 共振侧的值，价格模式**不该读**
+	cfg.Addon.PriceRisePct = 3.0 // 价格侧的真门槛
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	ins := mkIns()
+	sig := mkSignal(8, barMs*11) // Close=1.58 跌幅够, RisePct=2.0
+
+	// 涨幅 2.0 > 0.2（bar_rise）但 < 3.0（price_rise）→ 不加。
+	// 若这里加成功，说明价格模式读了 bar_rise_pct —— 参数串线。
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
+		t.Fatalf("价格模式涨幅 2.0%% 未超 price_rise_pct=3.0，不该加仓（若加了说明误读成 bar_rise_pct）")
+	}
+	sig.RisePct = 3.5 // 超过 3.0 → 加
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("涨幅 3.5%% > price_rise_pct=3.0 → 应当加仓")
+	}
+	t.Log("✓ 价格模式读 price_rise_pct，不与共振模式的 bar_rise_pct 串线")
+}
+
+// TestAddon_ModePrice_PriceRiseFallsBackToBarRise price_rise_pct 缺失(0)时
+// 退回 bar_rise_pct —— 兼容七期已写进配置、只有 bar_rise_pct 的存量文件。
+func TestAddon_ModePrice_PriceRiseFallsBackToBarRise(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = conf.AddonModePrice
+	cfg.Addon.DropPct = 1.0
+	cfg.Addon.BarRisePct = 1.0
+	cfg.Addon.PriceRisePct = 0 // 存量配置没这个键
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	ins := mkIns()
+	sig := mkSignal(8, barMs*11) // RisePct = 2.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("price_rise_pct=0 应退回 bar_rise_pct=1.0，涨幅 2.0%% 达标 → 应当加仓")
+	}
+	sig.RisePct = 0.5 // 低于退回后的门槛 1.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); d.Add {
+		t.Fatalf("跌幅够但涨幅 0.5%% < 退回门槛 1.0 → 不该加仓")
+	}
+	t.Log("✓ 价格模式 price_rise_pct=0 时退回 bar_rise_pct（存量配置兼容）")
+}
+
+// TestAddon_ModeUnknownFallsBackToResonance 认不出的 mode 退回共振。
+//
+// 宁可退回一个明确的口径，也不要让一个拼错的字符串把加仓变成「永远不加」
+// 或「永远加」—— 前者静默失效、后者直接亏钱。
+func TestAddon_ModeUnknownFallsBackToResonance(t *testing.T) {
+	cfg := mkAddonCfg()
+	cfg.Addon.Enabled = true
+	cfg.Addon.Mode = "banana" // 拼错的模式名
+	cfg.Addon.ScoreThreshold = 2
+	cfg.Addon.BarRisePct = 0
+	cfg.Entry.MarginUSDT = 0.1
+	cfg.Entry.MaxMarginUSDT = 0.5
+
+	p := basePos(1.6000)
+	ins := mkIns()
+	// 认不出 → 走共振分支：score=3 > 2 且无涨幅门槛 → 加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(3, barMs*11), barMs, ins); !d.Add {
+		t.Fatalf("未知 mode 应退回共振分支（score 3 > 2）→ 应当加仓")
+	}
+	// 若误走价格分支：DropPct(默认1) 满足、PriceRisePct(默认1) 满足 → 也会加，
+	// 所以补一个「价格模式会拒、共振模式会放」的用例来区分分支：
+	sig := mkSignal(3, barMs*12)
+	sig.RisePct = 0.5 // 价格模式下 < 1 会被拒
+	cfg.Addon.PriceRisePct = 1.0
+	if d := decideAddon(cfg, p, 1.5950, sig, barMs, ins); !d.Add {
+		t.Fatalf("未知 mode 走的是共振分支（不看该根涨幅门槛）→ 涨幅 0.5%% 也该加仓")
+	}
+	t.Log("✓ 未知 addon.mode 退回共振分支，不会静默失效")
 }

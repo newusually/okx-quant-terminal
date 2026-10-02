@@ -300,25 +300,51 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 		return AddonDecision{}
 	}
 
-	// ③ 价格判据（2026-10-02 七期，用户口径）——**不再与买入条件一致**：
+	// ③ 判据：**两套模式，由 addon.mode 选一个**（★ 2026-10-02 八期）。
 	//
-	//    a. 「跌到位置」：这根已收盘 K 线的**收盘价**比买入价低超过 DropPct%（默认 1）
-	//         sig.Close < p.EntryPx × (1 − DropPct/100)
-	//    b. 「反弹启动」：这根 K 线自身涨幅**严格大于** BarRisePct%（默认 1）
-	//         sig.RisePct > BarRisePct
+	//    加仓条件的语义被改过三次（一期价格 → 二期共振 → 七期价格），每次都要
+	//    重写判定、想回滚又找不到旧逻辑。八期改成两套并存、配置开关切换：
 	//
-	//    ★ 为什么不再走 SignalQualified：用户口径改成了纯价格条件，与 score 无关。
-	//      但 ④（晚于开仓）⑤（min_gap）仍然保留 —— 那两条管的是「别在同一根上重复加」，
-	//      与触发条件正交，任何口径下都必须有。
-	//    ★ NaN 安全：写成 !(a < b) —— sig.Close / RisePct 万一是 NaN，
+	//    A. resonance 共振模式（用户八期口径「score_threshold>2 and min_bar_rise_pct>0.7」）：
+	//         ① score **严格大于**门槛（注意：是 > 不是 >=，与买入那边不同）
+	//         ② 该根涨幅 **严格大于** BarRisePct（正数 = 必须真涨）
+	//         门槛为 0 时用顶层 cfg.ScoreThreshold 联动（改买入门槛加仓跟着动）。
+	//
+	//    B. price 价格模式（七期口径，保留可用）：
+	//         ① 收盘价比买入价低超过 DropPct%（「跌到位置」）
+	//         ② 该根涨幅 **严格大于** PriceRisePct（「反弹启动」）
+	//
+	//    ★ 两套都保留 ④（晚于开仓）⑤（min_gap）—— 那两条管的是「别在同一根上
+	//      重复加」，与触发条件正交，任何口径下都必须有。
+	//    ★ NaN 安全：写成 !(a < b) / !(a > b) —— Close / RisePct 万一是 NaN，
 	//      所有比较为 false → 判成「不合格」，偏保守。
-	drop := a.DropPct
-	if drop > 0 && !(sig.Close < p.EntryPx*(1-drop/100)) {
-		return AddonDecision{}
-	}
-	rise := a.BarRisePct
-	if rise > 0 && !(sig.RisePct > rise) {
-		return AddonDecision{}
+	switch a.Mode {
+	case conf.AddonModePrice:
+		drop := a.DropPct
+		if drop > 0 && !(sig.Close < p.EntryPx*(1-drop/100)) {
+			return AddonDecision{}
+		}
+		rise := a.PriceRisePct
+		if rise <= 0 {
+			rise = a.BarRisePct // 老配置只写了 bar_rise_pct
+		}
+		if rise > 0 && !(sig.RisePct > rise) {
+			return AddonDecision{}
+		}
+	default: // resonance（含空串 / 认不出的值 —— fillDefaults 已归一化到这两个之一）
+		th := a.ScoreThreshold
+		if th <= 0 {
+			th = cfg.ThresholdFor(p.InstID)
+		}
+		// ★ 严格大于（用户八期原话「score_threshold>2」）。
+		//   买入那边是 `Score >= threshold`，这里刻意不同 —— 用户对两个条件
+		//   分别给了 `>` 和 `>=`，照做，不在代码里「统一」掉。
+		if !(sig.Score > th) {
+			return AddonDecision{}
+		}
+		if a.BarRisePct > 0 && !(sig.RisePct > a.BarRisePct) {
+			return AddonDecision{}
+		}
 	}
 
 	// ④ 这根 K 线必须**晚于**开仓那根。
@@ -385,16 +411,35 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	if a.MaxTimes > 0 {
 		timesTxt = fmt.Sprintf("上限 %d 次", a.MaxTimes)
 	}
-	// 原因文本里把价格条件都写出来（收盘价 vs 买入价 + 该根涨幅），
-	// 否则事后查「为什么加了这一笔」只看到一个数字，看不出七期的两个条件各是多少。
-	riseTxt := ""
-	if a.BarRisePct > 0 {
-		riseTxt = fmt.Sprintf("、该根涨 %.2f%% ＞ %.2f%%", sig.RisePct, a.BarRisePct)
+	// 原因文本按**实际生效的那套模式**写，否则事后查「为什么加了这一笔」
+	// 会看到另一套模式的参数，越查越糊涂。
+	condTxt := ""
+	switch a.Mode {
+	case conf.AddonModePrice:
+		dropTxt := ""
+		if a.DropPct > 0 {
+			dropTxt = fmt.Sprintf("（收盘 %.6g 低于买价 %.6g 跌 %.2f%%，门槛 %.2f%%）",
+				sig.Close, p.EntryPx, (p.EntryPx-sig.Close)/p.EntryPx*100, a.DropPct)
+		}
+		rise := a.PriceRisePct
+		if rise <= 0 {
+			rise = a.BarRisePct
+		}
+		condTxt = fmt.Sprintf("价格模式：跌到位置%s、该根涨 %.2f%% ＞ %.2f%%",
+			dropTxt, sig.RisePct, rise)
+	default:
+		th := a.ScoreThreshold
+		if th <= 0 {
+			th = cfg.ThresholdFor(p.InstID)
+		}
+		condTxt = fmt.Sprintf("共振模式：score %d ＞ %d、该根涨 %.2f%% ＞ %.2f%%",
+			sig.Score, th, sig.RisePct, a.BarRisePct)
 	}
-	dropTxt := ""
-	if a.DropPct > 0 {
-		dropTxt = fmt.Sprintf("、收盘 %.6g 低于买价 %.6g 的 %.2f%% 线",
-			sig.Close, p.EntryPx, 100-a.DropPct)
+
+	// 金额文本：直接写「加仓 X U」或「按比例 1/3」，别让人猜
+	amountTxt := fmt.Sprintf("加仓 %.4gU", used)
+	if a.MarginUSDT <= 0 {
+		amountTxt = fmt.Sprintf("按原保证金 ×%.4g 加仓 %.4gU", a.Ratio, used)
 	}
 
 	return AddonDecision{
@@ -402,7 +447,7 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 		NewSz: newSz, NewAvgPx: newAvg, NewMargin: newMargin,
 		Count: p.AddonCount + 1, AllMargin: p.AddonMargin + used,
 		Ts: sig.Ts,
-		Reason: fmt.Sprintf("价格条件：收盘价较买入价 -%.2f%%（跌满 %.2f%%）%s%s → 补原仓位 1/3（现价距均价 %+.2f%%，次数%s）",
-			(p.EntryPx-sig.Close)/p.EntryPx*100, a.DropPct, dropTxt, riseTxt, dropFromEntry, timesTxt),
+		Reason: fmt.Sprintf("加仓判据：%s → %s（现价距均价 %+.2f%%，次数%s）",
+			condTxt, amountTxt, dropFromEntry, timesTxt),
 	}
 }

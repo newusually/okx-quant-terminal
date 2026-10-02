@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>·</title>
+<!--
+  ============================================================================
+  八期（2026-10-02）：管理员配置台
+  ----------------------------------------------------------------------------
+  ★ 这个文件为什么这么"空" ★
+
+  用户要求：
+    · 不在首页出现，只能靠 K 线图上「连点 6 次左键 + 1 次右键」唤出；
+    · 直接打开这个网页**不行** —— 只能作为对话框弹出；
+    · 对话框里改条件与金额，保存则生效，取消/关闭则不保存。
+
+  实现口径：
+    1. 本页**自身不含任何配置表单**。表单由 app.js 在主页手势触发后
+       动态构造并注入浮层（见 app.js 的 AdminPanel 段）。
+    2. 本页直接打开时，只显示一句"需要通过主页手势进入"，**不提供任何入口**，
+       也不在 URL 里带参数 —— 没有 token、没有 key，什么都没有。
+    3. 真正的门禁在服务端：/api/admin/* 一律要求有效会话，
+       拿到了这个 HTML 也改不了任何东西（HTML 本身不是密钥）。
+    4. noindex/nofollow：别让搜索引擎把它收进去。
+  ============================================================================
+-->
+<style>
+  :root { --bg: #0b0e11; --text: #eaecef; --muted: #848e9c; --accent: #fcd535; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; min-height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .box {
+    max-width: 460px; text-align: center;
+    border: 1px solid #262b31; border-radius: 12px;
+    background: #161a1e; padding: 30px 26px;
+  }
+  .box .dot {
+    width: 40px; height: 40px; margin: 0 auto 14px; border-radius: 50%;
+    background: rgba(252,213,53,.1); border: 1px solid rgba(252,213,53,.3);
+    color: var(--accent); line-height: 38px; font-size: 18px;
+  }
+  .box h1 { margin: 0 0 8px; font-size: 14.5px; font-weight: 600; }
+  .box p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="box">
+      <div class="dot">✦</div>
+      <h1>此页面无法直接打开</h1>
+      <p>
+        管理入口需要通过主站的 K 线图手势唤出：<br>
+        在图表上连续点击左键 <b>6</b> 次，再点击右键 <b>1</b> 次。<br><br>
+        该入口不出现在任何菜单或链接中，仅供本人使用。
+      </p>
+    </div>
+  </div>
+</body>
+</html>

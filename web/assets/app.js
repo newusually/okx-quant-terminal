@@ -1852,6 +1852,19 @@ function pollBackfillUntilDone() {
 /* ------------------------------------------------------------------ */
 /* 七期（2026-10-02）图表特效：魔法棒光标 + 点击小星星 + 流星雨          */
 /*                                                                     */
+/* ★ 八期修订：魔法棒光标改成 600px ★                                  */
+/*                                                                     */
+/* 为什么不用 CSS `cursor: url(...)` 了：                                */
+/*   浏览器对自定义光标图片有**硬性尺寸上限**（Chromium / Firefox 都在  */
+/*   128×128 逻辑像素量级），超限的图片会被**静默丢弃**并回退到下一个    */
+/*   候选光标 —— 也就是放大到 600px 后，用户什么魔法棒都看不到，        */
+/*   而且控制台不会报任何错。                                          */
+/*   所以 600px 的魔法棒必须是一个**跟着鼠标走的真实 DOM 元素**：       */
+/*     · 仍然 pointer-events:none，不抢图表的鼠标事件；                 */
+/*     · 只在鼠标位于 K 线图内时显示，移出即隐藏；                      */
+/*     · 用 transform 定位（不改 left/top，避免每帧触发布局）；         */
+/*     · 图表本身保留 `cursor: crosshair`，作为兜底的可视准星。         */
+/*                                                                     */
 /* 全部纯前端、低频：流星同屏最多 3 颗、canvas 只在有流星时才重绘，      */
 /* 不碰图表数据，也不拦截任何鼠标事件（fxCanvas pointer-events:none）。  */
 /* ------------------------------------------------------------------ */
@@ -1872,6 +1885,73 @@ function initFx() {
   };
   fit();
   window.addEventListener('resize', fit);
+
+  // ---- ⓪ 600px 魔法棒：DOM 元素跟随鼠标 ----
+  //
+  // 尺寸口径：用户要的是「600px 大」。600px 直接从光标位置铺开的话会盖住
+  // 半个屏幕，所以这里取**棒身长度 600px**，整体按 600 的比例绘制，
+  // 棒尖（金色星芒那端）对齐鼠标热点 —— 与七期 26px 光标的热点语义一致，
+  // 用户「指哪儿打哪儿」的手感不变，只是棒子长了。
+  const WAND_LEN = 600;
+  const wand = document.createElement('div');
+  wand.className = 'fx-wand';
+  // 用 CSS 变量把长度透给样式，方便以后单独调
+  wand.style.setProperty('--wand-len', WAND_LEN + 'px');
+  wand.innerHTML =
+    '<svg viewBox="0 0 600 600" width="' + WAND_LEN + '" height="' + WAND_LEN + '" aria-hidden="true">' +
+    // 棒身：从右下指向左上，棒尖在 (600*0.94, 600*0.06) 附近
+    '<defs>' +
+    '<linearGradient id="fxWandBody" x1="0" y1="1" x2="1" y2="0">' +
+    '<stop offset="0%" stop-color="#4b3a8f"/>' +
+    '<stop offset="55%" stop-color="#7c5cff"/>' +
+    '<stop offset="100%" stop-color="#c9b8ff"/>' +
+    '</linearGradient>' +
+    '<radialGradient id="fxWandGlow" cx="50%" cy="50%" r="50%">' +
+    '<stop offset="0%" stop-color="rgba(255,236,160,.95)"/>' +
+    '<stop offset="45%" stop-color="rgba(255,213,79,.42)"/>' +
+    '<stop offset="100%" stop-color="rgba(255,213,79,0)"/>' +
+    '</radialGradient>' +
+    '</defs>' +
+    // 棒尖光晕
+    '<circle cx="564" cy="36" r="46" fill="url(#fxWandGlow)"/>' +
+    // 棒身
+    '<path d="M60 540 L544 56" stroke="url(#fxWandBody)" stroke-width="14" stroke-linecap="round"/>' +
+    // 棒身高光（细白线，做出金属反光）
+    '<path d="M70 528 L536 62" stroke="rgba(255,255,255,.55)" stroke-width="3.5" stroke-linecap="round"/>' +
+    // 握把缠绕
+    '<path d="M60 540 L118 482" stroke="#2b2154" stroke-width="19" stroke-linecap="round" opacity=".65"/>' +
+    // 棒尖四芒星
+    '<path d="M564 8 l7 17 17 7 -17 7 -7 17 -7-17 -17-7 17-7z" fill="#ffd54f"/>' +
+    // 周围小星
+    '<circle cx="524" cy="14" r="6" fill="#ffe9a3"/>' +
+    '<circle cx="596" cy="86" r="5" fill="#fff3c4"/>' +
+    '<circle cx="508" cy="70" r="4" fill="#b39dff"/>' +
+    '<circle cx="546" cy="104" r="3.5" fill="#7cd4ff"/>' +
+    '</svg>';
+  box.appendChild(wand);
+
+  // 热点：棒尖在 SVG 里的位置是 (564, 36)，换算成百分比后偏移，
+  // 这样无论 WAND_LEN 怎么改，棒尖始终压在鼠标上。
+  const HOT = { x: 564 / 600, y: 36 / 600 };
+  let wandOn = false;
+  const showWand = (on) => {
+    if (on === wandOn) return;
+    wandOn = on;
+    wand.style.opacity = on ? '1' : '0';
+  };
+  box.addEventListener('mouseenter', () => showWand(true));
+  box.addEventListener('mouseleave', () => showWand(false));
+  box.addEventListener('mousemove', (e) => {
+    const r = box.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    // 用 left/top 把 SVG 的左上角摆到「让棒尖落在 (x,y)」的位置。
+    // 这里不用 transform: translate() 是因为 SVG 已经占满 600×600，
+    // 平移量随鼠标变化，用 transform 反而要多做一次字符串拼接；
+    // 实际开销可忽略（只是两个样式赋值，且元素 pointer-events:none）。
+    wand.style.transform =
+      'translate(' + (x - WAND_LEN * HOT.x) + 'px,' + (y - WAND_LEN * HOT.y) + 'px)';
+    showWand(true);
+  });
 
   // ---- ① 点击小星星：从棒尖落点爆开 10 颗，向外飞散 + 旋转淡出 ----
   const STAR_GLYPHS = ['✦', '✧', '⭐', '✨'];

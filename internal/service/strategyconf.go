@@ -51,16 +51,23 @@ type StrategyExit struct {
 
 // StrategyAddon 加仓参数（前端展示用）
 //
-//	用户口径（2026-10-02 七期）：加仓次数**不限**，
-//	触发 = **纯价格条件**：最新已收盘 K 线收盘价比买入价低超过 DropPct%（1）
-//	且该根涨幅 > BarRisePct%（1）——不再与买入条件一致。
+//	用户口径（2026-10-02 八期）：**两套判据并存，由 mode 选一个生效** ——
+//	  · resonance 共振模式：最后一根已收盘 K 线 score > score_threshold
+//	    且该根涨幅 > bar_rise_pct（严格大于）。
+//	  · price 价格模式（七期口径保留）：收盘价比买入价低超 drop_pct%
+//	    且该根涨幅 > price_rise_pct（严格大于）。
+//	加仓次数不限；金额 = margin_usdt（>0）或 原保证金 × ratio。
 type StrategyAddon struct {
 	Enabled    bool    `json:"enabled"`
+	Mode       string  `json:"mode"`        // resonance（默认）| price
+	ScoreThres int     `json:"score_threshold"` // 共振模式：0 = 用顶层 score_threshold
 	Ratio      float64 `json:"ratio"`
-	DropPct    float64 `json:"drop_pct"`     // 七期复活：收盘价比买入价低 N%（默认 1）
-	BarRisePct float64 `json:"bar_rise_pct"` // 七期新增：该根涨幅须 > N%（默认 1）
-	RiseBar    string  `json:"rise_bar"`     // auto = 用该仓位自己的周期
-	MaxTimes   int     `json:"max_times"`    // 0 = 不限
+	DropPct    float64 `json:"drop_pct"`       // 价格模式：收盘价比买入价低 N%（默认 1）
+	BarRisePct float64 `json:"bar_rise_pct"`   // 共振模式：该根涨幅须 > N%（默认 1）
+	PriceRise  float64 `json:"price_rise_pct"` // 价格模式：该根涨幅须 > N%（默认 1）
+	RiseBar    string  `json:"rise_bar"`       // auto = 用该仓位自己的周期
+	MaxTimes   int     `json:"max_times"`      // 0 = 不限
+	MarginUSDT float64 `json:"margin_usdt"`    // 加仓金额（U）；>0 优先于 ratio
 }
 
 // StrategyConfig 只取前端要展示的字段
@@ -154,9 +161,11 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 		//   否则配置缺失时布林上轨会静默复活（与三期 exclude_stock_etf 兜底同一个道理）。
 		Exit: StrategyExit{TakeProfitPct: 0.35, BollUpperExit: false,
 			MaxHoldMinutes: 1440, StopLossPct: 300},
-		// ★ 七期：加仓改纯价格条件 —— DropPct 复活（收盘价比买入价低 1%）、
-		//   BarRisePct 新增（该根涨 > 1%）；MaxTimes: 0 = 不限；RiseBar "auto"。
-		Addon: StrategyAddon{Enabled: true, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0,
+		// ★ 八期：两套加仓判据并存，mode 选一个。
+		//   兜底与 JSON 必须一致（当前 JSON 是 resonance），否则配置缺失时
+		//   跑的是另一套判据 —— 那种「行为和配置对不上」最难查。
+		Addon: StrategyAddon{Enabled: true, Mode: conf.AddonModeResonance,
+			ScoreThres: 2, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 0.7, PriceRise: 1.0,
 			RiseBar: conf.AddonAutoBar, MaxTimes: 0},
 		Live: StrategyLive{ExitSec: 3, EntrySec: 60},
 		Path: path,
@@ -230,6 +239,36 @@ func LoadStrategy(path string) (*StrategyConfig, error) {
 	}
 	if cfg.Addon.RiseBar == "" {
 		cfg.Addon.RiseBar = def.Addon.RiseBar
+	}
+	// ★ 八期：加仓模式归一化。认不出的值一律回 resonance，不「猜一个」——
+	//   走错分支等于加仓条件整体变味，而且不报错。
+	switch strings.ToLower(strings.TrimSpace(cfg.Addon.Mode)) {
+	case conf.AddonModePrice:
+		cfg.Addon.Mode = conf.AddonModePrice
+	default:
+		cfg.Addon.Mode = conf.AddonModeResonance
+	}
+	// 价格模式的涨幅门槛：没写时退回共振模式那一个（七期老配置只有 bar_rise_pct）
+	if cfg.Addon.PriceRise <= 0 {
+		if cfg.Addon.BarRisePct > 0 {
+			cfg.Addon.PriceRise = cfg.Addon.BarRisePct
+		} else {
+			cfg.Addon.PriceRise = def.Addon.PriceRise
+		}
+	}
+	if cfg.Addon.BarRisePct <= 0 {
+		cfg.Addon.BarRisePct = def.Addon.BarRisePct
+	}
+	if cfg.Addon.DropPct <= 0 {
+		cfg.Addon.DropPct = def.Addon.DropPct
+	}
+	// 加仓金额：负数无意义（0 = 用 ratio 比例，保持 0）
+	if cfg.Addon.MarginUSDT < 0 {
+		cfg.Addon.MarginUSDT = 0
+	}
+	// 加仓分数门槛：0 = 用顶层 score_threshold 联动；负数无意义
+	if cfg.Addon.ScoreThres < 0 {
+		cfg.Addon.ScoreThres = 0
 	}
 	if cfg.Exit.MaxHoldMinutes < 0 {
 		cfg.Exit.MaxHoldMinutes = 0

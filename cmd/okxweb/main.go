@@ -50,6 +50,7 @@ import (
 	"finally-main/internal/logx"
 	"finally-main/internal/model"
 	"finally-main/internal/perf"
+	"finally-main/internal/rbac"
 	"finally-main/internal/repo"
 	"finally-main/internal/service"
 )
@@ -596,6 +597,34 @@ func runApp(ctx context.Context) error {
 		func(format string, args ...any) {
 			fmt.Printf("%s [WEB]  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		})
+
+	// ---- 4.5 管理员鉴权（★ 2026-10-02 八期）----
+	//
+	//   管理台能改真实下单口径，所以要求「邮箱验证码 + 会话」。
+	//   验证码发到唯一授权邮箱（硬编码在 internal/rbac，不放进可热插拔的 JSON ——
+	//   那是「谁能改我的钱」的根，不能变成配置项）。
+	//
+	//   SMTP 凭据来源：环境变量 → 工作目录 .smtp-pass（格式 邮箱:授权码）。
+	//   拿不到就只记一条日志，服务照常起 —— 只是管理台会明确报
+	//   「邮件服务未配置」，而不是静默失败让人等一封永远不来的邮件。
+	{
+		smtpCfg, ok := rbac.LoadSMTPConfig(root)
+		if ok {
+			srv.SetMailer(rbac.NewSMTPMailer(smtpCfg, func(format string, args ...any) {
+				logx.Logf("WARN", "[MAIL] "+format, args...)
+			}))
+			fmt.Printf("[MAIL] 管理员验证码发送已就绪（%s:%d，发件人 %s）\n",
+				smtpCfg.Host, smtpCfg.Port, smtpCfg.User)
+		} else {
+			fmt.Printf("[MAIL] ⚠ 未配置 SMTP 凭据 → 管理台登录不可用。" +
+				"设置 OKX_SMTP_USER/OKX_SMTP_PASS 环境变量，或在工作目录放 .smtp-pass（内容：邮箱:授权码）\n")
+		}
+	}
+	// 保存配置成功后立刻重算合约准入（改金额 / 上限会影响哪些合约买得起）
+	srv.SetConfigSavedHook(func() {
+		applyUniverseFilter(db, bf, strategyStore, *days)
+	})
+
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

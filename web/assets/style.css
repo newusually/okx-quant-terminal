@@ -537,9 +537,45 @@ main .center.jump-flash {
    ★ 七期（2026-10-02）：图表特效 —— 魔法棒光标 + 点击小星星 + 流星雨
    ========================================================================== */
 
-/* 魔法棒光标：棒尖在右上 (18,8)，hotspot 对准它；老浏览器退化成 crosshair */
+/* 魔法棒光标
+   --------------------------------------------------------------------------
+   ★ 八期修订：真正的魔法棒是 app.js 里建的 **600px DOM 元素**（.fx-wand），
+     不是这里的 CSS cursor。
+
+   原因：浏览器对自定义光标图片有硬性尺寸上限（Chromium / Firefox 都在
+   128×128 逻辑像素量级），超限图片会被**静默丢弃**并回退到下一个候选值 ——
+   放大到 600px 后用户根本看不到魔法棒，且控制台无任何报错。
+
+   这里保留一个小尺寸（26px）的 CSS 光标作为**兜底**：
+     · JS 未执行 / 元素被移除时，仍然有个魔法棒形状的准星；
+     · 它的热点与 .fx-wand 的棒尖语义一致（都指在棒尖上）。
+   hotspot (18,8) 对准棒尖；老浏览器退化成 crosshair。 */
 #chart {
   cursor: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cpath d='M4 22 L18 8' stroke='%237c5cff' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M18 8 L20.5 5.5' stroke='%23b39dff' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M20.5 0.5 l1.1 2.4 2.4 1.1 -2.4 1.1 -1.1 2.4 -1.1-2.4 -2.4-1.1 2.4-1.1z' fill='%23ffd54f'/%3E%3Ccircle cx='24.2' cy='10.5' r='1.5' fill='%23ffd54f'/%3E%3Ccircle cx='15.5' cy='1.8' r='1.2' fill='%23ffd54f'/%3E%3C/svg%3E") 18 8, crosshair;
+}
+
+/* 600px 魔法棒（app.js 动态创建，跟随鼠标）
+   --------------------------------------------------------------------------
+   · pointer-events:none —— 绝不抢图表自己的 mousemove / click / 缩放；
+   · position:absolute + transform 定位 —— 每帧只改 transform，不触发重排；
+   · opacity 切换显隐（比 display 省一次样式重算，且能淡入淡出）；
+   · z-index 低于浮层（管理台对话框）但高于图表本体与星星。 */
+.fx-wand {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity .12s ease-out;
+  will-change: transform;
+  filter: drop-shadow(0 0 14px rgba(124, 92, 255, .55));
+}
+.fx-wand svg {
+  display: block;
+  overflow: visible;
 }
 
 /* 流星雨画布：盖在图上但完全不吃鼠标事件 */
@@ -569,3 +605,150 @@ main .center.jump-flash {
   60%  { opacity: 1; }
   100% { transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, -30px))) scale(1.25) rotate(220deg); opacity: 0; }
 }
+
+/* ==========================================================================
+   ★ 八期（2026-10-02）：管理台 —— 登录 + 条件配置对话框
+   --------------------------------------------------------------------------
+   设计口径：
+     · 隐藏入口不进首页任何地方（没有按钮、没有链接、没有 data 属性），
+       只能靠 K 线图上「连点 6 次左键 + 1 次右键」的手势唤出。
+     · 对话框一律用在页面内浮层，不跳转、不开新窗口 ——
+       login_new_say.html 直接打开时**什么都不显示**（只有手势才弹）。
+     · 配色沿用主站（深色 + 金色 accent），不另起一套。
+   ========================================================================== */
+
+/* 浮层底 */
+.adm-mask {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(6, 8, 10, .72);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.adm-mask[hidden] { display: none; }
+
+/* 对话框本体 */
+.adm-dlg {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
+  overflow: hidden;
+}
+.adm-dlg.wide { width: min(860px, 100%); }
+
+.adm-hd {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.adm-hd h3 { margin: 0; font-size: 13.5px; font-weight: 600; letter-spacing: .3px; }
+.adm-hd .adm-badge {
+  font-size: 10px; padding: 1px 7px; border-radius: 20px;
+  background: rgba(252, 213, 53, .14); color: var(--accent);
+  border: 1px solid rgba(252, 213, 53, .3);
+}
+.adm-hd .adm-x {
+  margin-left: auto; width: 24px; height: 24px; line-height: 22px;
+  text-align: center; border-radius: 5px; cursor: pointer;
+  color: var(--muted); border: 1px solid transparent; font-size: 15px;
+  background: transparent; padding: 0;
+}
+.adm-hd .adm-x:hover { color: var(--text); border-color: var(--line-2); background: var(--bg-4); }
+
+.adm-body { padding: 16px; overflow-y: auto; flex: 1 1 auto; }
+.adm-ft {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-top: 1px solid var(--line);
+  background: var(--bg-3); flex: 0 0 auto;
+}
+.adm-ft .adm-hint { font-size: 11px; color: var(--muted); margin-right: auto; }
+
+/* 表单区 */
+.adm-sec { margin-bottom: 18px; }
+.adm-sec:last-child { margin-bottom: 4px; }
+.adm-sec > h4 {
+  margin: 0 0 9px; font-size: 12px; font-weight: 600; color: var(--accent);
+  display: flex; align-items: center; gap: 7px;
+}
+.adm-sec > h4::before {
+  content: ''; width: 3px; height: 12px; border-radius: 2px; background: var(--accent);
+}
+
+/* 一条可勾选的条件：整行可点，勾上才启用后面的输入框 */
+.adm-cond {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; margin-bottom: 7px;
+  background: var(--bg-3); border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.adm-cond.on { border-color: rgba(252, 213, 53, .42); background: rgba(252, 213, 53, .05); }
+.adm-cond > label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; cursor: pointer; flex: 1 1 auto; min-width: 0;
+}
+.adm-cond > label input[type=checkbox] {
+  width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; flex: 0 0 auto;
+}
+.adm-cond .adm-desc { font-size: 10.5px; color: var(--muted); display: block; margin-top: 2px; }
+.adm-cond input[type=number], .adm-cond input[type=text], .adm-cond select {
+  width: 96px; height: 27px; flex: 0 0 auto;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 5px;
+  padding: 0 8px; font-size: 12px; font-family: var(--mono);
+}
+.adm-cond select { width: auto; min-width: 130px; font-family: inherit; }
+.adm-cond input:disabled, .adm-cond select:disabled { opacity: .38; cursor: not-allowed; }
+.adm-cond .adm-unit { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+
+/* 模式切换（加仓两套判据）*/
+.adm-modes { display: flex; gap: 8px; margin-bottom: 10px; }
+.adm-mode {
+  flex: 1 1 0; padding: 9px 11px; cursor: pointer;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 7px;
+  font-size: 11.5px; color: var(--text-2);
+}
+.adm-mode.on { border-color: var(--accent); background: rgba(252, 213, 53, .07); color: var(--text); }
+.adm-mode b { display: block; font-size: 12px; margin-bottom: 2px; color: var(--text); }
+.adm-mode.on b { color: var(--accent); }
+
+/* 登录框内的小排版 */
+.adm-login-note {
+  font-size: 11.5px; color: var(--text-2); line-height: 1.75;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 7px;
+  padding: 10px 12px; margin-bottom: 14px;
+}
+.adm-login-note code {
+  font-family: var(--mono); color: var(--accent);
+  background: rgba(252, 213, 53, .1); padding: 1px 5px; border-radius: 3px;
+}
+.adm-field { display: flex; gap: 9px; align-items: center; margin-bottom: 10px; }
+.adm-field > span { width: 68px; font-size: 12px; color: var(--text-2); flex: 0 0 auto; }
+.adm-field input {
+  flex: 1 1 auto; height: 32px; min-width: 0;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 6px;
+  padding: 0 10px; font-size: 13px; font-family: var(--mono);
+}
+.adm-field input.code { letter-spacing: 5px; font-size: 16px; text-align: center; }
+.adm-stage { font-size: 11px; padding: 1px 7px; border-radius: 20px; }
+.adm-stage.pending { color: var(--accent); background: rgba(252, 213, 53, .12); }
+.adm-stage.done { color: var(--up); background: rgba(14, 203, 129, .12); }
+
+/* 保存结果条 */
+.adm-result {
+  margin-top: 12px; padding: 10px 12px; border-radius: 7px;
+  font-size: 12px; line-height: 1.7;
+  border: 1px solid var(--line); background: var(--bg-3);
+}
+.adm-result.ok { border-color: rgba(14, 203, 129, .4); background: rgba(14, 203, 129, .07); }
+.adm-result.bad { border-color: rgba(246, 70, 93, .4); background: rgba(246, 70, 93, .07); }
+.adm-result b { color: var(--text); }
+
+/* 保存过程中禁止重复点 */
+.adm-ft .btn[disabled] { opacity: .45; cursor: not-allowed; }

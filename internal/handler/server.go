@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"finally-main/internal/rbac"
 	"finally-main/internal/repo"
 	"finally-main/internal/service"
 )
@@ -46,6 +47,14 @@ type Server struct {
 	startAt  time.Time
 	logf     func(string, ...any)
 	reqCount int64
+
+	// ★ 2026-10-02 八期：管理员鉴权与配置写回
+	//   auth   验证码 + 会话（internal/rbac）
+	//   writer 配置原子写回（internal/service.StrategyWriter）
+	//   onConfigSaved 保存成功后的回调（cmd 里挂「重算准入过滤」）
+	auth          *rbac.Manager
+	writer        *service.StrategyWriter
+	onConfigSaved func()
 
 	// freshAt 记录每个 (合约,周期) 上次「按需拉最新 K 线」的时间，
 	// 用来给 /api/mark 的实时刷新做节流，防止前端高频轮询打爆 OKX 限频。
@@ -69,14 +78,33 @@ func NewServer(db *repo.DB, feed *service.DataFeed, bf *service.BackfillManager,
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	// ★ 八期：鉴权与配置写回在这里就地建好（都不依赖外部资源），
+	//   cmd 只需在需要时补一个 onConfigSaved 回调与 SMTP mailer。
+	//   mailer 留空时「发验证码」接口会明确报「邮件服务未配置」，
+	//   而不是静默失败 —— 用户能立刻看出少了什么。
+	auth := rbac.NewManager(nil, logf)
+	writer := service.NewStrategyWriter(service.StrategyConfigPath(root), logf)
 	return &Server{
 		db: db, feed: feed, bf: bf, strategy: strategy,
 		assets:  os.DirFS(assetsDir),
 		root:    root,
 		startAt: time.Now(),
 		logf:    logf,
+		auth:    auth,
+		writer:  writer,
 		freshAt: map[string]time.Time{},
 	}
+}
+
+// SetMailer 装上邮件发送器（cmd 里读 SMTP 配置后调）。
+// 分开是为了让 NewServer 保持「无外部依赖」，测试里可以直接构造 Server。
+func (s *Server) SetMailer(m rbac.Mailer) {
+	s.auth = rbac.NewManager(m, s.logf)
+}
+
+// SetConfigSavedHook 挂「配置保存成功后」的回调（cmd 用来重算合约准入）。
+func (s *Server) SetConfigSavedHook(fn func()) {
+	s.onConfigSaved = fn
 }
 
 // Handler 返回带日志 + 计数的 mux
@@ -113,6 +141,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/health", s.wrap(s.handleHealth))
 	mux.HandleFunc("/api/perf", s.wrap(s.handlePerf))
 
+	// ★ 管理员接口（2026-10-02 八期）。
+	//
+	//   这套接口能改真实下单口径，所以鉴权拦在 s.wrap 里（见下面的统一判断），
+	//   只放行两个「登录流程本身」的入口 —— 不登录就没法登录。
+	//
+	//   ⚠ 新增 /api/admin/xxx 时**不用**在这里写鉴权代码：
+	//     一律由 wrap 的前缀判断统一兜住，漏不了的写法只有一种。
+	mux.HandleFunc("/api/admin/send_code", s.wrap(s.handleAdminSendCode))
+	mux.HandleFunc("/api/admin/login", s.wrap(s.handleAdminLogin))
+	mux.HandleFunc("/api/admin/logout", s.wrap(s.handleAdminLogout))
+	mux.HandleFunc("/api/admin/session", s.wrap(s.handleAdminSession))
+	mux.HandleFunc("/api/admin/sessions", s.wrap(s.handleAdminSessionsAll))
+	mux.HandleFunc("/api/admin/config", s.wrap(s.handleAdminSaveOrGetConfig))
+
 	return mux
 }
 
@@ -125,6 +167,25 @@ func (s *Server) wrap(f apiFunc) http.HandlerFunc {
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+		// ★★ 管理员接口统一鉴权（2026-10-02 八期）★★
+		//
+		//   ★ 为什么拦在 wrap 里而不是每个 handler 自己判 ★
+		//     本项目最怕的就是「新加的路径忘了鉴权」—— 那不会报错，
+		//     只会安静地把交易口径暴露出去。所以做成**前缀白名单**：
+		//     凡是 /api/admin/ 下的路径都必须过会话校验，
+		//     只有下面这两个「登录流程本身」的入口例外。
+		//     以后新增 /api/admin/xxx 自动被兜住，不需要记得加代码。
+		if strings.HasPrefix(r.URL.Path, "/api/admin/") && !adminOpenPath(r.URL.Path) {
+			if s.auth == nil || s.auth.Verify(tokenFrom(r)) == nil {
+				s.logf("✗ 未授权访问 %s（来源 %s）", r.URL.Path, clientIP(r))
+				s.writeJSON(w, http.StatusUnauthorized, map[string]any{
+					"ok":        false,
+					"error":     "未登录或会话已过期，请重新验证邮箱",
+					"needLogin": true,
+				})
+				return
+			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/kline" {
 			s.logf("→ %s %s", r.Method, r.URL.RequestURI())
@@ -142,6 +203,21 @@ func (s *Server) wrap(f apiFunc) http.HandlerFunc {
 		}
 		s.writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// adminOpenPath 无需登录即可访问的管理员路径。
+//
+// ★ 只有「登录流程本身」可以在这里：发验证码、登录、登出、探会话。
+//   探会话（session）必须开放 —— 前端就是靠它问「我还需要登录吗」，
+//   它本身只回一个 loggedIn 布尔，不泄露任何配置。
+//   除此之外**不要往这里加东西**。
+func adminOpenPath(p string) bool {
+	switch p {
+	case "/api/admin/send_code", "/api/admin/login",
+		"/api/admin/logout", "/api/admin/session":
+		return true
+	}
+	return false
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {

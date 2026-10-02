@@ -106,23 +106,49 @@ type ExitCfg struct {
 // 15m 开的仓按 15m 判。写 "auto" 就是让引擎去读 p.Bar。
 const AddonAutoBar = "auto"
 
+// 加仓判据的两套模式（★ 2026-10-02 八期新增，用户要求「两套都留、页面可选」）。
+//
+// 历史包袱说明：加仓条件的语义被来回改过三次（一期价格 → 二期共振 → 七期价格），
+// 每次改都要重写判定、回滚时又找不到旧逻辑。八期不再「推翻重来」，
+// 而是把两种判据**并存**，由 addon.mode 选一个生效：
+//
+//	AddonModeResonance —— 共振模式（用户八期口径）：
+//	    最后一根已收盘 K 线 score > addon.score_threshold
+//	    且该根涨幅 > addon.bar_rise_pct（严格大于，正数=必须真涨）。
+//
+//	AddonModePrice —— 价格模式（七期口径，保留可用）：
+//	    收盘价比买入价低超过 addon.drop_pct%
+//	    且该根涨幅 > addon.price_rise_pct（严格大于）。
+//
+// 空字符串按 resonance 处理（老配置没写 mode 时走用户当前想要的那套）。
+const (
+	AddonModeResonance = "resonance"
+	AddonModePrice     = "price"
+)
+
 // AddonCfg 加仓（补仓 / 摊薄均价）。
 //
-// 现行口径（2026-10-02 七期，用户指定）：
+// 现行口径（2026-10-02 八期，用户指定）：
 //
-//	加仓额 = 原持仓保证金 × Ratio（Ratio 默认 1/3）
-//	触发   = **纯价格条件**：最新已收盘 K 线收盘价比买入价低超过 DropPct%（默认 1）
-//	         **且** 这根 K 线自身涨幅超过 BarRisePct%（默认 1）——「跌到位置 + 反弹启动」
+//	加仓额 = 显式金额 MarginUSDT（>0）或 原持仓保证金 × Ratio（默认 1/3）
+//	触发   = 由 Mode 决定的两套判据之一（见上面两个常量）
 //	次数   = **不限**（MaxTimes = 0）
 //
 // ★ 历史变迁：一期「15m 先跌 DropPct% 后转涨」（相对窗口低点）→ 二期改成与买入一致
-//   （8 因子共振，DropPct 因此废弃）→ 七期改回价格条件，但语义变了：
-//   是「相对**买入价**低 N%」，不是相对窗口低点。DropPct 就此复活。
+//   （8 因子共振，DropPct 因此废弃）→ 七期改回价格条件（DropPct 复活，语义变为
+//   「相对**买入价**低 N%」）→ 八期两套并存，加 Mode 开关。
 type AddonCfg struct {
 	Enabled bool `json:"enabled"`
 
-	// Ratio 加仓额 = 原持仓保证金 × Ratio。默认 1/3。
-	Ratio float64 `json:"ratio"`
+	// Mode 用哪套加仓判据：AddonModeResonance（默认）/ AddonModePrice。
+	// 空 = resonance。写别的值会被 fillDefaults 反压回 resonance（不静默走错分支）。
+	Mode string `json:"mode"`
+
+	// ScoreThreshold 【共振模式】加仓要求的分数门槛。0 = 用顶层 ScoreThreshold
+	//   （这样「加仓门槛」与「买入门槛」默认联动，改一处两处都动）。
+	//   ★ 判定符号是**严格大于**（用户八期口径「score_threshold>2」），
+	//     与买入那边的 `>=` 不同 —— 见 service.decideAddon 的说明。
+	ScoreThreshold int `json:"score_threshold"`
 
 	// DropPct 【七期复活】最新已收盘 K 线的收盘价比**买入价**低超过这个百分比（%）
 	//   才允许加仓 —— 「跌到位置」。默认 1.0。
@@ -130,11 +156,21 @@ type AddonCfg struct {
 	//   ≤ 0 会被 fillDefaults 反压回默认 1.0（不支持关闭；要关就 addon.enabled=false）。
 	DropPct float64 `json:"drop_pct"`
 
-	// BarRisePct 【七期新增】触发加仓的那根已收盘 K 线自身涨幅必须**严格大于**
-	//   这个百分比（%）—— 「反弹启动」。默认 1.0。
+	// BarRisePct 【共振模式】该根涨幅必须**严格大于**这个百分比（%）。
 	//   判定用 Signal.RisePct（同一根、同一个数，买入扫描与加仓不会各算一遍）。
 	//   ≤ 0 会被 fillDefaults 反压回默认 1.0。
 	BarRisePct float64 `json:"bar_rise_pct"`
+
+	// PriceRisePct 【价格模式】该根涨幅必须**严格大于**这个百分比（%）。
+	//   ★ 为什么价格模式的涨幅要用独立键（八期）：
+	//     两套模式的「涨幅」语义不完全一样（共振模式配合分数用，价格模式配合跌幅用），
+	//     共用 bar_rise_pct 的话，切模式时前一套的值会污染后一套 —— 用户切来切去
+	//     就总得重填。独立键 = 两套参数各自 remember。
+	//   ≤ 0 时退回 BarRisePct（老配置只写了 bar_rise_pct 也能照常工作）。
+	PriceRisePct float64 `json:"price_rise_pct"`
+
+	// Ratio 加仓额 = 原持仓保证金 × Ratio。默认 1/3。仅当 MarginUSDT <= 0 时生效。
+	Ratio float64 `json:"ratio"`
 
 	// RiseBar 用哪个周期判断。默认 AddonAutoBar（"auto"）=
 	//   用「该仓位自己的周期」（1m 开的按 1m 判、15m 开的按 15m 判）；
@@ -156,7 +192,8 @@ type AddonCfg struct {
 	// MinGapBars 两次加仓之间至少隔多少根 RiseBar。默认 1。
 	MinGapBars int `json:"min_gap_bars"`
 
-	// MarginUSDT 固定加仓额（>0 时优先于 Ratio，一般留 0）
+	// MarginUSDT 固定加仓额（U）。>0 时优先于 Ratio ——
+	//   八期管理台允许直接输入加仓金额，走的就是这个字段。0 = 用 Ratio 比例。
 	MarginUSDT float64 `json:"margin_usdt"`
 
 	// OnlyWhenPriceUp 【已废弃】旧口径「只在上行时加」，新逻辑不读。
@@ -519,8 +556,16 @@ func defaultConfig() *Config {
 		// ★ MaxTimes = 0 = **不限**（用户口径「加仓没有任何限制」）；
 		//   RiseBar = "auto" = 用「该仓位自己的周期」（p.Bar），
 		//   这样 1m 开的仓按 1m 判、15m 开的仓按 15m 判。
+		// ★ 八期：Mode 必须显式给值。
+		//   兜底值与 configs/okx_strategy.json **同口径**（当前 resonance）——
+		//   否则「配置文件读不到」时跑的是另一套加仓判据，
+		//   而现象只是「加仓条件和配的对不上」，最难查。
+		//   Mode 留空会让 decideAddon 落进 default 分支，
+		//   在那之前所有调用方就得先自己归一化一遍，属于隐性契约。
 		Addon: &AddonCfg{
-			Enabled: true, Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0, RiseBar: AddonAutoBar,
+			Enabled: true, Mode: AddonModeResonance,
+			ScoreThreshold: 2, PriceRisePct: 1.0,
+			Ratio: 1.0 / 3.0, DropPct: 1.0, BarRisePct: 1.0, RiseBar: AddonAutoBar,
 			LookbackBars: 24, MaxTimes: 0, MinGapBars: 1,
 			MarginUSDT: 0, OnlyWhenPriceUp: true,
 		},
@@ -808,18 +853,39 @@ func fillDefaults(c *Config) {
 		c.Addon = d.Addon
 	} else {
 		a, da := c.Addon, d.Addon
-	if a.Ratio <= 0 {
-		a.Ratio = da.Ratio
-	}
-	// ★ 七期：DropPct 复活（收盘价比买入价低 N%）、新增 BarRisePct（该根涨 N%）。
-	//   两者 ≤ 0 都反压回默认 1.0 —— 这两个条件就是加仓的全部触发依据，
-	//   静默关闭等于加仓彻底失去闸门，宁可回默认也不放空。
-	if a.DropPct <= 0 {
-		a.DropPct = da.DropPct
-	}
-	if a.BarRisePct <= 0 {
-		a.BarRisePct = da.BarRisePct
-	}
+		// ★ 八期：Mode 决定用哪套判据。认不出的值一律回 resonance，
+		//   绝不「猜一个」—— 走错分支等于加仓条件整体变味，而且不报错。
+		switch strings.ToLower(strings.TrimSpace(a.Mode)) {
+		case AddonModePrice:
+			a.Mode = AddonModePrice
+		default:
+			a.Mode = AddonModeResonance
+		}
+		if a.Ratio <= 0 {
+			a.Ratio = da.Ratio
+		}
+		// ★ 七期：DropPct 复活（收盘价比买入价低 N%）、新增 BarRisePct（该根涨 N%）。
+		//   两者 ≤ 0 都反压回默认 1.0 —— 这两个条件就是价格模式下加仓的全部触发依据，
+		//   静默关闭等于加仓彻底失去闸门，宁可回默认也不放空。
+		if a.DropPct <= 0 {
+			a.DropPct = da.DropPct
+		}
+		if a.BarRisePct <= 0 {
+			a.BarRisePct = da.BarRisePct
+		}
+		// ★ 八期：价格模式的涨幅门槛独立成键。没写（0）时退回 BarRisePct，
+		//   这样七期只配了 bar_rise_pct 的老配置照常工作。
+		if a.PriceRisePct <= 0 {
+			if a.BarRisePct > 0 {
+				a.PriceRisePct = a.BarRisePct
+			} else {
+				a.PriceRisePct = da.PriceRisePct
+			}
+		}
+		// ScoreThreshold 允许为 0（= 用顶层 ScoreThreshold 联动），负数无意义
+		if a.ScoreThreshold < 0 {
+			a.ScoreThreshold = 0
+		}
 		if a.RiseBar == "" {
 			a.RiseBar = da.RiseBar
 		}
