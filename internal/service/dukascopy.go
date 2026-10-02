@@ -96,6 +96,18 @@ const (
 // 这两个地址是 dukaHost 的 CNAME 终结点（AWS），实测可连。
 var dukaFallbackIPs = []string{"16.62.244.190", "16.62.187.25"}
 
+// dukaBadIPs 已知连不通的地址，解析到也直接丢弃。
+//
+// 来源：本机系统 DNS 被污染后给出的就是这个地址（2026-10-02 实测）。
+// 它偶尔会通过 DoH 回来（见 17:08 那轮日志：`解析到 [194.8.15.180]`），
+// 而它每次都是 20s+ 超时 —— 放进候选列表就是白等一次 dial 超时。
+//
+// 不靠「解析失败才用兜底」来兜：一旦它混进列表，就会先耗掉 15s 的
+// DialContext 超时，整轮同步的节奏全被打乱。
+var dukaBadIPs = map[string]bool{
+	"194.8.15.180": true,
+}
+
 // errNQLimited 数据源限流哨兵错误。
 //
 // 实测：Dukascopy 在连续请求后会进入惩罚冷却 —— 表现为 HTTP 503
@@ -145,11 +157,33 @@ var (
 //
 // 为什么要这么麻烦：本机系统 DNS 把它解析到一个连不通的地址（实测 TLS 握手超时），
 // 而 curl --resolve 到 DoH 查出的地址立刻 200。这类「DNS 污染」只能自己绕。
+//
+// ★ 2026-10-02 十三期修正：DoH 的结果**不能单独信** ★
+//
+// 实测（17:08 那轮日志）：DoH 有一次返回了 194.8.15.180 —— 正是系统 DNS 那个
+// 连不通的地址，直接导致整轮卡在 i/o timeout 上白跑。所以现在改成：
+//
+//	① 过滤掉已知连不通的 IP（见 dukaBadIPs）
+//	② 把内置兜底 IP **并集**进来（去重）——DoH 少给一个地址也不会少一条路
+//	③ 顺序：DoH 给的在前，兜底的在后（谁先连上就用谁，见 newDukaClient）
 func resolveDukaIPs(ctx context.Context) []string {
-	ips := fetchDoHIPs(ctx)
+	ips, seen := make([]string, 0, 4), map[string]bool{}
+	add := func(list []string) {
+		for _, ip := range list {
+			ip = strings.TrimSpace(ip)
+			if ip == "" || seen[ip] || dukaBadIPs[ip] {
+				continue
+			}
+			seen[ip] = true
+			ips = append(ips, ip)
+		}
+	}
+	add(fetchDoHIPs(ctx))
+	add(dukaFallbackIPs)
 	if len(ips) == 0 {
 		ips = dukaFallbackIPs
 	}
+
 	dukaIPMu.Lock()
 	dukaIPList = ips
 	dukaIPMu.Unlock()
@@ -483,20 +517,39 @@ func nqMissingDays(db *repo.DB, today time.Time) ([]time.Time, error) {
 		d := time.UnixMilli(k.Ts).UTC().Truncate(24 * time.Hour)
 		have[d.UnixMilli()] = true
 	}
-	miss := make([]time.Time, 0, nqDays)
-	for i := nqDays - 1; i >= 0; i-- { // 从旧到新：保证图的左侧先连续
-		d := today.AddDate(0, 0, -i)
-		if !have[d.UnixMilli()] || i <= 1 {
-			miss = append(miss, d)
-		}
-	}
+	miss := nqMissingDaysOf(have, today)
 	return miss, nil
 }
 
-// nqAllDays 最近 nqDays 天（旧 → 新）。库里读不出来时按「全缺」处理。
+// nqMissingDaysOf 已入库日期集合（零点毫秒）→ 待补日期列表，顺序**新 → 旧**。
+//
+// ★★ 顺序即优先级（2026-10-02 十三期修正）★★
+//
+// 原来是「旧 → 新」，配合单轮限量 nqMaxPerRound=8，等于**每轮只尝试最老的 8 天**。
+// 实测后果：第一轮拉到 09-03 就撞上限流，之后每轮都想拉同一批最老的日子、
+// 每轮都被 503 挡回，**最近的日子永远排在队尾，永远轮不到**。
+// 用户看到的现象就是「网页上只有一个月前那一天，最近的数据看不到」。
+//
+// 反过来从最近开始补，即使每轮只能成功拉 1 天，今天/昨天也先到。
+// 历史缺口慢慢往左扩 —— 这才是对的优先级：**先能用，再完整**。
+//
+// 抽成纯函数是为了能直接单测顺序（见 TestNQMissingDays_NewestFirst）：
+// 这个顺序错了不会报任何错，只是"最近的数据永远看不到"，极难从日志里发现。
+func nqMissingDaysOf(have map[int64]bool, today time.Time) []time.Time {
+	out := make([]time.Time, 0, nqDays)
+	for i := 0; i < nqDays; i++ {
+		d := today.AddDate(0, 0, -i)
+		if !have[d.UnixMilli()] || i <= 1 { // 最近 2 天始终重拉（当天数据还在生成）
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// nqAllDays 最近 nqDays 天（**新 → 旧**，与 nqMissingDays 同序）。库里读不出来时按「全缺」处理。
 func nqAllDays(today time.Time) []time.Time {
 	out := make([]time.Time, 0, nqDays)
-	for i := nqDays - 1; i >= 0; i-- {
+	for i := 0; i < nqDays; i++ {
 		out = append(out, today.AddDate(0, 0, -i))
 	}
 	return out
@@ -556,6 +609,7 @@ func SyncNQOnce(ctx context.Context, db *repo.DB, logf func(string, ...any)) (NQ
 
 	allByBar := make(map[string][]model.Kline, len(NQBars))
 	var minTs, maxTs int64
+	consecFail := 0
 
 	for _, day := range batch {
 		if ctx.Err() != nil {
@@ -564,17 +618,38 @@ func SyncNQOnce(ctx context.Context, db *repo.DB, logf func(string, ...any)) (NQ
 		raw, exists, err := fetchDukaDay(ctx, hc, day, logf)
 		if err != nil {
 			res.Failed++
-			logf("[NQ] %s 下载失败：%v", day.Format("2006-01-02"), err)
-			// ★ 限流是 IP 级、全局性的：同一轮里换个日期再打也是白打，
-			//   只会把冷确期拖得更长。立刻中止本轮，缺口留给下一轮 —— 慢就是快。
+			// ★★ 「当天失败」必须与「真限流」区分开（2026-10-02 十三期）★★
+			//
+			// 实测踩到：改成「新→旧」之后，第一个要拉的就是**今天**，而今天的
+			// 文件本身就可能还没生成完 / 正在写入，实测就是 26s 超时。
+			// 而 fetchDukaDay 把「网络超时」和「HTTP 503」都归成 errNQLimited，
+			// 旧代码一见到它就 break —— 结果**每轮都死在第一天**，
+			// 昨天的数据同样永远轮不到，等于换了个姿势复现同一个 bug。
+			//
+			// 所以：今天（批次里最靠前那天）的失败按「这天暂时没准备好」处理，
+			// 只等一个普通间隔就往下走；其余天失败才按限流处理，
+			// 且要**连续两次**才中止整轮 —— 单天抖动不该让整轮白跑。
+			if day.Equal(today) {
+				logf("[NQ] %s（当天，文件可能尚未生成完）拉取失败，跳过：%v", day.Format("2006-01-02"), err)
+				sleepCtx(ctx, nqReqGap)
+				continue
+			}
+			consecFail++
 			if errors.Is(err, errNQLimited) {
 				res.Limited = true
-				logf("[NQ] 判定数据源限流冷却中，本轮中止（缺口 %d 天留待下轮）", len(missing)-res.Empty)
+			}
+			logf("[NQ] %s 下载失败（连续第 %d 次）：%v", day.Format("2006-01-02"), consecFail, err)
+			// 限流是 IP 级、全局性的：同一轮里换个日期再打也是白打，
+			// 只会把冷却期拖得更长。连续两次即中止本轮，缺口留给下一轮 —— 慢就是快。
+			if consecFail >= 2 {
+				logf("[NQ] 连续 %d 天失败，判定数据源限流冷却中，本轮中止（缺口 %d 天留待下轮）",
+					consecFail, len(missing)-res.Empty)
 				break
 			}
 			sleepCtx(ctx, nqCooldownGap)
 			continue
 		}
+		consecFail = 0
 		if !exists {
 			res.Empty++ // 周末/休市，正常
 			sleepCtx(ctx, nqReqGap)
@@ -624,10 +699,20 @@ func SyncNQOnce(ctx context.Context, db *repo.DB, logf func(string, ...any)) (NQ
 	// ★ 不能用现有的 RunSignalBackfillOnce：它只遍历 TradeableInstIDs()，
 	//   而 NQ 刻意是 tradeable=0（不可交易），永远不会被它扫到。
 	//   所以这里**显式**给 NQ 自己跑一遍 —— 信号照样算、照样展示，只是不下单。
+	//
+	// ★ 十三期：NQ 用**它自己那套买入口径**（配置 nq_signal：共振 >= 4 且收阴），
+	//   不是全市场的「共振 >= 3 且跌幅 > 0.7%」。原因见 conf.NQSignalCfg 的注释：
+	//   指数单根波动实测上限 ±0.35%，沿用 -0.7% 会恒等于 0 条信号。
 	cfg := loadStrategyConfigForNQ()
 	if cfg != nil {
+		rule := nqRuleFromConfig(cfg)
+		// 口径变了 → 旧信号 + 旧水位线一起作废，否则新门槛永远不作用到历史 K 线上
+		// （水位线跳过已算区间，是"改了没用"的经典成因）。
+		if err := ensureNQRuleFresh(db, rule, logf); err != nil {
+			logf("[NQ] 口径指纹检查失败（本轮仍按新口径重算）：%v", err)
+		}
 		for _, bar := range NQBars {
-			n, err := BackfillSignalsFor(cfg, db, NQInstID, bar)
+			n, err := BackfillSignalsForReadonly(cfg, db, NQInstID, bar, rule)
 			if err != nil {
 				logf("[NQ] %s 信号回算失败：%v", bar, err)
 				continue
@@ -746,4 +831,66 @@ func StartNQSync(ctx context.Context, db *repo.DB, logf func(string, ...any)) {
 // 否则「图上算了信号、实际口径却不同」这种问题会再次出现。
 func loadStrategyConfigForNQ() *conf.Config {
 	return conf.LoadConfig()
+}
+
+// ---------------------------------------------------------------------------
+// NQ 专属信号口径（2026-10-02 十三期）
+// ---------------------------------------------------------------------------
+
+// nqRuleFromConfig 从配置里取 NQ 的专属买入信号口径。
+//
+// 取值的三态语义全部收敛在 conf.Config.NQSignalRule()（**唯一入口**）：
+//
+//	显式 enabled=false → 未启用，回算退回全市场通用口径
+//	整块缺失            → 默认口径（4 / 只要收阴），**不是**"关闭"
+//
+// 第二种是刻意的降级方向：宁可和默认口径一样，也不能因为一块配置丢了就让 NQ
+// 退回全市场的 -0.7% —— 那等于一条信号都算不出来。
+func nqRuleFromConfig(cfg *conf.Config) ReadonlySignalRule {
+	th, rise, ok := cfg.NQSignalRule()
+	if !ok {
+		return ReadonlySignalRule{}
+	}
+	return ReadonlySignalRule{ScoreThreshold: th, MaxRisePct: rise}
+}
+
+// nqRuleMetaKey 记录「上一轮算 NQ 信号时用的是哪套口径」。
+const nqRuleMetaKey = "nq_signal_rule"
+
+// ensureNQRuleFresh 口径变了就作废旧信号 + 旧水位线，让本轮从头重算。
+//
+// ★ 这是本功能「改了就生效」的关键（2026-10-02 十三期）★
+//
+// 水位线把已算区间整段跳过，signals 又是 UNIQUE + INSERT IGNORE —— 两个机制
+// 叠加之后，改了门槛却什么都不清，新口径**永远不会作用到历史 K 线上**：
+// 不报错、日志正常、页面上就是没变化。所以把口径描述当指纹存进 meta 表，
+// 对不上就删信号 + 删水位线，下一轮全量重算。
+//
+// 指纹用 rule.String()（人类可读），这样日志里能直接看出"从什么改成了什么"。
+func ensureNQRuleFresh(db *repo.DB, rule ReadonlySignalRule, logf func(string, ...any)) error {
+	fp := rule.String()
+	old, ok, err := db.GetMeta(nqRuleMetaKey)
+	if err != nil {
+		return err
+	}
+	if ok && old == fp {
+		return nil
+	}
+	n, err := db.DeleteSignalsForInst(NQInstID)
+	if err != nil {
+		return err
+	}
+	if err := ForgetSignalScanSpans(db, NQInstID); err != nil {
+		return err
+	}
+	if err := db.SetMeta(nqRuleMetaKey, fp); err != nil {
+		return err
+	}
+	oldDesc := "（首次记录）"
+	if ok {
+		oldDesc = "原口径「" + old + "」"
+	}
+	logf("[NQ] 信号口径 = %s · %s → 已作废 %d 条旧信号、重置扫描水位线，本轮起全量重算",
+		fp, oldDesc, n)
+	return nil
 }

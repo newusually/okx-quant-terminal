@@ -14,6 +14,7 @@ package service
 //	bit7  128  放量   volume > 1.5 * SMA(volume,20)
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
 	"strings"
@@ -113,6 +114,61 @@ func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
 		return false
 	}
 	return true
+}
+
+// ReadonlySignalRule 只读合约（当前只有 NQ-INDEX）**单独一套**的买入信号口径。
+//
+// ★ 2026-10-02 十三期新增（用户口径：「买入信号共振给我 NQ 单独算，
+//   只算共振 4+ 下跌情况买入」）。
+//
+// 为什么不直接把这两个值塞进 SignalQualified 的第二/第三个参数：
+//
+//	它的涨跌幅门槛是「带符号三态」，0 被占用成"关闭这个条件"，
+//	而 NQ 要的恰恰是「跌任意幅度（这里的 0 是"只要收阴"不是"关闭"）」——
+//	语义直接冲突。硬塞就得写成 -0.0001 这种只有作者看得懂的魔法值。
+//
+// 所以这里**不是另写一套判据**：分数门槛、暖机（Ready）、threshold<=0 拒绝
+// 这些全部继续交给 SignalQualified（唯一判据），本类型只替换涨跌幅那一条。
+//
+// 两套口径的差别（值来自配置 nq_signal，不是硬编码）：
+//
+//	全市场：Score >= 3  且 RisePct < -0.7   （跌幅要够大才买）
+//	NQ    ：Score >= 4  且 RisePct < 0      （只要收阴 —— 指数单根波动
+//	                                          实测上限只有 ±0.35%，-0.7% 永不触发）
+type ReadonlySignalRule struct {
+	ScoreThreshold int     // 共振门槛（Score >= 它）；<= 0 = 未启用
+	MaxRisePct     float64 // 触发那根涨幅必须**严格小于**它（0 = 只要收阴）
+}
+
+// Enabled 是否启用。未配置（或配置坏掉）时为 false，调用方退回全市场通用口径
+// —— 宁可和全市场一样，也不能因为一块配置读不到就彻底不出信号。
+func (r ReadonlySignalRule) Enabled() bool { return r.ScoreThreshold > 0 }
+
+// Qualify 判定一根 K 线算不算「只读板块的买入信号」。
+func (r ReadonlySignalRule) Qualify(sig *Signal) bool {
+	if !r.Enabled() {
+		return false
+	}
+	// 第三个参数 0 = 先关掉全局那条涨跌幅条件，由下面显式判（见类型注释）。
+	// nil / Ready / threshold / Score 的判断都在 SignalQualified 里，不重复写。
+	if !SignalQualified(sig, r.ScoreThreshold, 0) {
+		return false
+	}
+	// 写成 sig.RisePct < MaxRisePct 而不是 !(...)：RisePct 是 NaN 时所有比较
+	// 都是 false，这里就判成「不合格」（保守）；反向写法会把 NaN 放行。
+	return sig.RisePct < r.MaxRisePct
+}
+
+// String 给日志/接口用的口径描述（绝不打码，看到的必须是真正生效的值）
+func (r ReadonlySignalRule) String() string {
+	if !r.Enabled() {
+		return "未启用（用全市场通用口径）"
+	}
+	rise := "只要收阴"
+	if r.MaxRisePct != 0 {
+		rise = fmt.Sprintf("跌幅 > %.3f%%", -r.MaxRisePct)
+	}
+	return fmt.Sprintf("共振 >= %d 且该根%s", r.ScoreThreshold, rise)
 }
 
 // ---------------------------------------------------------------------------

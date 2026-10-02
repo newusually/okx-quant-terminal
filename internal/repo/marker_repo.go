@@ -386,3 +386,29 @@ func (d *DB) SaveSignalScanSpans(spans map[string]SignalScanSpan) error {
 	}
 	return tx.Commit()
 }
+
+// DeleteSignalScanSpansForInst 删掉某个合约的全部扫描水位线（让下次回算从头算）。
+//
+// ★ 2026-10-02 十三期新增：口径变更时必须配套使用 ★
+//
+// 水位线记的是「这段区间算过了」。判定门槛一变，那段区间里"当时不合格"的 K 线
+// 不会重算，现象就是**改了配置毫无反应且不报错**。
+// 调用点见 service.ForgetSignalScanSpans。
+func (d *DB) DeleteSignalScanSpansForInst(instID string) error {
+	_, err := d.sql.Exec(`DELETE FROM signal_scan_state WHERE inst_id=?`, instID)
+	return err
+}
+
+// DeleteSignalsForInst 删掉某个合约的全部信号行，返回删除条数。
+//
+// 同样给「口径变更」用：signals 是 UNIQUE(inst_id,bar,ts) + INSERT IGNORE，
+// 旧口径写下的行**永远不会被新口径覆盖**（重算时连 INSERT 的机会都没有，
+// 因为水位线把它跳过了；就算重算，IGNORE 也会静默丢弃）。所以只能删。
+func (d *DB) DeleteSignalsForInst(instID string) (int64, error) {
+	res, err := d.sql.Exec(`DELETE FROM signals WHERE inst_id=?`, instID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}

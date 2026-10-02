@@ -97,6 +97,29 @@ func SaveSignalScanSpans(db *repo.DB) {
 	_ = db.SaveSignalScanSpans(snap)
 }
 
+// ForgetSignalScanSpans 把某个合约的「已扫区间」作废（内存 + 落盘），
+// 下次回算会把它当从没扫过、从头再算一遍。
+//
+// ★ 为什么需要这个函数（2026-10-02 十三期）★
+//
+// 水位线的语义是「区间内已经算过了，跳过」。这个前提只在一个条件下成立：
+// **判定口径不变**。一旦改了门槛（比如给 NQ 换成「共振≥4 且收阴」），
+// 已扫区间里那些"当时不合格"的 K 线不会重算 —— 现象就是「改了配置毫无反应」，
+// 而且不报任何错。这是本项目反复踩的同一类坑（见 SKILL: config-change-effect-audit）。
+//
+// 所以口径变更时**必须**同时作废水位线 + 删掉旧口径写下的信号行。
+func ForgetSignalScanSpans(db *repo.DB, instID string) error {
+	prefix := instID + "|"
+	sigBfMu.Lock()
+	for k := range sigBfSpan {
+		if strings.HasPrefix(k, prefix) {
+			delete(sigBfSpan, k)
+		}
+	}
+	sigBfMu.Unlock()
+	return db.DeleteSignalScanSpansForInst(instID)
+}
+
 // BackfillSignalsFor 对单个 (合约, 周期) 回算历史信号，返回写入条数。
 //
 // 增量策略（关键）：
@@ -108,7 +131,22 @@ func SaveSignalScanSpans(db *repo.DB) {
 //
 //	现在记闭区间 [MinTs, MaxTs]：区间内的跳过，两头的增量（左边新补的老 K 线、
 //	右边新生成的新 K 线）都算。落盘在 signal_scan_state 表，重启不丢。
+//
+// ★ 2026-10-02 十三期：加了第二个入口 BackfillSignalsForReadonly ★
+//
+//	只读板块（NQ）不能用全市场口径（指数波动尺度小，-0.7% 永不触发），
+//	所以判定那一步要能换。两个入口共用下面的 backfillSignals 主体 ——
+//	读库、水位线、批量写、诊断字段这些**只有一份实现**，不会走岔。
 func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int, error) {
+	return backfillSignals(cfg, db, instID, bar, ReadonlySignalRule{})
+}
+
+// BackfillSignalsForReadonly 用只读板块专属口径回算（rule 未启用时自动退回通用口径）。
+func BackfillSignalsForReadonly(cfg *conf.Config, db *repo.DB, instID, bar string, rule ReadonlySignalRule) (int, error) {
+	return backfillSignals(cfg, db, instID, bar, rule)
+}
+
+func backfillSignals(cfg *conf.Config, db *repo.DB, instID, bar string, rule ReadonlySignalRule) (int, error) {
 	key := instID + "|" + bar
 	sigBfMu.Lock()
 	sp := sigBfSpan[key]
@@ -291,7 +329,14 @@ func BackfillSignalsFor(cfg *conf.Config, db *repo.DB, instID, bar string) (int,
 		// 若这里不跟着改，图上标的 🚀 会包含「分数够但涨跌幅不过门槛、实盘根本不会下单」
 		// 的根 —— 图和实盘口径不一致，而且没有任何报错。
 		// （SignalQualified 内部已含 nil / Ready 判断。）
-		if !SignalQualified(sig, th, cfg.MinBarRisePct()) {
+		//
+		// ★ 十三期：只读板块（NQ）换成它自己那套口径。两套判据都收敛在
+		//   SignalQualified / ReadonlySignalRule.Qualify 里，这里不自己拼条件。
+		if rule.Enabled() {
+			if !rule.Qualify(sig) {
+				continue
+			}
+		} else if !SignalQualified(sig, th, cfg.MinBarRisePct()) {
 			continue
 		}
 		batch = append(batch, repo.EngineSignalRow{

@@ -328,6 +328,90 @@ type StoreCfg struct {
 	Python string `json:"python,omitempty"`
 }
 
+// NQSignalCfg 只读板块（NQ / 纳斯达克100）**单独一套**的买入信号口径。
+//
+// ★ 2026-10-02 十三期新增（用户口径：「买入信号共振给我 NQ 单独算，
+//   只算共振 4+ 下跌情况买入」）。
+//
+// 为什么必须单开一块 —— 指数和加密货币的波动尺度差一个量级，实测证据
+// （Dukascopy 真实数据，2026-09-03 一整天）：
+//
+//	3m  300 根：|涨跌幅| 最大 0.275%，跌破 -0.7% 的 **0 根**
+//	5m  288 根：最大 0.258%，**0 根**
+//	15m  96 根：最大 0.343%，**0 根**
+//
+// 若沿用全市场的 entry.min_bar_rise_pct = -0.7，NQ 会**永远没有买入信号**
+// —— 不是"少"，是恒等于 0。这种「配置写了却一辈子不触发」是最难被发现的一类
+// 失效：页面上不报错、日志里没异常，只是永远什么都没有。
+//
+// 字段语义（**注意与全局 min_bar_rise_pct 的带符号三态不同**）：
+//
+//	Enabled        nil/缺键 = 启用（与项目里其它开关一致：不写就是开）
+//	               false   = 显式关闭，NQ 退回全市场通用口径
+//	ScoreThreshold 共振门槛（Score >= 它）。全局 score_threshold 是 3；
+//	               NQ 用 4（用户口径「共振 4+」，比全市场更严）。
+//	               写成 <= 0 时归一化会补成默认 4 —— 这里 0 没有合理含义
+//	               （「共振 0 个以上」比全局还松，不可能是用户想要的），
+//	               所以补默认是安全的，不会造成"静默失效"。
+//	MaxRisePct     触发那根 K 线的涨跌幅必须**严格小于**它（%）：
+//	               0    = 只要收阴（RisePct < 0）—— 默认值，就是用户说的"下跌情况"
+//	               -0.1 = 必须跌超 0.1%
+//	               100  = 等效关闭（写个大正数即可，不需要再加开关）
+//
+// ⚠ 为什么不复用全局那套「带符号三态」：那个语义里 0 被占用成"关闭这个条件"，
+//   而这里要表达的恰恰是「跌任意幅度」—— 语义冲突。硬凑只能写成 -0.0001 这种
+//   魔法值，下一个人看到只会以为是笔误。所以这里 0 = 只要收阴，显式定义。
+type NQSignalCfg struct {
+	Enabled        *bool   `json:"enabled"`
+	ScoreThreshold int     `json:"score_threshold"`
+	MaxRisePct     float64 `json:"max_rise_pct"`
+}
+
+// NQ 专属口径的兜底值（与 defaultConfig() / configs/okx_strategy.json 同口径）。
+//
+// 定义成常量而不是各处再写一遍字面量：这块的三个值散落在「真源 JSON /
+// 示例 JSON / defaultConfig / NQSignalRule 兜底」四处，任何一处漏改都会造成
+// 「配置读不到时跑的是另一套口径」——而 NQ 的失效形态是"一条信号都没有"，
+// 不报错，最难查。
+const (
+	// DefaultNQSignalScoreThreshold NQ 共振门槛兜底（用户口径「共振 4+」）
+	DefaultNQSignalScoreThreshold = 4
+	// DefaultNQSignalMaxRisePct NQ 涨跌幅门槛兜底（0 = 只要收阴）
+	DefaultNQSignalMaxRisePct = 0.0
+)
+
+// IsEnabled 未配置 / 未写 enabled 都视为启用，只有显式 false 才关闭。
+func (n *NQSignalCfg) IsEnabled() bool {
+	return n == nil || n.Enabled == nil || *n.Enabled
+}
+
+// NQSignalRule 取 NQ 专属买入口径的**生效值**（调用方直接用这个，不要去解指针）。
+//
+//	ok=false → 显式关闭，调用方退回全市场通用口径
+//	ok=true  → scoreThreshold / maxRisePct 生效
+//
+// ★ 整块缺失时返回**默认值且启用**，不是"关闭" ★
+//
+// 这是刻意的方向选择：缺配置时最坏的结果是「和默认口径一样」，
+// 绝不能是「彻底不出信号」。后者正是这块配置存在的意义（全局 -0.7% 在
+// 指数上恒不触发），如果因为漏配置就退回去，等于把老问题原样复活。
+func (c *Config) NQSignalRule() (scoreThreshold int, maxRisePct float64, ok bool) {
+	if c != nil && c.NQSignal != nil {
+		if !c.NQSignal.IsEnabled() {
+			return 0, 0, false
+		}
+		th := c.NQSignal.ScoreThreshold
+		if th <= 0 {
+			th = DefaultNQSignalScoreThreshold
+		}
+		if th > 8 {
+			th = 8
+		}
+		return th, c.NQSignal.MaxRisePct, true
+	}
+	return DefaultNQSignalScoreThreshold, DefaultNQSignalMaxRisePct, true
+}
+
 type Config struct {
 	Enabled     bool     `json:"enabled"`
 	DryRun      bool     `json:"dry_run"`
@@ -347,8 +431,10 @@ type Config struct {
 	HistoryPages      int            `json:"history_pages"`
 	ScoreThreshold    int            `json:"score_threshold"`
 	ScoreThresholdMap map[string]int `json:"score_threshold_map"`
-	SignalTimeoutSec  int            `json:"signal_timeout_sec"`
-	RequestTimeoutSec int            `json:"request_timeout_sec"`
+	// NQSignal 只读板块（NQ / 纳斯达克100）单独的买入信号口径，见 NQSignalCfg。
+	NQSignal          *NQSignalCfg `json:"nq_signal"`
+	SignalTimeoutSec  int          `json:"signal_timeout_sec"`
+	RequestTimeoutSec int          `json:"request_timeout_sec"`
 
 	// ---- 合约准入（「哪些能买」）----
 	// ExcludeStockETF 不买美股 / ETF / 商品，只做加密（OKX instCategory=1）。
@@ -518,6 +604,13 @@ func defaultConfig() *Config {
 		//     3 的把关交给下面的 min_bar_rise_pct（六期起：触发那根必须真跌 < -0.7%）。
 		ScoreThreshold:    3,
 		ScoreThresholdMap: map[string]int{},
+		// ★ 2026-10-02 十三期：只读板块（NQ）**单独一套**买卖信号口径。
+		//   兜底值必须与 configs/okx_strategy.json 同口径（4 / 0 = 共振≥4 且收阴），
+		//   否则「JSON 读不到」时 NQ 会退回全局的 -0.7%，直接变成永不出信号。
+		NQSignal: &NQSignalCfg{
+			ScoreThreshold: DefaultNQSignalScoreThreshold,
+			MaxRisePct:     DefaultNQSignalMaxRisePct,
+		},
 		SignalTimeoutSec:  900,
 		RequestTimeoutSec: 20,
 		Entry: &EntryCfg{
@@ -786,6 +879,25 @@ func fillDefaults(c *Config) {
 	}
 	if c.ScoreThresholdMap == nil {
 		c.ScoreThresholdMap = map[string]int{}
+	}
+	// ★ 2026-10-02 十三期：只读板块（NQ）的信号口径
+	//
+	// 归一化只做一件事：把 ScoreThreshold <= 0 补成默认值。
+	// 这里**允许**反压 0，与 max_concurrent_positions「0 = 不限」那条刚好相反 ——
+	// 区别在于 0 在本题里没有合理语义：「共振 0 个以上」比全局门槛还松，
+	// 不可能是用户想要的，所以补默认不会造成"用户写的值没生效"。
+	// 反过来若不补，JSON 里漏写 score_threshold 就会让 NQ 悄悄退回全局的
+	// -0.7% 门槛 —— 那正是本块存在的意义所在，不能让它自己被吞掉。
+	if c.NQSignal == nil {
+		c.NQSignal = d.NQSignal
+	} else {
+		n, dn := c.NQSignal, d.NQSignal
+		if n.ScoreThreshold <= 0 {
+			n.ScoreThreshold = dn.ScoreThreshold
+		}
+		if n.ScoreThreshold > 8 {
+			n.ScoreThreshold = 8 // 6 个指标 + Pot/Fri/Kin 细分，最多 8 分
+		}
 	}
 	if c.OrderVia == "" {
 		c.OrderVia = d.OrderVia
