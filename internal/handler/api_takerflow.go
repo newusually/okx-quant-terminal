@@ -189,7 +189,7 @@ func (s *Server) takerPanelRows(cand []string, fromMs, toMs int64) ([]takerFlowR
 // 与 service.TakerPanelRebuild 用的是同一个 repo.QueryTakerAgg，
 // 所以兜底结果和预计算结果口径完全一致，不会出现「刷新一下数字就变了」。
 func (s *Server) takerFlowLive(cand []string, fromMs, toMs int64) ([]takerFlowRow, error) {
-	aggs, err := s.db.QueryTakerAgg(cand, fromMs, toMs)
+	aggs, err := s.db.QueryTakerAgg(cand, fromMs, toMs, true)
 	if err != nil {
 		return nil, err
 	}

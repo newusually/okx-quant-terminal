@@ -94,7 +94,13 @@ type TakerAgg struct {
 //
 // TopInst 用 MySQL 的窗口函数不好直接和 GROUP BY 混用（会造成二次聚合），
 // 所以拆两步：先按 ts 聚合总量，再单独按 ts 取总量最大的合约，Go 侧合并。
-func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64) ([]TakerAgg, error) {
+//
+// ★ withTop=false 只跑第一步（按 ts 聚合总量）。第二个消费方是**美股/ETF 池
+//   的 MACD2**（见 taker_macd_us）：它只要「每 5m 的 takervol 总和」，不需要
+//   涨幅王 —— 而第二步要 JOIN kline 再开窗口函数，190 个合约 × 8640 根
+//   的成本没必要白付。用参数而不是另写一条 SQL，是为了让两个消费方**共用
+//   同一段聚合 SQL 文本**（同一个量只有一条计算路径，见项目铁律）。
+func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64, withTop bool) ([]TakerAgg, error) {
 	// ---- 第一步：按 ts 聚合总量 ----
 	sb := strings.Builder{}
 	sb.WriteString(`SELECT ts, SUM(buy_vol), SUM(sell_vol), COUNT(DISTINCT inst_id)
@@ -137,6 +143,13 @@ func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64) ([]TakerAgg, erro
 	}
 	if len(order) == 0 {
 		return []TakerAgg{}, nil
+	}
+	if !withTop {
+		out := make([]TakerAgg, 0, len(order))
+		for _, ts := range order {
+			out = append(out, *byTs[ts])
+		}
+		return out, nil
 	}
 
 	// ---- 第二步：每个 ts 取「当根涨幅最高的合约」----
@@ -454,6 +467,115 @@ func (d *DB) QueryTakerMacd(bar string, fromTs, toTs int64) ([]TakerMacdRow, err
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+/* ==========================================================================
+ * 二十二期·五：美股/ETF 池的 takervol 总和 MACD（taker_macd_us）
+ *
+ * 用户口径：「NQ 的 macd2 绑定为所有美股+ETF 数据的每 5 分钟的 takervol
+ * 总和，还是 12 26 60 参数，绑定在 NQ 的 macd 副图下面，还是数据库保存」。
+ *
+ * 与 taker_macd 结构几乎一样，多存了 buy_total / sell_total / inst_count ——
+ * 因为这张表的输入序列本身就是「全池买卖量的总和」，把总和落库才能：
+ *   ① 换 MACD 参数时不用回头再聚合一次 190 个合约；
+ *   ② 前端图例能直接显示「这 5 分钟全池买了多少 / 卖了多少」。
+ *
+ * ★ 为什么可以和 taker_macd 合表加个 pool 列却偏要分表：
+ *   两张表的**生命周期不同** —— 加密池跟着 80 合约的 taker_vol 走，
+ *   美股池跟着 190 合约的池子走，重建频率、保留期、失败影响面都不一样。
+ *   合表会让「美股池拉挂了」直接污染主图副图的数据（本项目铁律：
+ *   一个数据源出问题不许牵连另一条链路）。
+ * ========================================================================== */
+
+// TakerUSMacdRow taker_macd_us 一行（= 美股/ETF 池每 5m 的聚合 + MACD）
+type TakerUSMacdRow struct {
+	Bar       string
+	Ts        int64
+	BuyTotal  float64
+	SellTotal float64
+	// SrcVal = MACD 的输入序列（= 全池买卖比 buy_total/sell_total）
+	SrcVal    float64
+	InstCount int
+	Dif       float64
+	Dea       float64
+	Hist      float64
+}
+
+var takerUSMacdCols = []string{
+	"bar", "ts", "buy_total", "sell_total", "src_val", "inst_count",
+	"dif", "dea", "hist", "updated_at",
+}
+
+// UpsertTakerMacdUS 批量写美股池 MACD 行（幂等：同 (bar,ts) 覆盖全业务列）
+//
+// ★ 覆盖所有业务列而不是只覆盖指标：池子会变（新上美股合约、老的下线），
+//   某一根的总和会随池子变化而变化，只覆盖 dif/dea/hist 会留下旧的总和值。
+func (d *DB) UpsertTakerMacdUS(rows []TakerUSMacdRow) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UnixMilli()
+	args := make([][]any, 0, len(rows))
+	for _, r := range rows {
+		if r.Bar == "" || r.Ts <= 0 {
+			continue
+		}
+		args = append(args, []any{
+			r.Bar, r.Ts, r.BuyTotal, r.SellTotal, r.SrcVal, r.InstCount,
+			r.Dif, r.Dea, r.Hist, now,
+		})
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	return d.bulkUpsert("taker_macd_us", takerUSMacdCols, args, []string{
+		"buy_total", "sell_total", "src_val", "inst_count",
+		"dif", "dea", "hist", "updated_at",
+	})
+}
+
+// QueryTakerMacdUS 读美股池 MACD 序列（升序）
+func (d *DB) QueryTakerMacdUS(bar string, fromTs, toTs int64) ([]TakerUSMacdRow, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT bar, ts, buy_total, sell_total, src_val, inst_count, dif, dea, hist
+	                FROM taker_macd_us WHERE bar=?`)
+	args := []any{bar}
+	if fromTs > 0 {
+		sb.WriteString(" AND ts>=?")
+		args = append(args, fromTs)
+	}
+	if toTs > 0 {
+		sb.WriteString(" AND ts<=?")
+		args = append(args, toTs)
+	}
+	sb.WriteString(" ORDER BY ts ASC")
+
+	rows, err := d.sql.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TakerUSMacdRow, 0, 1024)
+	for rows.Next() {
+		var r TakerUSMacdRow
+		if err := rows.Scan(&r.Bar, &r.Ts, &r.BuyTotal, &r.SellTotal, &r.SrcVal,
+			&r.InstCount, &r.Dif, &r.Dea, &r.Hist); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TakerMacdUSRange 美股池 MACD 表已有的时间范围与行数（判「要不要重建」用）
+func (d *DB) TakerMacdUSRange(bar string) (minTs, maxTs, cnt int64, err error) {
+	row := d.sql.QueryRow(
+		`SELECT COALESCE(MIN(ts),0), COALESCE(MAX(ts),0), COUNT(*) FROM taker_macd_us WHERE bar=?`, bar)
+	err = row.Scan(&minTs, &maxTs, &cnt)
+	if err == sql.ErrNoRows {
+		return 0, 0, 0, nil
+	}
+	return
 }
 
 /* ==========================================================================

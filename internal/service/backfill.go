@@ -160,6 +160,16 @@ type BackfillManager struct {
 	// 由 cmd 层注入（可复用准入过滤的结果），nil 表示不跑 taker 同步。
 	takerIDs func() []string
 
+	// takerUSIDs 返回「所有美股 + ETF」合约池（inst_category='3'）。
+	//
+	// 二十二期·五：NQ 图第二个副图（MACD2）要的是「所有美股+ETF 每 5 分钟的
+	// takervol 总和」。这个池子与 takerIDs 是两个**互不相交**的集合
+	// （category 1 加密 vs 3 美股/ETF），原始量共用 taker_vol 表。
+	//
+	// ★ 同样做成回调：美股合约也会新上/下线，池子必须每轮现算。
+	//   nil 表示不跑这条链路（老部署不带这个功能时完全不受影响）。
+	takerUSIDs func() []string
+
 	logf func(string, ...any)
 }
 
@@ -207,6 +217,11 @@ func NewBackfillManager(db *repo.DB, feed *DataFeed, cfg BackfillConfig, logf fu
 // SetTakerIDs 注入 taker 同步的合约池回调（见字段注释）
 func (m *BackfillManager) SetTakerIDs(f func() []string) {
 	m.takerIDs = f
+}
+
+// SetTakerUSIDs 注入「所有美股+ETF」合约池回调（NQ 图第二个副图 MACD2 用）
+func (m *BackfillManager) SetTakerUSIDs(f func() []string) {
+	m.takerUSIDs = f
 }
 
 // Start 启动：合约列表 → 行情快照 → 焦点合约回补 → 实时落库协程
@@ -304,6 +319,72 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 					logx.Logf("ERR", "[TAKER] 预计算失败：%v", err)
 				} else if did {
 					logx.Logf("INFO", "[TAKER] 预计算（面板+MACD）已完成")
+				}
+			}()
+		}
+	}
+
+	// 美股/ETF 池 30 天首铺（★ 二十二期·五）
+	//
+	// 与上面加密池同构，但池子大得多（实测 190 个 vs 80 个）且只有一份
+	// 消费方（NQ 图第二副图）。放在**同一个后台 goroutine 之外单独起一个**：
+	//   - 串行会把两段加起来顶到十来分钟，两条链路互不依赖，没理由互相等；
+	//   - 但**必须串行在加密池之后**（见下）：priapi 限频对全站请求总量生效，
+	//     两个池同时翻页 = 互相抢配额，两边都吃 429。
+	//   实现上用 sleep 让一步：加密池那一轮实测 1~2 分钟，这里只让 30 秒，
+	//   之后靠 takerFetchPage 自身的 429 指数退避兜底（不会丢数据，只会慢）。
+	if m.takerUSIDs != nil {
+		usIDs := m.takerUSIDs()
+		if len(usIDs) > 0 {
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				time.Sleep(30 * time.Second) // 给加密池首铺让路，避开限频对撞
+				need := make([]string, 0, len(usIDs))
+				for _, id := range usIDs {
+					if _, _, cnt, _, ok := m.db.TakerState(id, "5m"); !ok || cnt == 0 {
+						need = append(need, id)
+					}
+				}
+				if len(need) == 0 {
+					logx.Logf("INFO", "[TAKER-US] 30 天数据已就绪（%d 个合约），跳过首铺", len(usIDs))
+				} else {
+					logx.Logf("INFO", "[TAKER-US] 首铺开始：%d/%d 个合约缺数据（美股+ETF 池）", len(need), len(usIDs))
+					t0 := time.Now()
+					ok, rows := TakerBackfillInsts(m.db, need, 30, m.cfg.Workers)
+					logx.Logf("INFO", "[TAKER-US] 首铺完成：%d/%d 个合约，%d 行，耗时 %s",
+						ok, len(need), rows, time.Since(t0).Round(time.Second))
+				}
+				// 原始量就绪 → 立刻把 MACD2 落库，网页打开即可直接读表
+				if n, _, err := TakerUSEnsure(m.db, usIDs, 30, m.cfg.Workers); err != nil {
+					logx.Logf("ERR", "[TAKER-US] 预计算失败：%v", err)
+				} else if n > 0 {
+					logx.Logf("INFO", "[TAKER-US] 预计算（MACD2）已完成：%d 行", n)
+				}
+
+				// ---- 常驻刷新：每 60 秒敲一次，跨根才真干活 ----
+				//
+				// ★ 为什么不在 realtimeLoop 里调：美股池的「缺口重拉」是一次
+				//   数分钟的阻塞操作（190 合约 × 30 天），挂在 60 秒的实时循环
+				//   上会把行情落库一起卡住 —— 而两者毫无依赖关系。
+				//   独立 goroutine 后，这条链路再怎么慢也伤不到主链路。
+				// ★ 频率控制全在 TakerUSEnsure 内部（一条 COUNT/MIN/MAX 判跨根），
+				//   所以这里 60 秒一敲不等于 60 秒打一轮 190 个请求。
+				tk := time.NewTicker(60 * time.Second)
+				defer tk.Stop()
+				for {
+					select {
+					case <-m.stopCh:
+						return
+					case <-tk.C:
+						ids := m.takerUSIDs()
+						if len(ids) == 0 {
+							continue
+						}
+						if _, _, err := TakerUSEnsure(m.db, ids, 30, m.cfg.Workers); err != nil {
+							logx.Logf("ERR", "[TAKER-US] 预计算刷新失败：%v", err)
+						}
+					}
 				}
 			}()
 		}

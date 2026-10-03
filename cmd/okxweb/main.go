@@ -567,6 +567,28 @@ func runApp(ctx context.Context) error {
 		return service.TakerPoolByVolume(pool, vol, topN)
 	})
 
+	// ---- 美股/ETF 池（★ 二十二期·五：NQ 图第二个副图 MACD2 的数据源）----
+	//
+	// 口径：OKX instCategory='3'（美股 + ETF）**全部**合约，不按成交额截断
+	// ——用户原话是「所有美股+ETF 数据」，少一个就少一份总和。
+	// 原始量与加密池**共用 taker_vol 表**（两池合约集合不相交，主键天然隔离），
+	// 只有「聚合 + MACD」落在自己那张 taker_macd_us 里。
+	//
+	// ★ 同样用回调：美股合约也会新上/下线，池子必须每次现算。
+	//   顺序上排在加密池之后（上面那行），靠 start 里的错峰 sleep 避开
+	//   priapi 限频对撞（见 backfill.go 的 TAKER-US 段注释）。
+	bf.SetTakerUSIDs(func() []string {
+		insts, err := db.ListInstruments()
+		if err != nil {
+			return nil
+		}
+		pool := make([]service.TakerPoolInput, 0, len(insts))
+		for _, it := range insts {
+			pool = append(pool, service.TakerPoolInput{InstID: it.InstID, InstCategory: it.InstCategory})
+		}
+		return service.TakerUSPool(pool)
+	})
+
 	if err := bf.SyncInstruments(); err != nil {
 		fmt.Printf("[DATA] ⚠ 合约列表同步失败：%v\n", err)
 	} else {

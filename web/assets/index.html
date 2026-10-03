@@ -310,7 +310,11 @@
        不交易的 K 线图；交易时间的数据请对齐 macd；保存在数据库，读取和更新
        都直接走数据库。」
        实现：柱子读 kline(inst_id=NQ-INDEX,bar=5m)，副图读 taker_macd（主图那份
-       买卖比 MACD），后端按 NQ 的交易时间戳过滤对齐（见 api_nqchart.go）。 -->
+       买卖比 MACD），后端按 NQ 的交易时间戳过滤对齐（见 api_nqchart.go）。
+       ★ 二十二·五追加第二个副图（用户口径：「macd2 数据绑定为所有美股+ETF
+       数据的每 5 分钟的 takervol 总和，还是 12 26 60 参数，绑定到 NQ 的 macd
+       副图下面呆着，还是数据库保存，和副图 1 的 macd 一样」）——读
+       taker_macd_us，与副图 1 共用同一条 MACD 算路、同一套时间对齐规则。 -->
   <div class="h-split" data-split="B" title="上下拖动调整下方图表高度 · 双击复位"></div>
 
   <section class="panel lower" id="panelNQ">
@@ -351,6 +355,13 @@
           <span class="lg-item"><i id="nqLgHistDot" style="background:#0ecb81"></i>MACD <b id="nqLgHist">--</b></span>
           <span class="lg-item lg-params" id="nqLgParams">(12,26,60)</span>
         </div>
+        <div class="lg-row lg-ind" id="nqLgMacd2Row">
+          <span class="lg-item lg-src" id="nqLg2Src">美股+ETF 总和 --</span>
+          <span class="lg-item"><i style="background:#f0b90b"></i>DIF <b id="nqLg2Dif">--</b></span>
+          <span class="lg-item"><i style="background:#4facfe"></i>DEA <b id="nqLg2Dea">--</b></span>
+          <span class="lg-item"><i id="nqLg2HistDot" style="background:#0ecb81"></i>MACD <b id="nqLg2Hist">--</b></span>
+          <span class="lg-item lg-params">(12,26,60)</span>
+        </div>
       </div>
       <div class="chart-hint" id="nqHint">加载中…</div>
     </div>
@@ -358,7 +369,9 @@
     <div class="chart-foot">
       <span class="mk-legend"><b class="mk-buy">▮</b> NQ 5m 蜡烛（Dukascopy 30 天）</span>
       <span class="sep"></span>
-      <span class="muted">副图 = 主图那份 taker 买卖比 MACD，已按 NQ 交易时间对齐</span>
+      <span class="muted">副图 1 = 加密池 taker 买卖比 MACD</span>
+      <span class="sep"></span>
+      <span class="muted">副图 2 = 美股+ETF 池 takervol 总和 MACD</span>
       <span class="sep"></span>
       <span id="nqCov" class="muted">--</span>
     </div>

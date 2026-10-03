@@ -512,6 +512,37 @@ var schemaStmts = []string{
 		PRIMARY KEY (bar, ts)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
 
+	// ---- 二十二期·五：美股/ETF 池的 takervol 总和 MACD（NQ 图第二个副图）----
+	//
+	// 用户口径（2026-10-03）：
+	//   「NQ 这个 macd2 数据绑定为所有美股+ETF 数据的每 5 分钟的 takervol
+	//    总和，还是 12 26 60 参数，给我把这个 macd2 副图绑定到 NQ 的 macd
+	//    副图下面给我呆着，还是数据库保存，绑定 NQ 主图 K 线数据，移动缩小
+	//    放大都跟随主图，和副图 1 的 macd 一样。」
+	//
+	// 与 taker_macd（加密池）**严格同构**，只有池子不同：
+	//   池  = inst_category='3'（OKX 口径：3 = 美股/ETF）全部合约
+	//   输入 = 该池每 5m 的聚合买卖比 SUM(buy) / SUM(sell)
+	//   参数 = 12 / 26 / 60（与 taker_macd 共用 macdCalcOn 同一条算路）
+	//
+	// ★ 原始每合约数据**不另开表**，直接进 taker_vol：两池合约集合不重叠
+	//   （category 1 vs 3），主键 (inst_id, bar, ts) 天然隔离，聚合时按 IN
+	//   过滤即可；这样回补 / 增量 / 清理三条链路全部复用，不写第二份。
+	//   本表只存「聚合 + 指标」（8640 行），而不是 190 合约 × 8640 = 164 万行。
+	`CREATE TABLE IF NOT EXISTS taker_macd_us (
+		bar        VARCHAR(4) NOT NULL,
+		ts         BIGINT     NOT NULL,
+		buy_total  DOUBLE     NOT NULL DEFAULT 0,
+		sell_total DOUBLE     NOT NULL DEFAULT 0,
+		src_val    DOUBLE     NOT NULL DEFAULT 0,
+		inst_count INT        NOT NULL DEFAULT 0,
+		dif        DOUBLE     NOT NULL DEFAULT 0,
+		dea        DOUBLE     NOT NULL DEFAULT 0,
+		hist       DOUBLE     NOT NULL DEFAULT 0,
+		updated_at BIGINT     NOT NULL DEFAULT 0,
+		PRIMARY KEY (bar, ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
+
 	// ---- 二十二期·四：taker MACD 买入信号（预计算落库）----
 	//
 	// 用户口径（2026-10-03）：

@@ -79,7 +79,7 @@ func TakerPanelRebuild(d *repo.DB, pool []string, days int) (int, int, error) {
 	nowMs = nowMs / takerPanelBarMS * takerPanelBarMS
 	fromMs := nowMs - int64(days)*24*3600*1000
 
-	aggs, err := d.QueryTakerAgg(pool, fromMs, nowMs)
+	aggs, err := d.QueryTakerAgg(pool, fromMs, nowMs, true)
 	if err != nil {
 		return 0, 0, fmt.Errorf("聚合 taker 量失败：%w", err)
 	}
@@ -184,22 +184,7 @@ func takerMacdFromPanel(rows []repo.TakerPanelRow) []repo.TakerMacdRow {
 		src[i] = r.Ratio
 	}
 
-	dif := make([]float64, n)
-	dea := make([]float64, n)
-	hist := make([]float64, n)
-	ef := make([]float64, n)
-	es := make([]float64, n)
-	// 复用指标层的 emaInto（与 K 线 MACD 同一份实现，口径不会漂）
-	emaInto(ef, src, n, takerMacdFast)
-	emaInto(es, src, n, takerMacdSlow)
-	for i := 0; i < n; i++ {
-		dif[i] = ef[i] - es[i]
-	}
-	emaInto(dea, dif, n, takerMacdSignal)
-	for i := 0; i < n; i++ {
-		// 与 macdHist 一致：hist = 2*(DIF-DEA)
-		hist[i] = 2 * (dif[i] - dea[i])
-	}
+	dif, dea, hist := macdCalcOn(src, takerMacdFast, takerMacdSlow, takerMacdSignal)
 
 	out := make([]repo.TakerMacdRow, 0, n)
 	for i, r := range rows {
@@ -209,6 +194,37 @@ func takerMacdFromPanel(rows []repo.TakerPanelRow) []repo.TakerMacdRow {
 		})
 	}
 	return out
+}
+
+// macdCalcOn 对任意输入序列算一组 MACD(fast,slow,signal)，返回 dif/dea/hist。
+//
+// ★ 为什么抽成公共函数：加密池的副图（taker_macd）和美股/ETF 池的副图 2
+//   （taker_macd_us）必须是**同一条算路**。各写一份 EMA 递推迟早会漂
+//   （一处用 2*(DIF-DEA)、另一处漏了 ×2），然后两张副图零轴位置对不上，
+//   排查起来就是「同一量两条路算」——本项目反复踩过的坑。
+//
+// hist = 2*(DIF-DEA)，与指标层 macdHist 口径一致（通达信/文华口径）。
+func macdCalcOn(src []float64, fast, slow, sig int) (dif, dea, hist []float64) {
+	n := len(src)
+	dif = make([]float64, n)
+	dea = make([]float64, n)
+	hist = make([]float64, n)
+	if n == 0 {
+		return
+	}
+	ef := make([]float64, n)
+	es := make([]float64, n)
+	// 复用指标层的 emaInto（与 K 线 MACD 同一份实现，口径不会漂）
+	emaInto(ef, src, n, fast)
+	emaInto(es, src, n, slow)
+	for i := 0; i < n; i++ {
+		dif[i] = ef[i] - es[i]
+	}
+	emaInto(dea, dif, n, sig)
+	for i := 0; i < n; i++ {
+		hist[i] = 2 * (dif[i] - dea[i])
+	}
+	return
 }
 
 // takerKlineRiseMap 取某合约 5m K 线 → {ts: 该根涨跌幅%}

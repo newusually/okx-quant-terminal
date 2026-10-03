@@ -10,18 +10,24 @@ package handler
 //    实时更新数据，就是不显示不交易的 K 线图；交易的时间的数据请对齐 macd，
 //    并且保存在数据库这样读取直接数据库进行，更新数据也在数据库进行。」
 //
-// 拆成三条硬约束：
+// 拆成四条硬约束：
 //   ① 柱子 = NQ 5 分钟（数据源 Dukascopy，落 kline 表 inst_id=NQ-INDEX）
 //      —— 不实时外部查询，读库即用（更新由 StartNQSync / StartNQIntraday 写库）
-//   ② 副图 = **主图那份** taker 买卖比 MACD(12,26,60)（读 taker_macd 表），
+//   ② 副图 1 = **主图那份** taker 买卖比 MACD(12,26,60)（读 taker_macd 表），
 //      不是 NQ 自己的 MACD
 //   ③ 两块严格同轴：MACD 只保留「NQ 确实有柱子」的那些时间戳
 //      —— 纳指周末 + 每日维护时段不交易，那段时间 K 线本来就不存在；
 //         若把 24 小时的 MACD 原样铺上去，副图会比柱子长出一截、两边对不上。
+//   ④ （二十二·五追加）副图 2 = **所有美股 + ETF**（inst_category='3'）
+//      每 5 分钟 takervol 总和上的 MACD(12,26,60)（读 taker_macd_us 表）。
+//      用户口径：「绑定为所有美股+ETF 数据的每 5 分钟的 takervol 总和，
+//      还是 12 26 60 参数，绑定到 NQ 的 macd 副图下面」。与 ② 共用同一条
+//      算路（service.macdCalcOn）与同一套对齐规则（同一个 have 集合）。
 //
 // ★ 为什么不新增表：NQ 的 5m 数据在 kline 表里（与加密同一张表、同一个
-//   KlineQuery 通道，分区/保留期/清理都自动复用），MACD 在 taker_macd 表里。
-//   本接口是**纯读**接口，两张表的写入分别由 NQ 同步链路与 TakerPanelRebuild 负责。
+//   KlineQuery 通道，分区/保留期/清理都自动复用），两张 MACD 在
+//   taker_macd / taker_macd_us 表里。本接口是**纯读**接口，写入分别由
+//   NQ 同步链路与 TakerPanelRebuild / TakerUSEnsure 负责。
 
 import (
 	"fmt"
@@ -46,6 +52,23 @@ type nqChartCandle struct {
 type nqChartMacd struct {
 	Ts   int64   `json:"ts"`
 	Src  float64 `json:"src"`
+	Dif  float64 `json:"dif"`
+	Dea  float64 `json:"dea"`
+	Hist float64 `json:"hist"`
+}
+
+// nqChartMacd2 副图 2 的一个点：美股/ETF 池的 takervol 总和 + 它的 MACD(12,26,60)
+//
+// 与副图 1 的差别只在**多了总和本身**（buy/sell/n）—— 用户口径说的是
+// 「所有美股+ETF 数据的每 5 分钟的 takervol 总和」，把总和一并回给前端，
+// 图例里就能直接显示「这 5 分钟全池买了多少 / 卖了多少 / 几个合约在报数」，
+// 而不是只给三条算出来的线，无法对账。
+type nqChartMacd2 struct {
+	Ts   int64   `json:"ts"`
+	Buy  float64 `json:"buy"`
+	Sell float64 `json:"sell"`
+	Src  float64 `json:"src"` // = buy/sell（MACD 的输入序列）
+	N    int     `json:"n"`   // 该根参与聚合的合约数
 	Dif  float64 `json:"dif"`
 	Dea  float64 `json:"dea"`
 	Hist float64 `json:"hist"`
@@ -121,9 +144,34 @@ func (s *Server) handleNQChart(w http.ResponseWriter, r *http.Request) (any, err
 		macd = append(macd, nqChartMacd{Ts: m.Ts, Src: m.SrcVal, Dif: m.Dif, Dea: m.Dea, Hist: m.Hist})
 	}
 
+	// ---- ④ 副图 2：美股/ETF 池的 takervol 总和 MACD（读 taker_macd_us）----
+	//
+	// 与副图 1 用同一套时间对齐规则（同一个 have 集合）—— 两张副图必须和
+	// NQ 柱子严格同轴，只要有一张用了不同的判据，缩放后就会错位。
+	usRows, err := s.db.QueryTakerMacdUS(service.TakerPanelMacdBar, fromTs, toTs)
+	if err != nil {
+		return nil, err
+	}
+	macd2 := make([]nqChartMacd2, 0, len(usRows))
+	usInsts := 0
+	for _, m := range usRows {
+		if _, ok := have[m.Ts]; !ok {
+			continue
+		}
+		if m.InstCount > usInsts {
+			usInsts = m.InstCount
+		}
+		macd2 = append(macd2, nqChartMacd2{
+			Ts: m.Ts, Buy: m.BuyTotal, Sell: m.SellTotal,
+			Src: m.SrcVal, N: m.InstCount,
+			Dif: m.Dif, Dea: m.Dea, Hist: m.Hist,
+		})
+	}
+
 	cov := map[string]any{
 		"bars":  len(candles),
 		"macd":  len(macd),
+		"macd2": len(macd2),
 		"days":  days,
 		"inst":  service.NQInstID,
 		"bar":   "5m",
@@ -132,6 +180,8 @@ func (s *Server) handleNQChart(w http.ResponseWriter, r *http.Request) (any, err
 		// 休市占位根：库里存在、但按口径不画（前端可显示「已隐藏 N 根休市」）
 		"hidden": hidden,
 		"raw":    len(kl),
+		// 副图 2 的池子规模（窗口内出现过的最大合约数）
+		"usPool": usInsts,
 	}
 	if n := len(candles); n > 0 {
 		cov["first"] = candles[0].Ts
@@ -140,8 +190,10 @@ func (s *Server) handleNQChart(w http.ResponseWriter, r *http.Request) (any, err
 	}
 
 	note := fmt.Sprintf("柱子 = NQ 纳斯达克100 5 分钟（Dukascopy 30 天，落 kline 表）；"+
-		"副图 = 主图那份 taker 买卖比 MACD(12,26,60)，已按 NQ 交易时间对齐；"+
-		"休市（周末 + 每日维护）的占位根照写库但不画（本窗口隐藏 %d 根）", hidden)
+		"副图 1 = 主图那份加密池 taker 买卖比 MACD(12,26,60)；"+
+		"副图 2 = **所有美股+ETF（%d 个合约）**每 5 分钟 takervol 总和上的 MACD(12,26,60)；"+
+		"两张副图都已按 NQ 交易时间对齐；休市（周末 + 每日维护）的占位根照写库但不画"+
+		"（本窗口隐藏 %d 根）", usInsts, hidden)
 
 	return map[string]any{
 		"ok":       true,
@@ -150,6 +202,8 @@ func (s *Server) handleNQChart(w http.ResponseWriter, r *http.Request) (any, err
 		"bar":      "5m",
 		"kline":    candles,
 		"macd":     macd,
+		"macd2":    macd2,
+		"usPool":   usInsts,
 		"fast":     service.TakerMacdFast(),
 		"slow":     service.TakerMacdSlow(),
 		"signal":   service.TakerMacdSignal(),
