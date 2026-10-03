@@ -22,7 +22,10 @@
 
   var SPRING = 'cubic-bezier(.34,1.56,.64,1)';   // 轻微过冲 = 「活」
   var LS_PANELS = 'okxPanels:v1';
-  var LS_COLS = 'okxColW:v1';
+  var LS_COLS = 'okxColW:v2';   // ★ 二十二·六：v1 里存着旧的两图高度（340/300），
+                                //   键不换的话新默认值（900/900）读出来就被旧值覆盖 ——
+                                //   用户会看到「改大了还是扁的」（本项目默认值被缓存劫持的老坑）。
+                                //   换键 = 一次性作废旧高度，列宽也回默认（无伤大雅）。
   var LS_THEME = 'okxTheme';
   var SNAP = 14;                                  // 磁性吸附半径（px）
 
@@ -379,9 +382,13 @@
     //      宽度由 L/T 两条间接决定。）
     //   横向一条：
     //     H：第 1 行（面板行）下边界 → 往下拖第 1 行变高、K 线变矮（+d）。
-    var VAR = { L: '--side-w', T: '--taker-w', H: '--top-h', B: '--lower-h' };
-    var DIR = { L: 1, T: 1, H: 1, B: 1 };
-    var DEF = { L: 268, T: 330, H: 340, B: 300 };
+    // ★ 二十二·六：新增 C = 主 K 线图高度（--center-h）。
+    //   主图从「视口余量」改成显式高度后，拖 H 不能再靠余量间接改主图高度了，
+    //   所以 H 拖动时**联动**改 C（往下拖 = 上面板行变高 + 主图变矮），
+    //   保住「拖 H 就能改主图高度」的老手感。
+    var VAR = { L: '--side-w', T: '--taker-w', H: '--top-h', C: '--center-h', B: '--lower-h' };
+    var DIR = { L: 1, T: 1, H: 1, C: 1, B: 1 };
+    var DEF = { L: 268, T: 330, H: 340, C: 900, B: 900 };
     var col = Object.assign({}, DEF);
     try { Object.assign(col, JSON.parse(localStorage.getItem(LS_COLS) || 'null') || {}); } catch (e) {}
     var apply = function () {
@@ -401,16 +408,20 @@
         e.preventDefault();
         startX = e.clientX; startY = e.clientY;
         startW = col[side] || DEF[side];
+        var startC = (col.C || DEF.C);   // ★ 二十二·六：H 联动的主图高度起点
         var onMove = function (ev) {
           var d = (horiz ? (ev.clientY - startY) : (ev.clientX - startX)) * DIR[side];
           var v = startW + d;
           if (side === 'B') {
             // 下方 NQ 图高度：反向拖（往下拖是变矮）—— 分隔条在它上面
             v = startW - (ev.clientY - startY);
-            v = Math.max(160, Math.min(v, Math.round(window.innerHeight * 0.6)));
+            v = Math.max(300, Math.min(v, Math.round(window.innerHeight * 1.6)));
           } else if (horiz) {
             // 第 1 行高度：夹在 [200, 视口 60%] 之间，别把 K 线挤没了
             v = Math.max(200, Math.min(v, Math.round(window.innerHeight * 0.6)));
+            // ★ 二十二·六：主图高度反向跟走（H 往上拖 = 上面板行变矮 = 主图变高）。
+            //   不联动的话主图现在有独立高度变量，拖 H 它会纹丝不动（「改了没用」）。
+            col.C = Math.max(300, Math.round(startC + (startW - v)));
           } else if (side === 'T') {
             // ★ T 分隔条改的是「买卖流向」的最小宽，富余空间都会给它，
             //   所以上限放宽到 1100（整行的大头）
@@ -432,6 +443,8 @@
       });
       sp.addEventListener('dblclick', function () {
         col[side] = DEF[side];
+        // ★ 二十二·六：H 双击复位时，主图高度（联动改过）也要一起回默认
+        if (side === 'H') col.C = DEF.C;
         apply();
         resizeCharts();
         // 只复位这一条，别把另外两条也重置 —— 老写法整块 removeItem

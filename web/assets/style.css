@@ -1048,8 +1048,15 @@ main .center.jump-flash {
    分隔条不会顶错格子。 */
 :root {
   --top-h: 340px;     /* 第 1 行（面板行）高度，h-split 拖动改写 */
-  /* ★ 二十二·三期：主图下面第二张图（NQ 5m + taker MACD）*/
-  --lower-h: 300px;   /* 下方 NQ 图高度，h-split[data-split="B"] 拖动改写 */
+  /* ★ 二十二·六：两张 K 线面板高度（用户口径：「K线 2个K线图 K线面板太短了
+     给我高度高3倍」）。
+     改之前：主图是「视口余量」算出来的（100vh 减完只剩 ≈300px，靠 min-height
+     兜底），NQ 图固定 300px —— 两张都扁得像纸条。
+     改之后：两张都改**显式高度变量**、各自 ×3，不再吃视口余量。
+     代价：三块加起来必然超过一屏，页面纵向滚动（用户点名要的就是「高」，
+     宁可滚动也不要扁）。想塞回一屏就拖分隔条，或用 h-split 双击复位。 */
+  --center-h: 900px;  /* 第 2 行：主 K 线图高度（原 ≈300px），h-split[H] 联动改写 */
+  --lower-h: 900px;   /* 第 3 行：下方 NQ 图高度（原 300px），h-split[B] 拖动改写 */
 }
 .layout { display: block; }   /* 旧 7 列网格退役，改纵向堆叠（见下） */
 .top-row {
@@ -1077,12 +1084,14 @@ main .center.jump-flash {
 }
 .h-split:hover::after, .h-split:active::after { background: var(--accent); transform: scaleX(1.2); }
 
-/* 第 2 行：K 线图占满整宽；高度 = 视口余量（第 1 行 + 下方 NQ 图越高，主图越矮），
-   表格区仍在下方（滚动可见），与旧版行为一致。
-   ★ 二十二·三期：新增下方 NQ 图，这里要把它和它的分隔条高度一起扣掉，
-     否则两块图加起来超过一屏，页面会出现纵向滚动条、底部图表被切。 */
+/* 第 2 行：K 线图占满整宽。
+   ★ 二十二·六：高度从「视口余量」改成显式变量 --center-h（用户要 ×3 高）。
+     老写法 `calc(100vh - 132px - var(--top-h) - var(--lower-h) - 26px)`：
+     --lower-h 一变 900，余量直接算成负数、被 min-height 兜在 300px ——
+     「改大了反而没变高」就是这么来的，所以必须换成显式高度。
+     表格区仍在下方（滚动可见），与旧版行为一致。 */
 .layout > .center {
-  height: calc(100vh - 132px - var(--top-h) - var(--lower-h) - 26px);
+  height: var(--center-h);
   min-height: 300px;
   margin: 0 10px;
 }
