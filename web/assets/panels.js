@@ -302,24 +302,34 @@
 
   /* ---------------- 可拖拽分隔条（HDividedBox 等价物）---------------- */
   function initSplits() {
-    var col = { L: 268, R: 268 };
+    // ★ 二十二期：加了第三个分隔条 T（taker 买卖流向面板）。
+    //   三者的物理含义不同，拖动方向也不同：
+    //     L：「合约列表」右边界 → 往右拖变宽（+d）
+    //     T：「买卖流向」右边界   → 往右拖变宽（+d）
+    //     R：「合约信息」左边界   → 往右拖变窄（-d）
+    //   所以不能只用「side==='L' ? +d : -d」——那样 T 会被判成反向。
+    var VAR = { L: '--side-w', T: '--taker-w', R: '--right-w' };
+    var DIR = { L: 1, T: 1, R: -1 };
+    var DEF = { L: 268, T: 330, R: 268 };
+    var col = Object.assign({}, DEF);
     try { Object.assign(col, JSON.parse(localStorage.getItem(LS_COLS) || 'null') || {}); } catch (e) {}
     var apply = function () {
-      document.documentElement.style.setProperty('--side-w', col.L + 'px');
-      document.documentElement.style.setProperty('--right-w', col.R + 'px');
+      Object.keys(VAR).forEach(function (k) {
+        document.documentElement.style.setProperty(VAR[k], (col[k] || DEF[k]) + 'px');
+      });
     };
     apply();
     Array.prototype.slice.call(document.querySelectorAll('.v-split')).forEach(function (sp) {
-      var side = sp.dataset.split;   // 'L' | 'R'
+      var side = sp.dataset.split;   // 'L' | 'T' | 'R'
+      if (!VAR[side]) return;
       var startX = 0, startW = 0;
       sp.addEventListener('pointerdown', function (e) {
         e.preventDefault();
         startX = e.clientX;
-        startW = side === 'L' ? col.L : col.R;
+        startW = col[side] || DEF[side];
         var onMove = function (ev) {
-          var d = ev.clientX - startX;
-          var w = side === 'L' ? startW + d : startW - d;
-          col[side] = Math.max(180, Math.min(w, 560));
+          var d = (ev.clientX - startX) * DIR[side];
+          col[side] = Math.max(160, Math.min(startW + d, 560));
           apply();
         };
         var onUp = function () {
@@ -332,10 +342,12 @@
         document.addEventListener('pointerup', onUp);
       });
       sp.addEventListener('dblclick', function () {
-        col[side] = 268;
+        col[side] = DEF[side];
         apply();
         resizeCharts();
-        try { localStorage.removeItem(LS_COLS); } catch (err) {}
+        // 只复位这一条，别把另外两条也重置 —— 老写法整块 removeItem
+        // 会让用户双击任一分隔条就把三条宽度全打回默认。
+        try { localStorage.setItem(LS_COLS, JSON.stringify(col)); } catch (err) {}
       });
     });
   }

@@ -431,6 +431,38 @@ var schemaStmts = []string{
 		updated_at BIGINT NOT NULL DEFAULT 0,
 		PRIMARY KEY (inst_id, bar)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
+
+	// ---- taker 买卖量（主动买 / 主动卖）按合约按 5m ----
+	//
+	// 为什么单开一张表而不是塞进 kline：kline 是全项目最大的表（1000 万行），
+	// 加两列 DOUBLE 会让每行多 16 字节 ≈ 170MB，而且这两列只有「taker 流向」
+	// 这一个消费方。单表按需查询、按需清理更划算。
+	//
+	// 数据来源与精度：priapi indicators 的 takerBuySellVol 只能回溯 5 天，
+	// 更早的 25 天用 1H 粒度前向填充（src='1Hfill' 打标，滞后 1h 避免未来函数）。
+	// 消费方（/api/takerflow）对 src 不做区分，但保留字段以便追溯精度。
+	`CREATE TABLE IF NOT EXISTS taker_vol (
+		inst_id  VARCHAR(32) NOT NULL,
+		bar      VARCHAR(4)  NOT NULL,
+		ts       BIGINT      NOT NULL,
+		buy_vol  DOUBLE      NOT NULL DEFAULT 0,
+		sell_vol DOUBLE      NOT NULL DEFAULT 0,
+		src      VARCHAR(8)  NOT NULL DEFAULT '5m',
+		PRIMARY KEY (inst_id, bar, ts),
+		KEY ix_taker_ts (bar, ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
+
+	// ---- taker 回补水位线（与 K 线回补同构：双向区间）----
+	`CREATE TABLE IF NOT EXISTS taker_scan_state (
+		inst_id    VARCHAR(32) NOT NULL,
+		bar        VARCHAR(4)  NOT NULL,
+		min_ts     BIGINT NOT NULL DEFAULT 0,
+		max_ts     BIGINT NOT NULL DEFAULT 0,
+		rows_cnt   BIGINT NOT NULL DEFAULT 0,
+		src        VARCHAR(8) NOT NULL DEFAULT '',
+		updated_at BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (inst_id, bar)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
 }
 
 // ---------------------------------------------------------------------------

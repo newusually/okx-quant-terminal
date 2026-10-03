@@ -206,6 +206,60 @@ html, body {
 .inst-row .px { font-size: 12px; font-family: var(--mono); }
 .inst-row .cg { font-size: 10.5px; font-family: var(--mono); }
 
+/* ---------------- taker 买卖流向面板（二十二期）----------------
+   放在合约列表与 K 线之间。表格 4 列，窄面板下要能塞进
+   「12:35 / 1.23 / +0.42% / BTC-USDT-SWAP +0.31%」这种最长内容。 */
+.taker .panel-head { border-bottom: 1px solid var(--line); }
+.tk-sum {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-3);
+}
+.tk-sum-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; font-size: 12px;
+}
+.tk-sum-row + .tk-sum-row { margin-top: 3px; }
+.tk-sum-row b { font-family: var(--mono); font-size: 17px; font-weight: 700; }
+.tk-sum-row.small { font-size: 11px; }
+.tk-sum-row.small i { font-style: normal; font-family: var(--mono); color: var(--text); }
+
+.tk-note { padding: 5px 10px; font-size: 10px; line-height: 1.45; border-bottom: 1px solid var(--line); }
+
+.tk-wrap { max-height: calc(100vh - 420px); min-height: 160px; overflow: auto; }
+.tk-tbl { font-size: 11px; }
+.tk-tbl th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--bg-3); font-size: 10px; font-weight: 600;
+  padding: 5px 3px; white-space: nowrap;
+}
+.tk-tbl td { padding: 4px 3px; font-family: var(--mono); white-space: nowrap; }
+/* ★ 四列必须塞进 300px 面板（二十二期实测截图发现第 4 列被截断出横向滚动条）：
+     时间 66px + 买:卖 56px + ETH 52px + 合约~90px ≈ 264px，余量给边距。 */
+.tk-tbl th:nth-child(1), .tk-tbl td:nth-child(1) { width: 68px; }
+.tk-tbl th:nth-child(2), .tk-tbl td:nth-child(2) { width: 52px; text-align: right; }
+.tk-tbl th:nth-child(3), .tk-tbl td:nth-child(3) { width: 52px; text-align: right; }
+.tk-tbl th:nth-child(4), .tk-tbl td:nth-child(4) { text-align: right; }
+.tk-tbl tbody tr { cursor: default; }
+.tk-tbl .tk-t { color: var(--text-2); }
+.tk-tbl .tk-r { font-weight: 600; }
+/* 买卖比配色：>1 买压强（红，中国口径涨），<1 卖压强（绿） */
+.tk-tbl .tk-r.buy { color: var(--up); }
+.tk-tbl .tk-r.sell { color: var(--down); }
+/* 涨跌幅同样走中国口径：涨红跌绿 */
+.tk-tbl .up { color: var(--up); }
+.tk-tbl .down { color: var(--down); }
+.tk-tbl .flat { color: var(--muted); }
+.tk-tbl .tk-inst {
+  font-size: 10px; max-width: 52px; overflow: hidden;
+  text-overflow: ellipsis; display: inline-block; vertical-align: bottom;
+}
+.tk-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line);
+  font-size: 10px;
+}
+
 /* ---------------- 图表区 ---------------- */
 /* ★ 十一期：592 → 620。图表头从一行拆成两行后多了 ~28px，
    不补回来的话画布就矮一截，用户看到的就是「图显示不完全」。 */
@@ -952,18 +1006,24 @@ main .center.jump-flash {
   --ease-out: cubic-bezier(.22, 1, .36, 1);
   --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
   --side-w: 268px;    /* 左栏宽（v-split 拖动改写，panels.js）*/
+  --taker-w: 330px;   /* taker 买卖流向面板宽（二十二期）*/
   --right-w: 268px;   /* 右栏宽 */
 }
 
-/* ---- ② 布局改 5 列：面板 / 分隔条 / 面板 / 分隔条 / 面板 ----
+/* ---- ② 布局改 7 列：合约列表 / 分隔条 / taker流向 / 分隔条 / 图表 / 分隔条 / 合约信息 ----
    列位置用 grid-column 显式固定：面板浮动（fixed 脱离文档流）后，
-   分隔条也不会顶错格子 —— 否则 side 一浮动，R 分隔条会跳到第 1 列。 */
-.layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr) 6px var(--right-w); }
-.layout > .side:not(.right) { grid-column: 1; }
+   分隔条也不会顶错格子 —— 否则 side 一浮动，R 分隔条会跳到第 1 列。
+
+   ★ 2026-10-03 二十二期：在「合约列表」与「K 线图」之间插入 taker 买卖流向面板
+     （用户口径「放在K线图左边,合约列表面板右边」）。 */
+.layout { grid-template-columns: var(--side-w) 6px var(--taker-w) 6px minmax(0, 1fr) 6px var(--right-w); }
+.layout > .side:not(.right):not(.taker) { grid-column: 1; }
 .layout > .v-split[data-split="L"] { grid-column: 2; }
-.layout > .center { grid-column: 3; }
-.layout > .v-split[data-split="R"] { grid-column: 4; }
-.layout > .side.right { grid-column: 5; }
+.layout > .side.taker { grid-column: 3; }
+.layout > .v-split[data-split="T"] { grid-column: 4; }
+.layout > .center { grid-column: 5; }
+.layout > .v-split[data-split="R"] { grid-column: 6; }
+.layout > .side.right { grid-column: 7; }
 
 .v-split {
   position: relative; cursor: col-resize; touch-action: none;
@@ -1083,8 +1143,18 @@ main .center.jump-flash {
 }
 :root[data-theme="light"] .pnl-tip { background: rgba(255, 255, 255, .96); }
 
-/* ---- ⑩ 窄屏适配：右栏隐藏时 R 分隔条跟着藏，布局退回 3 列 ---- */
-@media (max-width: 1280px) {
-  .layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr); }
+/* ---- ⑩ 窄屏适配（二十二期扩容到 7 列后重排）----
+   两档降级，原则是「先扔附属面板，最后才动 K 线图」：
+     ① ≤1500px：藏右栏（合约信息+数据库），保留 taker 面板
+     ② ≤1180px：再藏 taker 面板，回到「合约列表 + K 线」两栏
+   隐藏的面板要连列定义和它前面的分隔条一起收掉 —— 否则会留下一列空白。 */
+@media (max-width: 1500px) {
+  .layout { grid-template-columns: var(--side-w) 6px var(--taker-w) 6px minmax(0, 1fr); }
   .v-split[data-split="R"] { display: none; }
+  .layout > .side.right { display: none; }
+}
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr); }
+  .v-split[data-split="T"] { display: none; }
+  .layout > .side.taker { display: none; }
 }

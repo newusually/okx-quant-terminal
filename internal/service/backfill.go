@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"finally-main/internal/logx"
 	"finally-main/internal/model"
 	"finally-main/internal/perf"
 	"finally-main/internal/repo"
@@ -152,6 +153,13 @@ type BackfillManager struct {
 	// 直接复用这里的数据，不用为了更新成交额再拉一次全市场行情。
 	lastTickers atomic.Pointer[[]model.Ticker]
 
+	// takerIDs 返回当前要同步 taker 买卖量的合约池（非美股非ETF、24h 成交额前 N）。
+	//
+	// 做成回调而不是直接把池子存进来：池子依赖 ticker 表（每分钟变），
+	// 存快照就会越跑越旧；回调每次现算，口径永远和交易侧一致。
+	// 由 cmd 层注入（可复用准入过滤的结果），nil 表示不跑 taker 同步。
+	takerIDs func() []string
+
 	logf func(string, ...any)
 }
 
@@ -195,6 +203,11 @@ func NewBackfillManager(db *repo.DB, feed *DataFeed, cfg BackfillConfig, logf fu
 // ---------------------------------------------------------------------------
 // 启动
 // ---------------------------------------------------------------------------
+
+// SetTakerIDs 注入 taker 同步的合约池回调（见字段注释）
+func (m *BackfillManager) SetTakerIDs(f func() []string) {
+	m.takerIDs = f
+}
 
 // Start 启动：合约列表 → 行情快照 → 焦点合约回补 → 实时落库协程
 func (m *BackfillManager) Start(ctx context.Context) error {
@@ -247,6 +260,43 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 	// 实时落库
 	m.wg.Add(1)
 	go m.realtimeLoop()
+
+	// taker 买卖量 30 天首铺（★ 2026-10-03 二十二期）
+	//
+	// ★ 必须放后台 goroutine：80 个合约 × 翻页 + 节流 ≈ 分钟级，
+	//   同步跑会挡在 HTTP 监听前面 —— 这正是本项目「启动看起来像失败」
+	//   那个老坑（见 PurgeBadKlines 的注释）。
+	//
+	// ★ 已铺够就跳过：每次重启都重拉 30 天 = 白打 OKX 800 个请求，
+	//   还容易吃 429。判据 = taker_scan_state 里已覆盖的合约数
+	//   （回补成功才会写水位线，所以它就是「铺过没有」的可靠标记）。
+	//   缺了几个补几个：只把没铺过的合约塞进首铺队列。
+	if m.takerIDs != nil {
+		ids := m.takerIDs()
+		if len(ids) > 0 {
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				need := make([]string, 0, len(ids))
+				for _, id := range ids {
+					if _, _, cnt, _, ok := m.db.TakerState(id, "5m"); !ok || cnt == 0 {
+						need = append(need, id)
+					}
+				}
+				if len(need) == 0 {
+					logx.Logf("INFO", "[TAKER] 30 天数据已就绪（%d 个合约），跳过首铺", len(ids))
+					return
+				}
+				logx.Logf("INFO", "[TAKER] 首铺开始：%d/%d 个合约缺数据", len(need), len(ids))
+				t0 := time.Now()
+				ok, rows := TakerBackfillInsts(m.db, need, 30, m.cfg.Workers)
+				// ★ 服务模式没有控制台，m.logf（fmt.Printf）会被整个丢弃，
+				//   留痕必须走 logx（本项目坑 11 的同款）。
+				logx.Logf("INFO", "[TAKER] 首铺完成：%d/%d 个合约，%d 行，耗时 %s",
+					ok, len(need), rows, time.Since(t0).Round(time.Second))
+			}()
+		}
+	}
 
 	return nil
 }
@@ -1009,6 +1059,18 @@ func (m *BackfillManager) realtimeLoop() {
 				done := perf.Track("feed.refreshLatest")
 				m.refreshLatestKlines()
 				done()
+			}
+			// taker 买卖量增量（★ 2026-10-03 二十二期）：5m 切片，每 5 分钟
+			// 才出一根新数据，所以 60 秒一轮足够，且只拉最近 2 小时。
+			if volTick%volEvery == 0 && m.takerIDs != nil {
+				ids := m.takerIDs()
+				if len(ids) > 0 {
+					done := perf.Track("feed.takerSync")
+					if ok, rows := TakerSyncLatest(m.db, ids, m.cfg.Workers); rows > 0 {
+						logx.Logf("INFO", "[TAKER] 实时增量：%d 个合约，%d 行", ok, rows)
+					}
+					done()
+				}
 			}
 			// K 线滚动裁剪**不在这里**做了：CleanupKlines 要 30~100 秒
 			// （479 合约逐个在分区表上定位第 N 根再 DELETE），

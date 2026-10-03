@@ -12,6 +12,9 @@
   initFx();
   bindEvents();
   applyIndVisibility();
+  // ★ 二十二期：taker 买卖流向面板。自带首屏加载 + 30 秒轮询，
+  //   放在这里是为了不阻塞下面的主数据加载 —— 面板挂了页面照样能用。
+  try { bindTakerPanel(); } catch (e) { console.warn('bindTakerPanel 失败', e); }
   try {
     await loadState();
     renderTimeframes();

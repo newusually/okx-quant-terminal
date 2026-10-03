@@ -16,6 +16,7 @@ package handler
 //   GET  /api/pnl           权益/浮盈曲线
 //   GET  /api/backfill      回补进度 + 覆盖情况
 //   POST /api/backfill      手动触发回补 {inst, bar}
+//   GET  /api/takerflow     taker 买卖流向面板（时间/总买卖比/ETH下一根涨跌幅/最高合约）
 //   GET  /api/tables        数据库表与行数（自检）
 //   GET  /api/health        健康检查
 
@@ -60,6 +61,9 @@ type Server struct {
 	// 用来给 /api/mark 的实时刷新做节流，防止前端高频轮询打爆 OKX 限频。
 	freshMu sync.Mutex
 	freshAt map[string]time.Time
+
+	// tk taker 买卖流向面板的结果缓存（20 秒 TTL，见 api_takerflow.go）
+	tk takerflowCache
 }
 
 // cfg 取当前生效的策略配置。
@@ -137,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/signals", s.wrap(s.handleSignals))
 	mux.HandleFunc("/api/pnl", s.wrap(s.handlePnl))
 	mux.HandleFunc("/api/backfill", s.wrap(s.handleBackfill))
+	mux.HandleFunc("/api/takerflow", s.wrap(s.handleTakerFlow))
 	mux.HandleFunc("/api/tables", s.wrap(s.handleTables))
 	mux.HandleFunc("/api/health", s.wrap(s.handleHealth))
 	mux.HandleFunc("/api/perf", s.wrap(s.handlePerf))

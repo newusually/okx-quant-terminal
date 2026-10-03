@@ -535,6 +535,38 @@ func runApp(ctx context.Context) error {
 		fmt.Printf("%s [DATA] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 	})
 
+	// ---- taker 买卖量同步池（★ 2026-10-03 二十二期）----
+	//
+	// 面板口径：非美股非ETF（instCategory=1）里 24h 成交额前 N。
+	// 与实时扫描的候选池同源（同一份 inst + ticker，同样的排序规则），
+	// 保证「面板看的合约」和「引擎在买的合约」是同一批。
+	//
+	// ★ 用回调而不是快照：ticker 每分钟在变，池子必须每次现算；
+	//   做成快照的话跑一天之后面板还在算昨天的那 80 个。
+	bf.SetTakerIDs(func() []string {
+		insts, err := db.ListInstruments()
+		if err != nil {
+			return nil
+		}
+		tks, err := db.ListTickers()
+		if err != nil {
+			return nil
+		}
+		vol := make(map[string]float64, len(tks))
+		for _, t := range tks {
+			vol[t.InstID] = t.QuoteVol24h
+		}
+		topN := 80
+		if c := strategyStore.Get(); c != nil && c.TopNByVolume > 0 {
+			topN = c.TopNByVolume
+		}
+		pool := make([]service.TakerPoolInput, 0, len(insts))
+		for _, it := range insts {
+			pool = append(pool, service.TakerPoolInput{InstID: it.InstID, InstCategory: it.InstCategory})
+		}
+		return service.TakerPoolByVolume(pool, vol, topN)
+	})
+
 	if err := bf.SyncInstruments(); err != nil {
 		fmt.Printf("[DATA] ⚠ 合约列表同步失败：%v\n", err)
 	} else {
