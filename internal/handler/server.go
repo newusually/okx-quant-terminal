@@ -18,6 +18,8 @@ package handler
 //   POST /api/backfill      手动触发回补 {inst, bar}
 //   GET  /api/takerflow     taker 买卖流向面板（时间/总买卖比/ETH下一根涨跌幅/最高合约）
 //   GET  /api/takermacd     taker 买卖比的 MACD(12,26,60) 副图序列（仅 5m）
+//   GET  /api/nqchart       第二张图：NQ 5m 柱子 + 按交易时间对齐的 taker MACD
+//   GET  /api/takersignal   taker MACD 买入信号（macd>0 且前两根<0），网页声音提醒用
 //   GET  /api/tables        数据库表与行数（自检）
 //   GET  /api/health        健康检查
 
@@ -144,6 +146,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/backfill", s.wrap(s.handleBackfill))
 	mux.HandleFunc("/api/takerflow", s.wrap(s.handleTakerFlow))
 	mux.HandleFunc("/api/takermacd", s.wrap(s.handleTakerMacd))
+	mux.HandleFunc("/api/nqchart", s.wrap(s.handleNQChart))
+	// 二十二期·四：taker MACD 买入信号（macd>0 and ref macd<0 and refref macd<0）
+	// ——网页声音提醒的数据源，前端 signalalert.js 轮询
+	mux.HandleFunc("/api/takersignal", s.wrap(s.handleTakerSignal))
 	mux.HandleFunc("/api/tables", s.wrap(s.handleTables))
 	mux.HandleFunc("/api/health", s.wrap(s.handleHealth))
 	mux.HandleFunc("/api/perf", s.wrap(s.handlePerf))

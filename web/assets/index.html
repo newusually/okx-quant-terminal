@@ -36,6 +36,19 @@
     <div class="stat"><label>自动交易</label><b id="stLive" class="live-pill">--</b></div>
   </div>
 
+  <!-- ★ 二十二·四：买入信号提醒（macd>0 and ref macd<0 and refref macd<0）。
+       纯网页出声、不需要任何客户端 / 邮件；浏览器要求「用户手势后才能播声音」，
+       所以必须手动点一下开关（状态存 localStorage，下次自动带上）。
+       判定用的是哪条线可选：默认 MACD 柱（通达信里 MACD = 2×(DIF-DEA)）。 -->
+  <select class="btn ghost mini sig-rule" id="sigRule"
+          title="用哪条线判买入信号：MACD 柱 2×(DIF-DEA) / DIF 快线 / DEA 慢线">
+    <option value="hist">MACD柱</option>
+    <option value="dif">DIF</option>
+    <option value="dea">DEA</option>
+  </select>
+  <button class="btn ghost mini" id="sigBtn"
+          title="点一下开启：出现买入信号时网页响铃 + 右上角弹横幅（可随时关）">🔕 信号提醒</button>
+
   <!-- ★ 十五期：主题切换（暗金 / macOS 浅色），状态存 localStorage -->
   <button class="btn ghost mini" id="btnTheme" title="切换 浅色 / 暗色 主题">浅色</button>
   <div class="conn" id="conn"><i></i><span>连接中</span></div>
@@ -289,6 +302,67 @@
       <button class="btn ghost mini" id="btnOlder" title="再往前加载 1000 根">← 更早 1000 根</button>
     </div>
   </section>
+
+  <!-- ★ 二十二·三期：主图下面第二张图 ★
+       用户口径：「K线图下面再给我做个K线图，柱子必须是 NQ 也就是纳斯达克指数
+       期货的 5 分钟数据（duck* 的 30 天），下面要放上刚刚上面 K 线图的 macd
+       数据，而不是 NQ 的 macd 数据，而且时间要对齐；不交易的时候不显示
+       不交易的 K 线图；交易时间的数据请对齐 macd；保存在数据库，读取和更新
+       都直接走数据库。」
+       实现：柱子读 kline(inst_id=NQ-INDEX,bar=5m)，副图读 taker_macd（主图那份
+       买卖比 MACD），后端按 NQ 的交易时间戳过滤对齐（见 api_nqchart.go）。 -->
+  <div class="h-split" data-split="B" title="上下拖动调整下方图表高度 · 双击复位"></div>
+
+  <section class="panel lower" id="panelNQ">
+    <div class="chart-head">
+      <div class="ch-row ch-main">
+        <div class="pair">
+          <span class="pair-name">NQ / 纳斯达克100</span>
+          <span class="pair-inst muted">Dukascopy · 5m · 30 天</span>
+        </div>
+        <div class="pair-price">
+          <b id="nqPrice">--</b>
+          <span id="nqChg" class="chg flat">--</span>
+        </div>
+        <span class="countdown" id="nqSession" title="纳斯达克交易时段状态">--:--</span>
+        <div class="tf-group">
+          <span class="tf active" title="固定 5 分钟（用户口径）">5m</span>
+        </div>
+      </div>
+      <div class="ch-row ch-sub">
+        <div class="pair-ohlc muted" id="nqOhlc"></div>
+        <span id="nqSessionTag" class="nq-tag muted">--</span>
+        <button class="btn ghost" id="nqBtnRefresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="chart-box">
+      <div id="nqchart"></div>
+      <div class="legend" id="nqLegend">
+        <div class="lg-row">
+          <span class="lg-sym">NQ</span>
+          <span class="lg-tf">5m</span>
+          <span class="lg-ohlc" id="nqLgOhlc"></span>
+        </div>
+        <div class="lg-row lg-ind" id="nqLgMacdRow">
+          <span class="lg-item lg-src" id="nqLgSrc">买卖比 0.00</span>
+          <span class="lg-item"><i style="background:#f0b90b"></i>DIF <b id="nqLgDif">--</b></span>
+          <span class="lg-item"><i style="background:#4facfe"></i>DEA <b id="nqLgDea">--</b></span>
+          <span class="lg-item"><i id="nqLgHistDot" style="background:#0ecb81"></i>MACD <b id="nqLgHist">--</b></span>
+          <span class="lg-item lg-params" id="nqLgParams">(12,26,60)</span>
+        </div>
+      </div>
+      <div class="chart-hint" id="nqHint">加载中…</div>
+    </div>
+
+    <div class="chart-foot">
+      <span class="mk-legend"><b class="mk-buy">▮</b> NQ 5m 蜡烛（Dukascopy 30 天）</span>
+      <span class="sep"></span>
+      <span class="muted">副图 = 主图那份 taker 买卖比 MACD，已按 NQ 交易时间对齐</span>
+      <span class="sep"></span>
+      <span id="nqCov" class="muted">--</span>
+    </div>
+  </section>
 </main>
 
 <!-- ============ 下方表格区 ============ -->
@@ -398,6 +472,9 @@
   <span id="footRight"></span>
 </footer>
 
+<!-- ★ 二十二·四：买入信号横幅容器（fixed 定位在右上角，与顶栏独立） -->
+<div class="sig-toasts" id="sigToasts" aria-live="polite"></div>
+
 <!-- ★ 十五期：app.js(2677行) 拆分为分层文件，加载顺序不可乱 ——
      core(基础) → chart(图表) → render(渲染) → draw(画图) → data(数据)
      → tables(表格) → fx(特效) → main(启动,立即执行 boot) → panels(十五期新功能) -->
@@ -409,6 +486,8 @@
 <script src="/assets/tables.js"></script>
 <script src="/assets/tabsdock.js"></script>
 <script src="/assets/takerflow.js"></script>
+<script src="/assets/nqchart.js"></script>
+<script src="/assets/signalalert.js"></script>
 <script src="/assets/fx.js"></script>
 <script src="/assets/main.js"></script>
 <script src="/assets/panels.js"></script>

@@ -1048,6 +1048,8 @@ main .center.jump-flash {
    分隔条不会顶错格子。 */
 :root {
   --top-h: 340px;     /* 第 1 行（面板行）高度，h-split 拖动改写 */
+  /* ★ 二十二·三期：主图下面第二张图（NQ 5m + taker MACD）*/
+  --lower-h: 300px;   /* 下方 NQ 图高度，h-split[data-split="B"] 拖动改写 */
 }
 .layout { display: block; }   /* 旧 7 列网格退役，改纵向堆叠（见下） */
 .top-row {
@@ -1075,13 +1077,36 @@ main .center.jump-flash {
 }
 .h-split:hover::after, .h-split:active::after { background: var(--accent); transform: scaleX(1.2); }
 
-/* 第 2 行：K 线图占满整宽；高度 = 视口余量（第 1 行越高图越矮），
-   表格区仍在下方（滚动可见），与旧版行为一致 */
+/* 第 2 行：K 线图占满整宽；高度 = 视口余量（第 1 行 + 下方 NQ 图越高，主图越矮），
+   表格区仍在下方（滚动可见），与旧版行为一致。
+   ★ 二十二·三期：新增下方 NQ 图，这里要把它和它的分隔条高度一起扣掉，
+     否则两块图加起来超过一屏，页面会出现纵向滚动条、底部图表被切。 */
 .layout > .center {
-  height: calc(100vh - 132px - var(--top-h));
-  min-height: 420px;
+  height: calc(100vh - 132px - var(--top-h) - var(--lower-h) - 26px);
+  min-height: 300px;
   margin: 0 10px;
 }
+
+/* 第 3 行：下方第二张图（NQ 5m 柱子 + taker MACD 副图）。
+   高度由 --lower-h 控制（h-split[data-split="B"] 拖动改写）。
+   ★ 二十二·四补了两行（验收探针抓出来的真 bug）：
+     ① display:flex; flex-direction:column —— .chart-box 靠 flex:1 撑高度，
+        父级不是 flex 列它就是 0 高，整张 NQ 图「加载成功但看不见」；
+     ② #nqchart 的绝对定位 —— 主图是 #chart{position:absolute;inset:0}，
+        这里漏了同样的规则，lightweight-charts 拿到的 clientHeight 恒为 0。 */
+.panel.lower {
+  height: var(--lower-h);
+  min-height: 160px;
+  margin: 0 10px;
+  display: flex;
+  flex-direction: column;
+}
+#nqchart { position: absolute; inset: 0; }
+
+/* NQ 交易时段标签（● 交易中 / ○ 休市） */
+.nq-tag { font-size: 11px; padding: 1px 8px; border-radius: 9px; border: 1px solid var(--line); }
+.nq-tag.on { color: var(--up); border-color: rgba(14,203,129,.45); }
+.nq-tag.off { color: var(--text-2); }
 
 .v-split {
   position: relative; cursor: col-resize; touch-action: none;
@@ -1240,3 +1265,52 @@ main .center.jump-flash {
   .v-split[data-split="L"] { display: none; }
   .top-row > .side.taker { display: none; }
 }
+
+/* ---- ⑪ 二十二·四：买入信号提醒（顶栏开关 + 右上角横幅）----
+   用户口径：「不要客户端不要收邮件，就给我网页播放声音」。
+   颜色一律走主题变量 —— 暗金 / macOS 浅色两套皮肤共用同一份规则。
+   ★ 三个 mini 按钮都带 margin-left:auto（十五期的排版手法），排在
+     一起会互相撑开；这里显式把左边距归零，只留第一个吃掉剩余空间。 */
+#sigRule { margin-left: auto; margin-right: 6px; height: 20px; padding: 0 6px;
+  font-size: 10.5px; border-radius: 4px; appearance: none; -webkit-appearance: none;
+  cursor: pointer; font-family: inherit; }
+#sigRule option { background: var(--bg-2); color: var(--text); }
+#sigBtn { margin-left: 0; margin-right: 6px; white-space: nowrap; }
+#btnTheme { margin-left: 0; }
+
+.sig-toasts {
+  position: fixed; top: 66px; right: 14px; z-index: 60;
+  display: flex; flex-direction: column; gap: 7px;
+  max-width: 336px; pointer-events: none;
+}
+.sig-toast {
+  pointer-events: auto;
+  background: linear-gradient(180deg, rgba(24, 29, 35, .97), rgba(17, 21, 26, .97));
+  border: 1px solid var(--accent); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 8px 10px; color: var(--text);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  animation: sigIn .18s ease-out;
+}
+:root[data-theme="light"] .sig-toast {
+  background: rgba(255, 255, 255, .98);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .18);
+}
+@keyframes sigIn {
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: none; }
+}
+.sig-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.sig-head b { color: var(--accent); }
+.sig-rule { font-family: var(--mono); font-size: 10px; padding: 0 5px;
+  border: 1px solid var(--line-2); border-radius: 3px; color: var(--text-2); }
+.sig-time { margin-left: auto; font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
+.sig-x { background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 2px; }
+.sig-x:hover { color: var(--text); }
+.sig-body { margin-top: 4px; font-size: 11px; font-family: var(--mono);
+  color: var(--text-2); line-height: 1.45; }
+.sig-foot { margin-top: 3px; display: flex; gap: 10px; font-size: 10.5px;
+  font-family: var(--mono); }
+/* 状态提示（不是买入信号）：不做金色高亮，免得和真信号混淆 */
+.sig-notice { border-color: var(--line-2); border-left-color: var(--line-2); }
+.sig-notice .sig-head b { color: var(--text-2); }

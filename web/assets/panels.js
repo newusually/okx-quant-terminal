@@ -49,12 +49,14 @@
   /* ---------------- 面板注册 ---------------- */
   // ★ 二十二期重排：三个面板挪进 .top-row（K 线图独占下一行），
   //   选择器跟着 DOM 走。center 仍是 .layout 的直接子级。
-  var NAMES = { side: '合约列表', taker: '买卖流向', right: '合约信息', center: '图表' };
+  var NAMES = { side: '合约列表', taker: '买卖流向', right: '合约信息', center: '图表', lower: 'NQ 图' };
   var PANELS = [
     { key: 'side',   el: document.querySelector('.top-row > .panel.side:not(.right):not(.taker)') },
     { key: 'taker',  el: document.querySelector('.top-row > .panel.side.taker') },
     { key: 'right',  el: document.querySelector('.top-row > .panel.side.right') },
     { key: 'center', el: document.querySelector('.layout > .panel.center') },
+    // ★ 二十二·三期：主图下面第二张图（NQ 柱子 + taker MACD）
+    { key: 'lower',  el: document.querySelector('.panel.lower') },
   ].filter(function (p) { return !!p.el; });
 
   /* ---------------- 吸附辅助线 ---------------- */
@@ -75,6 +77,11 @@
       if (el && state.chart) state.chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
       var pe = $('pnlChart');
       if (pe && state.pnlChart) state.pnlChart.applyOptions({ width: pe.clientWidth, height: pe.clientHeight });
+      // ★ 二十二·三期：第二张图（NQ）也要跟着重算，否则拖 h-split 时画布不跟手
+      var ne = $('nqchart');
+      if (ne && typeof nqState !== 'undefined' && nqState.chart) {
+        nqState.chart.applyOptions({ width: ne.clientWidth, height: ne.clientHeight });
+      }
     } catch (e) { /* boot 未完成时静默 */ }
   }
 
@@ -372,9 +379,9 @@
     //      宽度由 L/T 两条间接决定。）
     //   横向一条：
     //     H：第 1 行（面板行）下边界 → 往下拖第 1 行变高、K 线变矮（+d）。
-    var VAR = { L: '--side-w', T: '--taker-w', H: '--top-h' };
-    var DIR = { L: 1, T: 1, H: 1 };
-    var DEF = { L: 268, T: 330, H: 340 };
+    var VAR = { L: '--side-w', T: '--taker-w', H: '--top-h', B: '--lower-h' };
+    var DIR = { L: 1, T: 1, H: 1, B: 1 };
+    var DEF = { L: 268, T: 330, H: 340, B: 300 };
     var col = Object.assign({}, DEF);
     try { Object.assign(col, JSON.parse(localStorage.getItem(LS_COLS) || 'null') || {}); } catch (e) {}
     var apply = function () {
@@ -386,9 +393,9 @@
     };
     apply();
     Array.prototype.slice.call(document.querySelectorAll('.v-split, .h-split')).forEach(function (sp) {
-      var side = sp.dataset.split;   // 'L' | 'T' | 'H'
+      var side = sp.dataset.split;   // 'L' | 'T' | 'H' | 'B'
       if (!VAR[side]) return;
-      var horiz = (side === 'H');    // H 是上下拖，其余是左右拖
+      var horiz = (side === 'H' || side === 'B');   // 上下拖（H = 上面板行，B = 下方 NQ 图）
       var startX = 0, startY = 0, startW = 0;
       sp.addEventListener('pointerdown', function (e) {
         e.preventDefault();
@@ -397,7 +404,11 @@
         var onMove = function (ev) {
           var d = (horiz ? (ev.clientY - startY) : (ev.clientX - startX)) * DIR[side];
           var v = startW + d;
-          if (horiz) {
+          if (side === 'B') {
+            // 下方 NQ 图高度：反向拖（往下拖是变矮）—— 分隔条在它上面
+            v = startW - (ev.clientY - startY);
+            v = Math.max(160, Math.min(v, Math.round(window.innerHeight * 0.6)));
+          } else if (horiz) {
             // 第 1 行高度：夹在 [200, 视口 60%] 之间，别把 K 线挤没了
             v = Math.max(200, Math.min(v, Math.round(window.innerHeight * 0.6)));
           } else if (side === 'T') {

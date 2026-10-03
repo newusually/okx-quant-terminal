@@ -456,6 +456,143 @@ func (d *DB) QueryTakerMacd(bar string, fromTs, toTs int64) ([]TakerMacdRow, err
 	return out, rows.Err()
 }
 
+/* ==========================================================================
+ * 二十二期·四：taker MACD 买入信号（taker_signal）
+ *
+ * 判据（用户原话）：「macd>0 and ref macd<0 and refref macd<0」——
+ * 当前根 > 0、前一根 < 0、前两根 < 0，即由负转正的上穿。
+ *
+ * 表里存的是**判定结果 + 判定依据**（val/prev/prev2 三个数都留着），
+ * 这样前端弹提醒时能把「为什么报」原样写出来，排查时也不用回头再算。
+ * ========================================================================== */
+
+// TakerSignalRow taker_signal 一行
+type TakerSignalRow struct {
+	Bar       string
+	Ts        int64
+	Rule      string // dif / dea / hist
+	Val       float64
+	Prev      float64
+	Prev2     float64
+	Ratio     float64 // 触发那根的买卖比（MACD 的输入值）
+	EthRise   float64 // 触发那根 ETH 的涨跌幅%（(c-o)/o*100）
+	EthRiseOK bool
+}
+
+var takerSignalCols = []string{
+	"bar", "ts", "rule", "val", "prev", "prev2", "ratio",
+	"eth_rise", "eth_rise_ok", "created_at",
+}
+
+// UpsertTakerSignals 批量写信号（幂等：同 (bar,ts,rule) 覆盖）
+//
+// ★ 覆盖业务列：同一根的 MACD 会因为「补进来更老的 K 线 / 重算窗口」
+//   而变化，后算的必须能盖掉先算的（否则会残留上一次的取值）。
+func (d *DB) UpsertTakerSignals(rows []TakerSignalRow) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UnixMilli()
+	args := make([][]any, 0, len(rows))
+	for _, r := range rows {
+		if r.Bar == "" || r.Ts <= 0 || r.Rule == "" {
+			continue
+		}
+		args = append(args, []any{
+			r.Bar, r.Ts, r.Rule, r.Val, r.Prev, r.Prev2, r.Ratio,
+			r.EthRise, boolToTiny(r.EthRiseOK), now,
+		})
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	return d.bulkUpsert("taker_signal", takerSignalCols, args, []string{
+		"val", "prev", "prev2", "ratio", "eth_rise", "eth_rise_ok", "created_at",
+	})
+}
+
+// QueryTakerSignals 读信号。
+//
+//	fromTs > 0 → 返回 (fromTs, toTs] 区间内**升序**的最多 limit 条
+//	             （前端轮询用：只要比上次看到的更新，就是新信号）
+//	fromTs == 0 → 返回**最新** limit 条（前端首屏用：初始化「已看到」水位线）
+//
+// ★ 两个分支方向不同不是随意写的：轮询必须从旧到新（否则同一轮多条信号
+//   的提醒顺序会倒过来）；首屏必须从新往回取（要的是最近这批，不是最早这批）。
+func (d *DB) QueryTakerSignals(bar, rule string, fromTs, toTs int64, limit int) ([]TakerSignalRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT bar, ts, rule, val, prev, prev2, ratio, eth_rise, eth_rise_ok
+	                FROM taker_signal WHERE bar=? AND rule=?`)
+	args := []any{bar, rule}
+	if fromTs > 0 {
+		sb.WriteString(" AND ts>?")
+		args = append(args, fromTs)
+	}
+	if toTs > 0 {
+		sb.WriteString(" AND ts<=?")
+		args = append(args, toTs)
+	}
+	if fromTs > 0 {
+		sb.WriteString(" ORDER BY ts ASC")
+	} else {
+		sb.WriteString(" ORDER BY ts DESC")
+	}
+	sb.WriteString(" LIMIT ?")
+	args = append(args, limit)
+
+	rows, err := d.sql.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TakerSignalRow, 0, limit)
+	for rows.Next() {
+		var r TakerSignalRow
+		var ok int
+		if err := rows.Scan(&r.Bar, &r.Ts, &r.Rule, &r.Val, &r.Prev, &r.Prev2,
+			&r.Ratio, &r.EthRise, &ok); err != nil {
+			return nil, err
+		}
+		r.EthRiseOK = ok != 0
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 首屏分支是倒序取的，这里翻回升序 —— 调用方（前端）只需要按时间正序
+	// 消费，不该关心 SQL 是正着查还是倒着查。
+	if fromTs <= 0 {
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+	}
+	return out, nil
+}
+
+// TakerSignalRange 信号表的时间范围与条数（诊断 / 覆盖率展示用）
+func (d *DB) TakerSignalRange(bar, rule string) (minTs, maxTs, cnt int64, err error) {
+	row := d.sql.QueryRow(
+		`SELECT COALESCE(MIN(ts),0), COALESCE(MAX(ts),0), COUNT(*) FROM taker_signal WHERE bar=? AND rule=?`,
+		bar, rule)
+	err = row.Scan(&minTs, &maxTs, &cnt)
+	if err == sql.ErrNoRows {
+		return 0, 0, 0, nil
+	}
+	return
+}
+
+// PurgeTakerSignalBefore 删掉早于 ts 的信号（保留期清理）
+func (d *DB) PurgeTakerSignalBefore(ts int64) (int64, error) {
+	res, err := d.sql.Exec(`DELETE FROM taker_signal WHERE ts < ?`, ts)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // boolToTiny bool → MySQL TINYINT(0/1)
 func boolToTiny(b bool) int {
 	if b {

@@ -15,6 +15,12 @@
   // ★ 二十二期：taker 买卖流向面板。自带首屏加载 + 30 秒轮询，
   //   放在这里是为了不阻塞下面的主数据加载 —— 面板挂了页面照样能用。
   try { bindTakerPanel(); } catch (e) { console.warn('bindTakerPanel 失败', e); }
+  // ★ 二十二·三期：主图下面第二张图（NQ 5m 柱子 + taker MACD 副图）。
+  //   同上，自带首屏加载 + 60 秒轮询，失败不影响主流程。
+  try { nqBoot(); } catch (e) { console.warn('nqBoot 失败', e); }
+  // ★ 二十二·四：买入信号声音提醒（macd>0 and ref macd<0 and refref macd<0）。
+  //   纯网页出声；自带首屏初始化 + 15 秒轮询，失败不影响主流程。
+  try { sigBoot(); } catch (e) { console.warn('sigBoot 失败', e); }
   try {
     await loadState();
     renderTimeframes();

@@ -768,14 +768,29 @@ func runApp(ctx context.Context) error {
 	// upsert 进 trade 表，历史面板才真的「有东西看」。
 	service.StartOKXPositionsSync(ctx)
 
-	// ---- 4.76 NQ（纳斯达克100）只读行情同步 —— ★ 二十一期已下线 ★
+	// ---- 4.76 NQ（纳斯达克100）行情同步 —— ★ 二十二·三期恢复 ★
 	//
-	// 2026-10-03 用户口径：「取消NQ所有东西 包括并且删除NQ按钮 数据等页面还有信号」。
-	// StartNQSync（Dukascopy 历史）与 StartNQIntraday（Yahoo ^NDX 当天）两个启动项
-	// 都已摘除 —— 不停同步的话，删掉的 NQ-INDEX 数据会被下一轮重新写回来。
-	// 存量数据（kline / signals / inst / signal_scan_state 里的 NQ-INDEX）已在
-	// 本次换壳停机窗口内手工清库。代码本体（dukascopy.go / nq_intraday.go）暂留
-	// 不删，方便日后想恢复时把这两个启动项加回来即可。
+	// 历史沿革：二十一期按口径「取消NQ所有东西」把这两个启动项摘了、存量数据清了。
+	// 2026-10-03（二十二·三期）用户口径：主 K 线图下面再放一个图，
+	// 柱子必须是 **NQ 纳斯达克指数期货 5 分钟**（Dukascopy 30 天），
+	// 下面挂主图那份 taker 买卖比 MACD —— 所以数据管道要恢复。
+	//
+	// 两条线各管一段，**衔接不重叠**（这是 nq_intraday.go 的设计前提）：
+	//   StartNQSync     Dukascopy 日文件（BID_candles_min_1.bi5，30 天历史）
+	//                   → 聚合 3m/5m/15m → 写 kline 表（inst_id = NQ-INDEX）
+	//   StartNQIntraday Yahoo ^NDX（当天盘中，5 分钟一轮）
+	//   ★ 为什么当天必须走 Yahoo：Dukascopy 的当天日文件在 UTC 日切前拿不到
+	//     （503/404），只等它的话图上最新一根永远停在前一天的 23:55 UTC。
+	//     两者同标的同价位口径（实测都在 30500 区间），UTC 日切后自然交接。
+	//
+	// 只读约束：NQ-INDEX 由 IsReadonlyInst 判定，准入写回时标记 readonly，
+	// 永远不进入下单链路（见下面 UpdateTradeable 的 readonly 分支）。
+	service.StartNQSync(ctx, db, func(format string, args ...any) {
+		logx.Logf("INFO", "[NQ] "+format, args...)
+	})
+	service.StartNQIntraday(ctx, db, func(format string, args ...any) {
+		logx.Logf("INFO", "[NQ-INTRADAY] "+format, args...)
+	})
 
 	// ---- 4.8 自动维护程序（月度任务 + 年度任务）----
 	//

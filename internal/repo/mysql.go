@@ -511,6 +511,43 @@ var schemaStmts = []string{
 		updated_at BIGINT     NOT NULL DEFAULT 0,
 		PRIMARY KEY (bar, ts)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
+
+	// ---- 二十二期·四：taker MACD 买入信号（预计算落库）----
+	//
+	// 用户口径（2026-10-03）：
+	//   「盘中有信号就实时提醒买入，买入条件就是 macd>0 and ref macd<0 and
+	//    refref macd<0」
+	//
+	// 即「由负转正的上穿」：当前根 > 0、前一根 < 0、前两根 < 0 ——
+	// 前两根都在零轴下方（而不是贴着零轴抖），才算是干净的反转，
+	// 这是把 ref(macd,1)<0 and ref(macd,2)<0 两个条件都写出来的意义。
+	//
+	// ★ 为什么 rule 三个值都算（dif / dea / hist）：
+	//   「macd」在不同平台指的是不同的线 —— 通达信 / 文华里 MACD = 2*(DIFF-DEA)
+	//   （正好是本项目的 hist），而口语说「上穿 0 轴」时指的又是 DIFF。
+	//   三种都落库（信号点很少，成本可忽略），前端换口径不用改后端。
+	//
+	// ★ 只落「已收盘」的根（ts + 一根 <= now）：正在走的那一根 MACD 会跟着
+	//   价格跳，拿它报警会在收盘前反复触发 / 反复撤销 —— 同一根报三次。
+	//   这与「回测只用收盘价」是同一条纪律。
+	//
+	// ★ 为什么不复用 signals 表：那张表是**8 因子共振**的产物（每合约一行、
+	//   带 score / rise_pct，前端画 🚀），与这里「全市场一条 MACD 序列」
+	//   完全不是一个东西。混表会让两边的清理 / 索引 / 口径互相污染。
+	`CREATE TABLE IF NOT EXISTS taker_signal (
+		bar         VARCHAR(4) NOT NULL,
+		ts          BIGINT     NOT NULL,
+		rule        VARCHAR(8) NOT NULL,
+		val         DOUBLE     NOT NULL DEFAULT 0,
+		prev        DOUBLE     NOT NULL DEFAULT 0,
+		prev2       DOUBLE     NOT NULL DEFAULT 0,
+		ratio       DOUBLE     NOT NULL DEFAULT 0,
+		eth_rise    DOUBLE     NOT NULL DEFAULT 0,
+		eth_rise_ok TINYINT    NOT NULL DEFAULT 0,
+		created_at  BIGINT     NOT NULL DEFAULT 0,
+		PRIMARY KEY (bar, ts, rule),
+		KEY ix_taker_signal_ts (bar, ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
 }
 
 // ---------------------------------------------------------------------------
