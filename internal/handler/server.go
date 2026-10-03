@@ -17,6 +17,7 @@ package handler
 //   GET  /api/backfill      回补进度 + 覆盖情况
 //   POST /api/backfill      手动触发回补 {inst, bar}
 //   GET  /api/takerflow     taker 买卖流向面板（时间/总买卖比/ETH下一根涨跌幅/最高合约）
+//   GET  /api/takermacd     taker 买卖比的 MACD(12,26,60) 副图序列（仅 5m）
 //   GET  /api/tables        数据库表与行数（自检）
 //   GET  /api/health        健康检查
 
@@ -142,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/pnl", s.wrap(s.handlePnl))
 	mux.HandleFunc("/api/backfill", s.wrap(s.handleBackfill))
 	mux.HandleFunc("/api/takerflow", s.wrap(s.handleTakerFlow))
+	mux.HandleFunc("/api/takermacd", s.wrap(s.handleTakerMacd))
 	mux.HandleFunc("/api/tables", s.wrap(s.handleTables))
 	mux.HandleFunc("/api/health", s.wrap(s.handleHealth))
 	mux.HandleFunc("/api/perf", s.wrap(s.handlePerf))

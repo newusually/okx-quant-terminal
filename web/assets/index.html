@@ -44,8 +44,18 @@
 <!-- ============ 行情滚动条 ============ -->
 <div class="ticker-wrap"><div class="ticker" id="tickerTape"></div></div>
 
-<!-- ============ 主体 ============ -->
+<!-- ============ 主体（二十二期重排）============
+     ★ 用户口径：「K线面板放在中间的位置，takervol 和 symbol list 2 个面板
+       放在K线图上面」。
+     结构改成上下两行：
+       第 1 行 .top-row：合约列表 | 买卖流向 | 合约信息（三个面板横排）
+       第 2 行 .center ：K 线图（占满整宽，居中，是页面的绝对主角）
+     两行之间有 .h-split 拖拽条，可以拉高拉矮第 1 行（K 线随之变矮变高）。
+     横向的三条 v-split 仍在，拖动改三个面板的列宽。 -->
 <main class="layout">
+
+  <!-- 第 1 行：三个面板横排 -->
+  <div class="top-row">
 
   <!-- 左：合约选择（默认只列「可交易」合约，可切到「全部」看被排除的原因） -->
   <aside class="panel side">
@@ -130,7 +140,24 @@
 
   <div class="v-split" data-split="T" title="拖动调整买卖流向面板宽度 · 双击复位"></div>
 
-  <!-- 中：图表 -->
+  <!-- 右：合约信息（二十二期起与上面两个面板同排，K 线独占下一整行） -->
+  <aside class="panel side right">
+    <div class="panel-head"><span>合约信息</span></div>
+    <div class="kv" id="instInfo"></div>
+
+    <div class="panel-head sub"><span>数据服务</span></div>
+    <div class="kv" id="svcInfo"></div>
+
+    <div class="panel-head sub"><span>数据库</span></div>
+    <div class="tbl-wrap small"><table id="tblTables"><tbody></tbody></table></div>
+  </aside>
+
+  </div><!-- /top-row -->
+
+  <!-- 行间拖拽条：上下拖改第 1 行高度（K 线图随之变矮变高），双击复位 -->
+  <div class="h-split" data-split="H" title="上下拖动调整面板行高度 · 双击复位"></div>
+
+  <!-- 第 2 行：K 线图（占满整宽，页面中间，绝对主角） -->
   <section class="panel center">
     <!-- ★ 十一期：图表头重排成两行 ★
          原来是七个元素挤一行靠 flex-wrap 换行，周期按钮带 margin-left:auto，
@@ -160,6 +187,9 @@
           <button class="ind active" data-ind="ma">MA</button>
           <button class="ind active" data-ind="boll">BOLL</button>
           <button class="ind active" data-ind="vol">VOL</button>
+          <!-- ★ 二十二期：taker 买卖比 MACD 副图开关（仅 5m 生效）-->
+          <button class="ind active" data-ind="tmacd"
+                  title="taker 买卖比 MACD(12,26,60)：把 5m 全池买:卖比例当作 close 算出来的副图，只在 5m 周期显示">T-MACD</button>
         </div>
 
         <!-- ★ 十一期：OKX 式画图工具（趋势线 / 水平线 / 矩形 / 画笔 / 橡皮擦）★
@@ -229,6 +259,14 @@
         <div class="lg-row lg-ind" id="lgVOL">
           <span class="lg-item"><i style="background:#5b8def"></i>VOL <b id="lgVol">--</b></span>
         </div>
+        <!-- ★ 二十二期：taker 买卖比 MACD(12,26,60) 副图图例（仅 5m 显示）-->
+        <div class="lg-row lg-ind" id="lgTMACD">
+          <span class="lg-item lg-src" id="lgTmSrc">买卖比 0.00</span>
+          <span class="lg-item"><i style="background:#f0b90b"></i>DIF <b id="lgTmDif">--</b></span>
+          <span class="lg-item"><i style="background:#4facfe"></i>DEA <b id="lgTmDea">--</b></span>
+          <span class="lg-item"><i id="lgTmHistDot" style="background:#0ecb81"></i>MACD <b id="lgTmHist">--</b></span>
+          <span class="lg-item lg-params" id="lgTmParams">(12,26,60)</span>
+        </div>
       </div>
 
       <div class="chart-hint" id="chartHint">加载中…</div>
@@ -251,20 +289,6 @@
       <button class="btn ghost mini" id="btnOlder" title="再往前加载 1000 根">← 更早 1000 根</button>
     </div>
   </section>
-
-  <div class="v-split" data-split="R" title="拖动调整右栏宽度 · 双击复位"></div>
-
-  <!-- 右：合约信息 -->
-  <aside class="panel side right">
-    <div class="panel-head"><span>合约信息</span></div>
-    <div class="kv" id="instInfo"></div>
-
-    <div class="panel-head sub"><span>数据服务</span></div>
-    <div class="kv" id="svcInfo"></div>
-
-    <div class="panel-head sub"><span>数据库</span></div>
-    <div class="tbl-wrap small"><table id="tblTables"><tbody></tbody></table></div>
-  </aside>
 </main>
 
 <!-- ============ 下方表格区 ============ -->
@@ -383,6 +407,7 @@
 <script src="/assets/draw.js"></script>
 <script src="/assets/data.js"></script>
 <script src="/assets/tables.js"></script>
+<script src="/assets/tabsdock.js"></script>
 <script src="/assets/takerflow.js"></script>
 <script src="/assets/fx.js"></script>
 <script src="/assets/main.js"></script>

@@ -508,6 +508,49 @@ const toLine = (arr) => (arr || [])
   .filter((p) => p.v !== null && p.v !== undefined && isFinite(p.v))
   .map((p) => ({ time: Math.floor(p.ts / 1000), value: p.v }));
 
+/* ---- 二十二期：taker MACD 副图的三个转换器 ---- */
+// DIF / DEA：普通线，值与后端一致（比值的 EMA 差，量级 0.01 上下）
+const toTmLine = (key) => (state.takerMacd || [])
+  .filter((p) => isFinite(p[key]))
+  .map((p) => ({ time: Math.floor(p.ts / 1000), value: p[key] }));
+// HIST：柱。正=绿负=红，与全站涨跌配色同一套（加密口径）。
+const toTmHist = () => (state.takerMacd || [])
+  .filter((p) => isFinite(p.hist))
+  .map((p) => ({
+    time: Math.floor(p.ts / 1000), value: p.hist,
+    color: p.hist >= 0 ? 'rgba(14,203,129,.75)' : 'rgba(246,70,93,.75)',
+  }));
+
+// paintTakerMacd 铺 MACD 副图数据。
+//
+// ★ 时间轴对齐：MACD 的 ts 就是 5m 切片起点，与 K 线的 ts 完全同源
+//   （都来自同一根 5m K 线的开盘时间），所以直接 setData 即可，
+//   不需要插值 / 前向填充 —— 这一点是本指标能「同步上面的 K 线柱子」
+//   的前提。
+function paintTakerMacd() {
+  if (!state.tmDif) return;
+  state.tmDif.setData(toTmLine('dif'));
+  state.tmDea.setData(toTmLine('dea'));
+  state.tmHist.setData(toTmHist());
+}
+
+// updateTakerMacdTail 只更新最后一根（实时刷新路径）
+function updateTakerMacdTail(n) {
+  if (!state.tmDif || !state.takerMacd.length) return;
+  const arr = state.takerMacd;
+  const from = Math.max(0, arr.length - Math.max(1, n));
+  for (let i = from; i < arr.length; i++) {
+    const p = arr[i];
+    const t = Math.floor(p.ts / 1000);
+    state.tmDif.update({ time: t, value: p.dif });
+    state.tmDea.update({ time: t, value: p.dea });
+    state.tmHist.update({
+      time: t, value: p.hist,
+      color: p.hist >= 0 ? 'rgba(14,203,129,.75)' : 'rgba(246,70,93,.75)',
+    });
+  }
+}
+
 // paintAll 全量重绘（只在「数据集合变了」时调用）
 function paintAll() {
   state.candle.setData(state.klines.map(toCandle));
@@ -518,6 +561,7 @@ function paintAll() {
   state.bollUp.setData(toLine(state.ind.bollUp));
   state.bollMid.setData(toLine(state.ind.bollMid));
   state.bollLo.setData(toLine(state.ind.bollLo));
+  paintTakerMacd();   // ★ 二十二期：taker MACD 副图（全市场序列，随数据一起铺）
 }
 
 // paintTail 只更新最后 n 根（定时刷新 / 实时报价走这条路径）
@@ -540,6 +584,7 @@ function paintTail(n) {
   updateLineTail(state.bollUp, state.ind.bollUp, from, len);
   updateLineTail(state.bollMid, state.ind.bollMid, from, len);
   updateLineTail(state.bollLo, state.ind.bollLo, from, len);
+  updateTakerMacdTail(n);   // ★ 二十二期：MACD 副图尾部同步
   drawRender();   // ★ 十一期：数据动了 → 画痕的像素位置可能变，重算一遍
 }
 

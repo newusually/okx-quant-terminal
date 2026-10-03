@@ -92,10 +92,11 @@ html, body {
 .tk .p { color: var(--text); }
 
 /* ---------------- 布局 ---------------- */
+/* ★ 二十二期：.layout 改纵向堆叠（第 1 行面板 / 第 2 行 K 线），
+   详细规则见下方「② 布局（二十二期重排）」段。 */
 .layout {
-  display: grid;
-  grid-template-columns: 268px minmax(0, 1fr) 268px;
-  gap: 10px; padding: 10px;
+  display: block;
+  padding: 0;
 }
 
 .panel {
@@ -434,6 +435,15 @@ body.legend-dragging .legend .lg-grip { cursor: grabbing; }
 }
 .ind:hover { color: var(--text); border-color: #40474f; }
 .ind.active { color: var(--accent); border-color: var(--accent); }
+/* ★ 二十二期：T-MACD 在非 5m 周期时置灰（开着但当前周期没有该指标） */
+.ind.off-bar {
+  color: var(--muted); border-color: var(--line);
+  opacity: .5; border-style: dashed;
+}
+/* taker MACD 图例：比其它指标行稍暗一点，视觉上归到「副图」那一档 */
+.legend .lg-src { color: var(--text-2); }
+.legend .lg-params { color: var(--muted); font-size: 10px; opacity: .8; }
+#lgTMACD { padding-top: 1px; }
 
 .chart-foot {
   display: flex; align-items: center; height: 30px; padding: 0 12px;
@@ -474,8 +484,25 @@ body.legend-dragging .legend .lg-grip { cursor: grabbing; }
   font-style: normal; font-size: 10px; background: var(--bg-4); color: var(--text-2);
   padding: 1px 6px; border-radius: 9px; margin-left: 5px;
 }
+/* ★ 二十二期：选项卡拖动换位 + 拖出成面板 */
+.tab { touch-action: none; }
+.tab.detached {
+  opacity: .45; border-bottom-style: dashed;
+}
+.tab.detached:hover { opacity: .8; }
+.tabdock { position: fixed; z-index: 62; display: flex; flex-direction: column; }
+.tabdock .td-head { cursor: grab; }
+.tabdock .td-head .td-grip { font-weight: 600; }
+.tabdock .td-acts { display: flex; gap: 4px; }
+.tabdock .td-body { flex: 1; min-height: 0; overflow: auto; }
+.tabdock .td-body .tbl-wrap { max-height: none; height: 100%; }
 
 .tbl-wrap { max-height: 320px; overflow: auto; }
+/* ★ 二十二期：当前持仓面板「至少 5 行长度」（用户口径「当前持仓面板要做
+   至少5行长度 不能太短」）。行高 ≈ 7+17+7+1 ≈ 32px，表头 ≈ 33px，
+   5 行 ≈ 193px；留出 pager/过滤条后给 tab-body 定 240px 下限。
+   空表 / 只有一两行时也撑住这个高度，不再「瘪成一条」。 */
+.tables .tab-body { min-height: 240px; }
 table.data { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
 table.data thead th {
   position: sticky; top: 0; z-index: 2;
@@ -1010,20 +1037,51 @@ main .center.jump-flash {
   --right-w: 268px;   /* 右栏宽 */
 }
 
-/* ---- ② 布局改 7 列：合约列表 / 分隔条 / taker流向 / 分隔条 / 图表 / 分隔条 / 合约信息 ----
-   列位置用 grid-column 显式固定：面板浮动（fixed 脱离文档流）后，
-   分隔条也不会顶错格子 —— 否则 side 一浮动，R 分隔条会跳到第 1 列。
+/* ---- ② 布局（★ 二十二期重排）----
+   用户口径：「K线面板放在中间的位置，takervol 和 symbol list 2 个面板
+   放在K线图上面」。
+   结构 = 上下两行：
+     第 1 行 .top-row：合约列表 | v-split | 买卖流向 | v-split | 合约信息
+     第 2 行 .center ：K 线图（占满整宽）
+   两行之间 .h-split 可上下拖（改 --top-h，K 线随之变高变矮）。
+   列位置仍用 grid-column 显式固定：面板浮动（fixed 脱离文档流）后，
+   分隔条不会顶错格子。 */
+:root {
+  --top-h: 340px;     /* 第 1 行（面板行）高度，h-split 拖动改写 */
+}
+.layout { display: block; }   /* 旧 7 列网格退役，改纵向堆叠（见下） */
+.top-row {
+  display: grid;
+  /* 列宽分配（二十二期）：合约列表固定 / 买卖流向吃掉全部富余 /
+     合约信息封顶 400px（KV 面板不需要太宽，宽了反而稀稀拉拉）。
+     T 分隔条拖动抬高的是「买卖流向」的最小宽 —— 富余再多它也先吃饱。 */
+  grid-template-columns: var(--side-w) 6px minmax(var(--taker-w), 1fr) 6px minmax(240px, 400px);
+  height: var(--top-h); min-height: 240px;
+  margin: 0 10px;
+}
+.top-row > .panel { height: 100%; min-height: 0; }
+.top-row > .side:not(.right):not(.taker) { grid-column: 1; }
+.top-row > .v-split[data-split="L"] { grid-column: 2; }
+.top-row > .side.taker { grid-column: 3; }
+.top-row > .v-split[data-split="T"] { grid-column: 4; }
+.top-row > .side.right { grid-column: 5; }
 
-   ★ 2026-10-03 二十二期：在「合约列表」与「K 线图」之间插入 taker 买卖流向面板
-     （用户口径「放在K线图左边,合约列表面板右边」）。 */
-.layout { grid-template-columns: var(--side-w) 6px var(--taker-w) 6px minmax(0, 1fr) 6px var(--right-w); }
-.layout > .side:not(.right):not(.taker) { grid-column: 1; }
-.layout > .v-split[data-split="L"] { grid-column: 2; }
-.layout > .side.taker { grid-column: 3; }
-.layout > .v-split[data-split="T"] { grid-column: 4; }
-.layout > .center { grid-column: 5; }
-.layout > .v-split[data-split="R"] { grid-column: 6; }
-.layout > .side.right { grid-column: 7; }
+/* 行间水平拖拽条 */
+.h-split { position: relative; height: 8px; margin: 0 10px; cursor: row-resize; touch-action: none; }
+.h-split::after {
+  content: ''; position: absolute; top: 2px; bottom: 2px; left: 24%; right: 24%;
+  border-radius: 3px; background: var(--line);
+  transition: background var(--dur-1) var(--ease-out), transform var(--dur-1) var(--ease-out);
+}
+.h-split:hover::after, .h-split:active::after { background: var(--accent); transform: scaleX(1.2); }
+
+/* 第 2 行：K 线图占满整宽；高度 = 视口余量（第 1 行越高图越矮），
+   表格区仍在下方（滚动可见），与旧版行为一致 */
+.layout > .center {
+  height: calc(100vh - 132px - var(--top-h));
+  min-height: 420px;
+  margin: 0 10px;
+}
 
 .v-split {
   position: relative; cursor: col-resize; touch-action: none;
@@ -1063,6 +1121,30 @@ main .center.jump-flash {
   cursor: pointer; transition: all var(--dur-1) var(--ease-out);
 }
 .ph-act:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
+
+/* ---- ③b 八向缩放手柄（二十二期，「和图片编辑一样」拉长拉短）----
+   四角 7px、四边 5px 的透明热区，hover 时亮出金色小方块提示可抓。
+   只在浮动态出现：停靠时尺寸由格子决定，没有可缩放的东西。
+   z-index 要盖住面板内容，但低于面板头部按钮。 */
+.ph-rs { display: none; position: absolute; z-index: 6; touch-action: none; }
+.panel.floating .ph-rs { display: block; }
+.ph-rs-n  { top: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+.ph-rs-s  { bottom: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+.ph-rs-e  { right: -3px; top: 10px; bottom: 10px; width: 7px; cursor: ew-resize; }
+.ph-rs-w  { left: -3px; top: 10px; bottom: 10px; width: 7px; cursor: ew-resize; }
+.ph-rs-ne { top: -4px; right: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
+.ph-rs-nw { top: -4px; left: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
+.ph-rs-se { bottom: -4px; right: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
+.ph-rs-sw { bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
+.ph-rs:hover::after {
+  content: ''; position: absolute; inset: 2px;
+  background: var(--accent); border-radius: 2px; opacity: .85;
+}
+.panel.resizing { transition: none !important; user-select: none; }
+/* 拖边时别让内容抢事件（iframe/图表会吞 pointermove） */
+.panel.resizing * { pointer-events: none !important; }
+/* 例外：手柄本身要继续接收 move（document 级监听其实已接管，这条只是保险） */
+.panel.resizing .ph-rs { pointer-events: auto !important; }
 
 /* ---- ④ 磁性吸附辅助线：贴边 14px 内闪现的 1px 金线 ---- */
 .snap-guide {
@@ -1143,18 +1225,18 @@ main .center.jump-flash {
 }
 :root[data-theme="light"] .pnl-tip { background: rgba(255, 255, 255, .96); }
 
-/* ---- ⑩ 窄屏适配（二十二期扩容到 7 列后重排）----
+/* ---- ⑩ 窄屏适配（二十二期上下两行布局）----
    两档降级，原则是「先扔附属面板，最后才动 K 线图」：
-     ① ≤1500px：藏右栏（合约信息+数据库），保留 taker 面板
-     ② ≤1180px：再藏 taker 面板，回到「合约列表 + K 线」两栏
+     ① ≤1500px：藏合约信息（第 1 行剩两个面板）
+     ② ≤1180px：再藏 taker 面板，第 1 行只剩合约列表
    隐藏的面板要连列定义和它前面的分隔条一起收掉 —— 否则会留下一列空白。 */
 @media (max-width: 1500px) {
-  .layout { grid-template-columns: var(--side-w) 6px var(--taker-w) 6px minmax(0, 1fr); }
-  .v-split[data-split="R"] { display: none; }
-  .layout > .side.right { display: none; }
+  .top-row { grid-template-columns: var(--side-w) 6px minmax(var(--taker-w), 1fr); }
+  .v-split[data-split="T"] { display: none; }
+  .top-row > .side.right { display: none; }
 }
 @media (max-width: 1180px) {
-  .layout { grid-template-columns: var(--side-w) 6px minmax(0, 1fr); }
-  .v-split[data-split="T"] { display: none; }
-  .layout > .side.taker { display: none; }
+  .top-row { grid-template-columns: var(--side-w) 6px minmax(var(--taker-w), 1fr); }
+  .v-split[data-split="L"] { display: none; }
+  .top-row > .side.taker { display: none; }
 }

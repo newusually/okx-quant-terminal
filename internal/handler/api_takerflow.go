@@ -1,6 +1,6 @@
 package handler
 
-// api_takerflow.go —— taker 买卖流向面板接口
+// api_takerflow.go —— taker 买卖流向面板接口（**读预计算表**）
 //
 // 面板要的四列（用户口径，2026-10-03；第 4 列口径当日二次变更）：
 //   1. 时间              —— 5 分钟切片
@@ -10,7 +10,20 @@ package handler
 //      （★ 原口径「成交量最大」已按用户要求改为「涨幅最高」：同一个 5 分钟里
 //      谁涨得最狠显示谁，例如 ETH 涨 2% 比谁都高就显示 ETH）
 //
-// 数据源：taker_vol（见 service/taker.go）+ kline（涨跌幅现算）。
+// ---------------------------------------------------------------------------
+// ★ 2026-10-03 改造：不再实时算，改读 MySQL 预计算表
+// ---------------------------------------------------------------------------
+// 用户口径：「当前的 takervol 面板的数据 都保存在数据库这样方便直接取用
+// 到时候参数指标直接从数据库调用 不用查询」。
+//
+// 所以本文件从「聚合 + 拼装」变成「SELECT 出来直接返回」。
+// 真正算的地方在 service.TakerPanelRebuild（后台跑，见 backfill.go）：
+//   taker_panel  ← 四列 + 下一根（每 5 分钟一根）
+//   taker_macd   ← 买卖比上的 MACD(12,26,60)
+//
+// 保留「表空则回落实时算」的分支：首启动那几秒后台可能还没算完，
+// 这时候面板不该是空白 —— 宁可慢一点也得有数据（且与后台算出同一口径，
+// 因为两边调的是同一个 repo.QueryTakerAgg）。
 //
 // ★ 为什么要「下一根」的涨跌幅（前瞻对齐）：
 //   面板的用途是「看这 5 分钟的买卖比，接下来一根发生了什么」。如果把同一
@@ -30,15 +43,15 @@ import (
 
 // takerflowCache 面板结果缓存
 //
-// 面板要连 30 天 × 288 根 × 80 合约做两次聚合（GROUP BY + 窗口函数），
-// 前端 5 秒轮询一次的话，每次全量重算会很浪费。这里做 20 秒 TTL：
-// 5m 切片本身 5 分钟才更新一根，20 秒缓存完全不影响实时性。
+// 现在数据源已经是预计算表（一次 SELECT），严格说缓存不是必需的了；
+// 但 8640 行 JSON 有 ~800KB，30 秒轮询一次还是省下不少序列化与网络开销。
+// 20 秒 TTL：5m 切片本身 5 分钟才更新一根，完全不影响实时性。
 type takerflowCache struct {
 	mu    sync.Mutex
 	at    time.Time
-	last  int64 // 上次算的最后一根 ts，用于无需重算的快速判定
-	limit int   // ★ 上次计算的窗口大小（切片数）：缓存命中要求请求窗口 ≤ 已算窗口
-	days  int   // ★ days 也截窗口（fromMs 上限），同规则：请求 days ≤ 已算 days 才可复用
+	last  int64 // 上次读到的最后一根 ts，用于无需重读的快速判定
+	limit int   // ★ 上次窗口大小：缓存命中要求请求窗口 ≤ 已读窗口
+	days  int   // ★ days 也截窗口，同规则
 	val   []takerFlowRow
 	cand  []string
 }
@@ -67,11 +80,12 @@ type takerFlowRow struct {
 
 // handleTakerFlow GET /api/takerflow?limit=&days=
 //
-// limit：返回最近多少个 5m 切片（默认 2880 ≈ 10 天，上限 288×30 = 30 天全量）
+// limit：返回最近多少个 5m 切片（★ 默认 288×30 = 30 天全量，用户口径
+// 「30天的数据要全部带上」——不再默认只给 10 天）
 // 返回按时间**降序**（最新在上，直接喂分页表格）
 func (s *Server) handleTakerFlow(w http.ResponseWriter, r *http.Request) (any, error) {
 	q := r.URL.Query()
-	limit := 2880
+	limit := 288 * 30
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
@@ -93,16 +107,16 @@ func (s *Server) handleTakerFlow(w http.ResponseWriter, r *http.Request) (any, e
 	nowMs := time.Now().UnixMilli()
 	nowMs = nowMs / 300000 * 300000
 
-	// 候选池：非美股非ETF（instCategory=1）中 24h 成交额前 80
+	// 候选池：只用于「表空时回落实时算」以及响应里回报池大小
 	cand := s.takerCandidatePool()
 
-	// 缓存命中（同一池子 + 未跨根 + 请求窗口不超过已算窗口）
+	// 缓存命中（同池 + 未跨根 + 请求窗口不超过已读窗口）
 	//
-	// ★ 窗口判定（2026-10-03 踩坑）：缓存里存的是「按上次 limit 算出来的
-	//   全量升序 rows」。若上次按 10 天算、这次要 30 天，直接复用会静默
+	// ★ 窗口判定（2026-10-03 踩坑）：缓存里存的是「按上次 limit 读出来的
+	//   全量升序 rows」。若上次按 10 天读、这次要 30 天，直接复用会静默
 	//   少 20 天数据 —— 复现路径：面板轮询（2880）后 20 秒内点「加载全部
 	//   30 天」（8640），实测 slices 从 8640 缩成 2883。所以命中条件必须
-	//   加上 limit <= 已算窗口；反过来小请求复用大缓存没问题（resp 按
+	//   加上 limit <= 已读窗口；反过来小请求复用大缓存没问题（resp 按
 	//   limit 从尾巴截取）。
 	s.tk.mu.Lock()
 	if !s.tk.at.IsZero() && time.Since(s.tk.at) < 20*time.Second &&
@@ -115,62 +129,14 @@ func (s *Server) handleTakerFlow(w http.ResponseWriter, r *http.Request) (any, e
 	s.tk.mu.Unlock()
 
 	fromMs := nowMs - int64(limit+2)*300000
-	// ★ 窗口不能超过 taker 保留期
+	// ★ 窗口不能超过保留期
 	if fromMs < nowMs-int64(days)*24*3600*1000 {
 		fromMs = nowMs - int64(days)*24*3600*1000
 	}
 
-	aggs, err := s.db.QueryTakerAgg(cand, fromMs, nowMs)
+	rows, err := s.takerPanelRows(cand, fromMs, nowMs)
 	if err != nil {
 		return nil, err
-	}
-
-	// ---- 取 ETH 的 5m K 线，按 ts 建索引（算「下一根涨跌幅」）----
-	ethNext := s.takerNextPctMap("ETH-USDT-SWAP", fromMs, nowMs)
-	// ---- 取 Top 合约各自的 K 线，用于第 4 列的「下一根涨跌幅」----
-	topInsts := make([]string, 0, 64)
-	seen := map[string]bool{}
-	for _, a := range aggs {
-		if a.TopInst != "" && !seen[a.TopInst] {
-			seen[a.TopInst] = true
-			topInsts = append(topInsts, a.TopInst)
-		}
-	}
-	topNext := map[string]map[int64]float64{}
-	for _, inst := range topInsts {
-		topNext[inst] = s.takerNextPctMap(inst, fromMs, nowMs)
-	}
-
-	rows := make([]takerFlowRow, 0, len(aggs))
-	for _, a := range aggs {
-		row := takerFlowRow{
-			Ts:        a.Ts,
-			BuyTotal:  a.BuyTotal,
-			SellTotal: a.SellTotal,
-			InstCount: a.InstCount,
-			TopInst:   a.TopInst,
-			TopRise:   a.TopRise,
-		}
-		if a.SellTotal > 0 {
-			row.Ratio = a.BuyTotal / a.SellTotal
-		}
-		// 下一根 = 本切片 + 5 分钟
-		nxt := a.Ts + 300000
-		// ★ 下一根还没生成时保持 ok=false，前端显示「—」而不是 0%
-		//   （0% 和「没有数据」是两回事，不能混）
-		if v, ok := ethNext[nxt]; ok {
-			row.EthNextPct = v
-			row.EthNextOk = true
-		}
-		if a.TopInst != "" {
-			if m, ok := topNext[a.TopInst]; ok {
-				if v, ok2 := m[nxt]; ok2 {
-					row.TopNextPct = v
-					row.TopNextOk = true
-				}
-			}
-		}
-		rows = append(rows, row)
 	}
 
 	// 缓存
@@ -184,6 +150,73 @@ func (s *Server) handleTakerFlow(w http.ResponseWriter, r *http.Request) (any, e
 	s.tk.mu.Unlock()
 
 	return s.takerFlowResp(rows, cand, limit, days), nil
+}
+
+// takerPanelRows 读 taker_panel；表空时回落实时计算。
+//
+// 实时兜底只在「预计算表完全没数据」时触发（首启动的几秒），
+// 一旦后台算过就永远走快路径。
+func (s *Server) takerPanelRows(cand []string, fromMs, toMs int64) ([]takerFlowRow, error) {
+	prs, err := s.db.QueryTakerPanel(service.TakerPanelMacdBar, fromMs, toMs)
+	if err != nil {
+		return nil, err
+	}
+	if len(prs) > 0 {
+		out := make([]takerFlowRow, 0, len(prs))
+		for _, p := range prs {
+			out = append(out, takerFlowRow{
+				Ts:         p.Ts,
+				BuyTotal:   p.BuyTotal,
+				SellTotal:  p.SellTotal,
+				Ratio:      p.Ratio,
+				InstCount:  p.InstCount,
+				EthNextPct: p.EthNextPct,
+				EthNextOk:  p.EthNextOk,
+				TopInst:    p.TopInst,
+				TopRise:    p.TopRise,
+				TopNextPct: p.TopNextPct,
+				TopNextOk:  p.TopNextOk,
+			})
+		}
+		return out, nil
+	}
+	// ---- 兜底：表空 → 实时算一次（首启动窗口期）----
+	return s.takerFlowLive(cand, fromMs, toMs)
+}
+
+// takerFlowLive 实时计算（预计算表还没铺好时的兜底）。
+//
+// 与 service.TakerPanelRebuild 用的是同一个 repo.QueryTakerAgg，
+// 所以兜底结果和预计算结果口径完全一致，不会出现「刷新一下数字就变了」。
+func (s *Server) takerFlowLive(cand []string, fromMs, toMs int64) ([]takerFlowRow, error) {
+	aggs, err := s.db.QueryTakerAgg(cand, fromMs, toMs)
+	if err != nil {
+		return nil, err
+	}
+	ethNext := s.takerNextPctMap("ETH-USDT-SWAP", fromMs, toMs)
+
+	out := make([]takerFlowRow, 0, len(aggs))
+	for _, a := range aggs {
+		row := takerFlowRow{
+			Ts:         a.Ts,
+			BuyTotal:   a.BuyTotal,
+			SellTotal:  a.SellTotal,
+			InstCount:  a.InstCount,
+			TopInst:    a.TopInst,
+			TopRise:    a.TopRise,
+			TopNextPct: a.TopNextRise,
+			TopNextOk:  a.TopNextOK,
+		}
+		if a.SellTotal > 0 {
+			row.Ratio = a.BuyTotal / a.SellTotal
+		}
+		if v, ok := ethNext[a.Ts+300000]; ok {
+			row.EthNextPct = v
+			row.EthNextOk = true
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 // takerFlowResp 组装响应（倒序取前 limit 条）

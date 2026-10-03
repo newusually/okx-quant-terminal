@@ -331,6 +331,14 @@ function drawOnInstChange() {
 }
 
 // loadOlder 向左翻一页：拿 state.klines 第一根之前的那 KLINE_PAGE 根
+//
+// ★ 二十二·二期补丁（用户报「K线移动左边 不显示左边数据了」）：
+//   翻页只由「可视区变化事件」触发。用户一把子把图拖到很左时，一页
+//   300 根盖不住拖出来的空白；而此刻用户多半已松手 —— 不再产生滚动
+//   事件，就永远停在空白里等不到下一页。所以补完一页后要**自查**：
+//   视口起点还压在第 0 根之前（lr.from < 2）就继续串行补页，直到把
+//   视口盖住 / 库里到头。oldBurst 保险丝防失控（正常每次 from 右移
+//   300，必然收敛；这里只防 API 异常返回空页导致的死循环）。
 async function loadOlder() {
   if (state.loadingOlder || !state.hasMore || !state.curInst) return;
   if (!state.klines.length) return;
@@ -350,7 +358,22 @@ async function loadOlder() {
     $('chartHint').textContent = '加载更早数据失败：' + e.message;
   } finally {
     state.loadingOlder = false;
+    setTimeout(chainOlder, 120);   // ★ 视口还没盖住就接着补
   }
+}
+
+// chainOlder 续页判定：视口起点仍在未加载区（from < 2）→ 再补一页。
+// 正常的贴边预加载仍由 onScroll 负责，这里只接管「拖过头」的情形，
+// 两个入口靠 loadingOlder 互斥，不会双发。
+function chainOlder() {
+  if (!state.hasMore || state.loadingOlder || !state.curInst || !state.klines.length) {
+    state.oldBurst = 0;
+    return;
+  }
+  const lr = state.chart && state.chart.timeScale().getVisibleLogicalRange();
+  if (!lr || lr.from >= 2) { state.oldBurst = 0; return; }   // 视口已盖住，收工
+  if (++state.oldBurst > 40) { state.oldBurst = 0; return; } // 保险丝：单次最多连补 40 页
+  loadOlder();
 }
 
 // loadNewer 向右翻一页（七期）：拿 state.klines 最后一根之后的 KLINE_PAGE 根。

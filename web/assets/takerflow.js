@@ -21,7 +21,8 @@
  *   同屏两套红绿含义）。
  *
  * ★ 分页：页码可见（renderPager 复用），客户端切页（数据一次拉够，
- *   pgSlice 不传 total 就走本地切片）。默认载 10 天，「加载全部 30 天」一键补齐。
+ *   pgSlice 不传 total 就走本地切片）。默认直接拉满 30 天（用户口径
+ *   「30天的数据要全部带上」）。
  *
  * ★ 函数一律带 tk 前缀（2026-10-03 踩坑）：
  *   core.js 里已有全局 fmtVol / fmtPct，本文件原来重名 → 整个脚本
@@ -33,14 +34,15 @@
 // taker 面板状态
 const tkState = {
   rows: [],       // 已加载的行（降序，最新在前）
-  limit: 2880,    // 已请求的切片数（默认 10 天；「加载全部」→ 8640）
+  limit: 288 * 30, // ★ 用户口径「30天的数据要全部带上」：默认直接拉满 30 天，
+                  //   不再先 10 天再让用户点「加载全部」（那版面板永远只有 10 天）。
   maxLimit: 288 * 30,
   loading: false,
   loadingAt: 0,   // 本轮开始时间（用于卡死自解，见 loadTakerFlow 注释）
   summary: null,
   poolSize: 0,
   note: '',
-  allLoaded: false,
+  allLoaded: true, // 默认已拉满，「加载全部」按钮自然进 disabled 态
 };
 
 // tkFmtVol 量级格式化：12345678 → "1234.6万"；小于 1 万直接给 2 位小数
@@ -103,7 +105,7 @@ async function loadTakerFlow(reset) {
   }
   tkState.loading = true;
   tkState.loadingAt = now;
-  if (reset) tkState.limit = 2880;
+  if (reset) tkState.limit = tkState.maxLimit;   // ★ 首屏就拉满 30 天（原来这里写死 2880 把默认值打回 10 天）
 
   // 12 秒超时（全量 30 天约 1.3MB，慢网络也够；卡死则必定中断）
   const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -156,6 +158,8 @@ function renderTakerFlow() {
   }
   const allBtn = $('tkAll');
   if (allBtn) {
+    // ★ 默认就拉满 30 天后这个按钮没用了 —— 直接藏掉，别占一行
+    allBtn.classList.toggle('hidden', !!tkState.allLoaded);
     allBtn.disabled = tkState.allLoaded;
     allBtn.textContent = tkState.allLoaded ? '已载全部' : '加载全部 30 天';
   }

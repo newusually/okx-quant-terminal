@@ -84,6 +84,52 @@ async function jumpToInst(instId, bar) {
   }
 }
 
+// loadTakerMacd 拉取 taker 买卖比的 MACD(12,26,60) 序列（二十二期副图）。
+//
+// 数据源：/api/takermacd → taker_macd 预计算表（后台每 5 分钟刷一次）。
+// 它是一条**全市场**序列（输入 = 全池买卖比），与当前合约无关，
+// 所以：
+//   · 换合约**不需要**重拉（序列不变）—— 只有时间窗口变了才拉；
+//   · 拉取范围跟着当前已加载的 K 线走，保证「上面的 K 线柱子到哪，
+//     下面的副图就到哪」（用户口径「要同步上面的 K 线柱子指标」）。
+//
+// ★ 只在 5m 拉：其它周期副图不显示（takerMacdVisible() 会拦住渲染），
+//   这时候还去请求一遍纯属浪费。
+async function loadTakerMacd() {
+  if (state.curBar !== '5m') {
+    // 非 5m：清空并隐藏，避免残留上一轮的柱子（3m 图上画 5m 的柱 = 错位）
+    state.takerMacd = [];
+    state.takerMacdMap = {};
+    try { applyTakerMacdScales(); paintTakerMacd(); } catch (e) {}
+    return;
+  }
+  const ks = state.klines || [];
+  if (!ks.length) return;
+  // 请求区间 = 当前已加载 K 线的首尾（多给两根余量，首尾那根也能对上）
+  const from = ks[0].ts;
+  const to = ks[ks.length - 1].ts + 300000;
+  let j;
+  try {
+    j = await api(`/api/takermacd?from=${from}&to=${to}`);
+  } catch (e) {
+    console.warn('loadTakerMacd 失败', e);
+    return;
+  }
+  if (state.curBar !== '5m') return;   // 期间切了周期 → 结果作废
+  state.takerMacd = j.points || [];
+  state.takerMacdParams = {
+    fast: j.fast || 12, slow: j.slow || 26, signal: j.signal || 60,
+  };
+  const m = {};
+  state.takerMacd.forEach((p) => { m[p.ts] = p; });
+  state.takerMacdMap = m;
+  try {
+    applyTakerMacdScales();
+    paintTakerMacd();
+    renderLegend(state.klines[state.klines.length - 1] || null);
+  } catch (e) { console.warn('MACD 渲染失败', e); }
+}
+
 // loadKline(reset)
 //   reset=true  → 重新载入最新一页（换合约 / 换周期 / 手动刷新）
 //   reset=false → 定时刷新，只把最新一页并进来（已加载的老数据保留）
@@ -96,6 +142,7 @@ async function loadKline(reset) {
     state.klines = [];
     state.ind = {};
     state.hasMore = false;
+    state.oldBurst = 0;      // 换合约/周期：续载保险丝归零
     state.noMoreNew = false;   // 七期：换合约/周期后右端重新可探
     resetMarkers();
   }
@@ -201,6 +248,41 @@ async function loadKline(reset) {
   }
 
   scheduleKlineRefresh();
+  maybeLoadTakerMacd(reset);
+}
+
+// maybeLoadTakerMacd 判断副图数据要不要重拉。
+//
+// ★ 为什么不能每次 K 线刷新都拉：5m 图 6 秒轮询一次，而 MACD 序列
+//   **5 分钟才变一根**。每 6 秒去拿一遍等于白跑 50 倍的请求。
+//   判据两条，命中任一条才拉：
+//     ① 最右端出现了新的 5m 根（ts 变了）—— 正常增量
+//     ② 最左端变了（用户翻页往前拉了）—— 补历史
+//   换合约 / 换周期走 force=true，强制重来。
+function maybeLoadTakerMacd(force) {
+  if (state.curBar !== '5m') {
+    if (state.takerMacd.length || !state.takerMacdHidden) {
+      state.takerMacd = [];
+      state.takerMacdMap = {};
+      state.takerMacdHidden = true;
+      try { applyTakerMacdScales(); paintTakerMacd(); } catch (e) {}
+    }
+    return;
+  }
+  state.takerMacdHidden = false;
+  // 进 5m 先把布局切好（不用等网络），否则从 3m 切回来会有一瞬空白带
+  try { applyTakerMacdScales(); } catch (e) {}
+  const ks = state.klines || [];
+  if (!ks.length) return;
+  const newest = ks[ks.length - 1].ts;
+  const oldest = ks[0].ts;
+  if (!force && state.takerMacd.length &&
+      state.takerMacdEdgeNew === newest && state.takerMacdEdgeOld === oldest) {
+    return;   // 两端都没动 → 现有序列仍然有效
+  }
+  state.takerMacdEdgeNew = newest;
+  state.takerMacdEdgeOld = oldest;
+  loadTakerMacd().catch(() => {});
 }
 
 // 各周期的轮询间隔：短周期勤一点，长周期没必要

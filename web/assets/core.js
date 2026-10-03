@@ -54,13 +54,25 @@ const state = {
   ind: {},              // 指标序列 {ma7:[], ma25:[], ...}，同样按 ts 合并
   indMap: {},           // ts -> 值 的快查表（画图例用）
   kMap: new Map(),      // ts -> K 线
+
+  // ---- ★ 二十二期：taker 买卖比 MACD 副图 ----
+  // takerMacd 是**全市场**的一条序列（不是当前合约的），来自
+  // /api/takermacd（读 taker_macd 预计算表，参数 12/26/60）。
+  // 前端只做一件事：按 ts 对齐画在 VOL 下面的副图里。
+  takerMacd: [],        // [{ts, src, dif, dea, hist}] 升序
+  takerMacdMap: {},     // ts -> 该点，给图例取值用
+  takerMacdParams: null, // {fast, slow, signal} 后端回报的参数，图例上要写
+  takerMacdEdgeNew: 0,  // 上次拉取时 K 线的最右端 ts（没变就不重拉）
+  takerMacdEdgeOld: 0,  // 上次拉取时 K 线的最左端 ts（翻页后要补历史）
+  takerMacdHidden: false, // 非 5m 周期时置位，避免反复重算隐藏状态
   hasMore: false,       // 更早还有没有数据
   loadingOlder: false,  // 防止一次滚动触发多次翻页
+  oldBurst: 0,          // 连续补页计数（拖太左时的串行续载，见 draw.js chainOlder）
   noMoreNew: false,     // 七期：右端已到最新（loadNewer 返回 0 根时置位）
   loadingNewer: false,  // 七期：右移翻页去重
 
   // ---- 显示开关 & 实时 ----
-  indVisible: { ma: true, boll: true, vol: true },
+  indVisible: { ma: true, boll: true, vol: true, tmacd: true },
   tickTimer: null,      // 每秒：收盘倒计时 + 用最新价刷新最后一根
 
   // ---- K 线标注（买入小火箭 / 卖出小绿叶）----

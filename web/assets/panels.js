@@ -47,11 +47,14 @@
   }
 
   /* ---------------- 面板注册 ---------------- */
-  var NAMES = { side: '合约列表', center: '图表', right: '合约信息' };
+  // ★ 二十二期重排：三个面板挪进 .top-row（K 线图独占下一行），
+  //   选择器跟着 DOM 走。center 仍是 .layout 的直接子级。
+  var NAMES = { side: '合约列表', taker: '买卖流向', right: '合约信息', center: '图表' };
   var PANELS = [
-    { key: 'side',   el: document.querySelector('.layout > .panel.side:not(.right)') },
+    { key: 'side',   el: document.querySelector('.top-row > .panel.side:not(.right):not(.taker)') },
+    { key: 'taker',  el: document.querySelector('.top-row > .panel.side.taker') },
+    { key: 'right',  el: document.querySelector('.top-row > .panel.side.right') },
     { key: 'center', el: document.querySelector('.layout > .panel.center') },
-    { key: 'right',  el: document.querySelector('.layout > .panel.side.right') },
   ].filter(function (p) { return !!p.el; });
 
   /* ---------------- 吸附辅助线 ---------------- */
@@ -233,7 +236,63 @@
   /* ---------------- 每个面板的抓手 + 按钮组 ---------------- */
   function updateActs(p) {
     if (p.acts) p.acts.classList.toggle('hidden', !p.el.classList.contains('floating'));
+    // 缩放手柄的显隐走纯 CSS（.panel.floating .ph-rs），这里不用管
   }
+
+  /* ---------------- 八向缩放手柄（二十二期）----------------
+   * 用户口径「可以放大缩小 拉长拉短 和图片编辑功能一样」。
+   * 浮动面板四角 + 四边各有一个 3~7px 的透明热区，按住拖 =
+   * 改面板的宽/高/位置。松手落位并持久化。
+   * ★ 只改 left/top/width/height（与拖动同一套变量），松手后
+   *   resizeCharts() 让图表重算画布。 */
+  function initResize(p) {
+    var DIRS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    p.handles = DIRS.map(function (dir) {
+      var h = document.createElement('span');
+      h.className = 'ph-rs ph-rs-' + dir;
+      h.dataset.dir = dir;
+      p.el.appendChild(h);
+      h.addEventListener('pointerdown', function (e) {
+        if (!p.el.classList.contains('floating')) return;
+        e.preventDefault(); e.stopPropagation();
+        var r = p.el.getBoundingClientRect();
+        var sx = e.clientX, sy = e.clientY;
+        var st = { x: r.left, y: r.top, w: r.width, h: r.height };
+        p.el.classList.add('resizing');
+
+        var onMove = function (ev) {
+          var dx = ev.clientX - sx, dy = ev.clientY - sy;
+          var x = st.x, y = st.y, w = st.w, hgt = st.h;
+          if (dir.indexOf('e') >= 0) w = Math.max(220, st.w + dx);
+          if (dir.indexOf('s') >= 0) hgt = Math.max(140, st.h + dy);
+          if (dir.indexOf('w') >= 0) { w = Math.max(220, st.w - dx); x = st.x + (st.w - w); }
+          if (dir.indexOf('n') >= 0) { hgt = Math.max(140, st.h - dy); y = st.y + (st.h - hgt); }
+          p.el.style.left = x + 'px';
+          p.el.style.top = y + 'px';
+          p.el.style.width = w + 'px';
+          p.el.style.height = hgt + 'px';
+          p.live = { x: x, y: y, w: w, h: hgt };
+        };
+        var onUp = function () {
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+          document.removeEventListener('pointercancel', onUp);
+          p.el.classList.remove('resizing');
+          if (p.live) {
+            p.fx = p.live.x; p.fy = p.live.y; p.fw = p.live.w; p.fh = p.live.h;
+            p.live = null;
+          }
+          resizeCharts();
+          save();
+        };
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onUp);
+      });
+      return h;
+    });
+  }
+
   function setupPanel(p) {
     var host = p.el.querySelector('.panel-head') || p.el.querySelector('.ch-main');
     if (!host) return;
@@ -259,6 +318,8 @@
       if (b.dataset.act === 'dock') toDock(p);
       else minimize(p);
     });
+
+    initResize(p);
   }
 
   /* ---------------- 持久化 ---------------- */
@@ -302,34 +363,51 @@
 
   /* ---------------- 可拖拽分隔条（HDividedBox 等价物）---------------- */
   function initSplits() {
-    // ★ 二十二期：加了第三个分隔条 T（taker 买卖流向面板）。
-    //   三者的物理含义不同，拖动方向也不同：
+    // ★ 二十二期重排：
+    //   纵向两条（都在 .top-row 里）：
     //     L：「合约列表」右边界 → 往右拖变宽（+d）
-    //     T：「买卖流向」右边界   → 往右拖变宽（+d）
-    //     R：「合约信息」左边界   → 往右拖变窄（-d）
-    //   所以不能只用「side==='L' ? +d : -d」——那样 T 会被判成反向。
-    var VAR = { L: '--side-w', T: '--taker-w', R: '--right-w' };
-    var DIR = { L: 1, T: 1, R: -1 };
-    var DEF = { L: 268, T: 330, R: 268 };
+    //     T：「买卖流向」右边界 → 往右拖变宽（+d）；它同时是「合约信息」的
+    //        左边界 —— 往右拖 = taker 变宽、合约信息被挤窄，符合直觉。
+    //     （旧 R 分隔条随 7 列布局一起退役：合约信息现在是弹性列，
+    //      宽度由 L/T 两条间接决定。）
+    //   横向一条：
+    //     H：第 1 行（面板行）下边界 → 往下拖第 1 行变高、K 线变矮（+d）。
+    var VAR = { L: '--side-w', T: '--taker-w', H: '--top-h' };
+    var DIR = { L: 1, T: 1, H: 1 };
+    var DEF = { L: 268, T: 330, H: 340 };
     var col = Object.assign({}, DEF);
     try { Object.assign(col, JSON.parse(localStorage.getItem(LS_COLS) || 'null') || {}); } catch (e) {}
     var apply = function () {
       Object.keys(VAR).forEach(function (k) {
         document.documentElement.style.setProperty(VAR[k], (col[k] || DEF[k]) + 'px');
       });
+      // 图表尺寸不用在这里跟着刷：chart.js 的 ResizeObserver 盯着 #chart，
+      // 容器一动它就重算画布；pointerup 里再显式补一次对齐。
     };
     apply();
-    Array.prototype.slice.call(document.querySelectorAll('.v-split')).forEach(function (sp) {
-      var side = sp.dataset.split;   // 'L' | 'T' | 'R'
+    Array.prototype.slice.call(document.querySelectorAll('.v-split, .h-split')).forEach(function (sp) {
+      var side = sp.dataset.split;   // 'L' | 'T' | 'H'
       if (!VAR[side]) return;
-      var startX = 0, startW = 0;
+      var horiz = (side === 'H');    // H 是上下拖，其余是左右拖
+      var startX = 0, startY = 0, startW = 0;
       sp.addEventListener('pointerdown', function (e) {
         e.preventDefault();
-        startX = e.clientX;
+        startX = e.clientX; startY = e.clientY;
         startW = col[side] || DEF[side];
         var onMove = function (ev) {
-          var d = (ev.clientX - startX) * DIR[side];
-          col[side] = Math.max(160, Math.min(startW + d, 560));
+          var d = (horiz ? (ev.clientY - startY) : (ev.clientX - startX)) * DIR[side];
+          var v = startW + d;
+          if (horiz) {
+            // 第 1 行高度：夹在 [200, 视口 60%] 之间，别把 K 线挤没了
+            v = Math.max(200, Math.min(v, Math.round(window.innerHeight * 0.6)));
+          } else if (side === 'T') {
+            // ★ T 分隔条改的是「买卖流向」的最小宽，富余空间都会给它，
+            //   所以上限放宽到 1100（整行的大头）
+            v = Math.max(160, Math.min(v, 1100));
+          } else {
+            v = Math.max(160, Math.min(v, 560));
+          }
+          col[side] = v;
           apply();
         };
         var onUp = function () {

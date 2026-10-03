@@ -71,6 +71,36 @@ function initChart() {
   });
   state.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
 
+  // ★ 二十二期：taker 买卖比的 MACD(12,26,60) 副图（挂在 VOL 下面）
+  //
+  // 用户口径：「把 5 分钟 takervol 比例当作 MACD 的 close 值，参数 12 26 60，
+  // 放到 K 线图上、就是 K 线柱子下面 vol 值的下面，要同步上面的 K 线柱子指标，
+  // 5 分钟才能显示这个指标，就是副图」。
+  //
+  // 实现要点：
+  //   · 独立 priceScale('tmacd')，用 scaleMargins 把它的纵向区间压在
+  //     VOL 之下 —— lightweight-charts 的「副图」就是这么做的（同一张图上
+  //     多个价格轴各占一条横带），不需要再建第二个 chart 对象；
+  //   · 数据是**全市场**的一条序列（不是当前合约的），按时间戳对齐即可；
+  //   · 三条：DIF（线）、DEA（线）、HIST（柱，正绿负红 —— 与全站涨跌色一致）。
+  state.tmDif = state.chart.addLineSeries({
+    priceScaleId: 'tmacd', color: '#f0b90b', lineWidth: 1,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+  state.tmDea = state.chart.addLineSeries({
+    priceScaleId: 'tmacd', color: '#4facfe', lineWidth: 1,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+  state.tmHist = state.chart.addHistogramSeries({
+    priceScaleId: 'tmacd', priceFormat: { type: 'price', precision: 5, minMove: 0.00001 },
+    priceLineVisible: false, lastValueVisible: false,
+  });
+  // 初始隐藏（默认是 3m 还是 5m 由 loadState 决定，下一秒 applyTakerMacdScales 会给准）
+  state.tmDif.applyOptions({ visible: false });
+  state.tmDea.applyOptions({ visible: false });
+  state.tmHist.applyOptions({ visible: false });
+  applyTakerMacdScales();
+
   state.ma7 = state.chart.addLineSeries({ color: C_MA7, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
   state.ma25 = state.chart.addLineSeries({ color: C_MA25, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
   state.ma99 = state.chart.addLineSeries({ color: C_MA99, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
@@ -209,6 +239,7 @@ function renderLegend(k) {
   if (!k) {
     $('lgOhlc').textContent = '';
     ['lgMa7', 'lgMa25', 'lgMa99', 'lgBollUp', 'lgBollMid', 'lgBollLo', 'lgVol'].forEach((id) => { $(id).textContent = '--'; });
+    ['lgTmSrc', 'lgTmDif', 'lgTmDea', 'lgTmHist'].forEach((id) => { if ($(id)) $(id).textContent = '--'; });
     return;
   }
   const chg = k.o ? (k.c - k.o) / k.o * 100 : 0;
@@ -239,6 +270,57 @@ function renderLegend(k) {
   $('lgBollMid').textContent = pick(m.bollMid, k.ts);
   $('lgBollLo').textContent = pick(m.bollLo, k.ts);
   $('lgVol').textContent = fmtVol(k.v);
+
+  // ★ 二十二期：taker MACD 副图图例。
+  //   取当前十字光标这根 K 线对应 ts 的 MACD 值 —— 与上面 OHLC 同一根，
+  //   这样「上面柱子 + 下面指标」读的是同一时刻，用户不会看串。
+  tmLegend(k.ts);
+}
+
+// tmLegend 填 MACD 副图图例（值 + 柱色 + 参数）
+function tmLegend(ts) {
+  const src = $('lgTmSrc'), dif = $('lgTmDif'), dea = $('lgTmDea'), hist = $('lgTmHist');
+  if (!src) return;
+  // 参数文案：优先用后端回报的（后端是唯一真源），拿不到再退回默认
+  const p = state.takerMacdParams || { fast: 12, slow: 26, signal: 60 };
+  const pt = $('lgTmParams');
+  if (pt) pt.textContent = '(' + p.fast + ',' + p.slow + ',' + p.signal + ')';
+
+  const m = tmPointAt(ts);
+  if (!m) {
+    src.textContent = '买卖比 --';
+    if (dif) dif.textContent = '--';
+    if (dea) dea.textContent = '--';
+    if (hist) hist.textContent = '--';
+    return;
+  }
+  src.textContent = '买卖比 ' + Number(m.src).toFixed(3);
+  if (dif) dif.textContent = Number(m.dif).toFixed(5);
+  if (dea) dea.textContent = Number(m.dea).toFixed(5);
+  if (hist) hist.textContent = Number(m.hist).toFixed(5);
+  // 柱子的点跟着正负变色（绿=正 / 红=负，与柱本身一致）
+  const dot = $('lgTmHistDot');
+  if (dot) dot.style.background = m.hist >= 0 ? '#0ecb81' : '#f6465d';
+}
+
+// tmPointAt 取 ts 对应的 MACD 点；没有精确命中时**回退到最近的更早一根**。
+//
+// ★ 为什么需要回退：MACD 是后台按 5m 批量算的，最新一根（还在走盘中）
+//   天然还没有值。不做回退的话，光标停在最新一根上图例会一直显示「--」，
+//   看着像指标坏了。回退到上一根是诚实的（那就是最近一次算出来的值），
+//   而且与「K 线还在形成、指标以已收盘的为准」的行业惯例一致。
+function tmPointAt(ts) {
+  const arr = state.takerMacd;
+  if (!arr || !arr.length) return null;
+  const exact = state.takerMacdMap[ts];
+  if (exact) return exact;
+  // 二分找最后一个 ts' <= ts
+  let lo = 0, hi = arr.length - 1, best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].ts <= ts) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  return best >= 0 ? arr[best] : null;
 }
 
 // buildIdx 重建 ts→值 的快查表（图例 O(1) 查指标）
@@ -266,6 +348,57 @@ function applyIndVisibility() {
   $('lgMA').classList.toggle('hidden', !maVis);
   $('lgBOLL').classList.toggle('hidden', !bollVis);
   $('lgVOL').classList.toggle('hidden', !v.vol);
+  // ★ 二十二期：taker MACD 副图跟着一起刷（是否显示还要看周期）
+  applyTakerMacdScales();
+}
+
+/* ------------------------------------------------------------------ */
+/* 二十二期：taker 买卖比 MACD(12,26,60) 副图                           */
+/* ------------------------------------------------------------------ */
+
+// takerMacdVisible 当前是否该显示副图
+//
+// 两个条件缺一不可：
+//   ① 用户没关（indVisible.tmacd）
+//   ② 周期是 5m —— 指标本身就是 5 分钟口径的，挂在 3m 图上
+//      时间轴对不齐（一根 3m 里塞不进一根 5m），画出来会是错的。
+//      用户原话「5 分钟才能显示这个指标」，指的就是这条。
+function takerMacdVisible() {
+  return !!state.indVisible.tmacd && state.curBar === '5m';
+}
+
+// applyTakerMacdScales 按副图是否显示，重新分配三条价格轴的纵向区间。
+//
+// 副图不显示时必须把空间还给主图 —— 否则底下会留一条空白，
+// 看起来像「图被压扁了」。
+function applyTakerMacdScales() {
+  if (!state.chart) return;
+  const on = takerMacdVisible();
+  [state.tmDif, state.tmDea, state.tmHist].forEach((s) => s && s.applyOptions({ visible: on }));
+  const lg = $('lgTMACD');
+  if (lg) lg.classList.toggle('hidden', !on);
+  // 按钮状态：开着但当前不是 5m → 置灰（提示「这个周期没有该指标」），
+  // 否则用户会以为按钮坏了。
+  const btn = document.querySelector('.ind[data-ind="tmacd"]');
+  if (btn) {
+    btn.classList.toggle('off-bar', !!state.indVisible.tmacd && state.curBar !== '5m');
+    btn.title = state.curBar === '5m'
+      ? 'taker 买卖比 MACD(12,26,60)：把 5m 全池买:卖比例当作 close 算出来的副图'
+      : '该指标只在 5m 周期显示（当前 ' + state.curBar + '）';
+  }
+  try {
+    if (on) {
+      // 主图 0.06~0.50 / VOL 0.56~0.68 / MACD 0.74~1.00
+      state.chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.06, bottom: 0.50 } });
+      state.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.56, bottom: 0.32 } });
+      state.chart.priceScale('tmacd').applyOptions({ scaleMargins: { top: 0.74, bottom: 0 } });
+    } else {
+      // 恢复原布局（主图 + 底部 VOL）
+      state.chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.26 } });
+      state.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+      state.chart.priceScale('tmacd').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 } });
+    }
+  } catch (e) { /* 价格轴还没建好时静默（initChart 早期调用） */ }
 }
 
 // ------------------------------------------------------------------ */

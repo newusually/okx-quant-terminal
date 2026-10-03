@@ -463,6 +463,54 @@ var schemaStmts = []string{
 		updated_at BIGINT NOT NULL DEFAULT 0,
 		PRIMARY KEY (inst_id, bar)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
+
+	// ---- 二十二期：taker 面板**预计算结果**（用户口径：数据都存库、直接取用）----
+	//
+	// 为什么要有这张表：面板一行需要跨 80 个合约聚合 + JOIN kline 算涨幅 +
+	// 再算「下一根」的涨跌幅，纯查询要两步 SQL + 81 次 K 线段查（ETH + 每个
+	// 涨幅王各一次）。每 5 分钟才出一根新数据，完全没必要每次请求都重算。
+	// 所以后台算好落库，接口直接 SELECT —— 与「信号后台预计算入库、前端
+	// 直读」是同一套思路（项目铁律：同一量只能有一条计算路径）。
+	//
+	// ★ 表里存的是「原始事实」，不存任何随请求变化的参数：
+	//   ratio 与 macd 都是可以随时按 ratio 重算的，但存下来前端才能
+	//   「不查直接读」，这正是用户要的。
+	`CREATE TABLE IF NOT EXISTS taker_panel (
+		bar          VARCHAR(4) NOT NULL,
+		ts           BIGINT     NOT NULL,
+		buy_total    DOUBLE     NOT NULL DEFAULT 0,
+		sell_total   DOUBLE     NOT NULL DEFAULT 0,
+		ratio        DOUBLE     NOT NULL DEFAULT 0,
+		inst_count   INT        NOT NULL DEFAULT 0,
+		eth_next_pct DOUBLE     NOT NULL DEFAULT 0,
+		eth_next_ok  TINYINT    NOT NULL DEFAULT 0,
+		top_inst     VARCHAR(32) NOT NULL DEFAULT '',
+		top_rise     DOUBLE     NOT NULL DEFAULT 0,
+		top_next_pct DOUBLE     NOT NULL DEFAULT 0,
+		top_next_ok  TINYINT    NOT NULL DEFAULT 0,
+		updated_at   BIGINT     NOT NULL DEFAULT 0,
+		PRIMARY KEY (bar, ts),
+		KEY ix_taker_panel_ts (ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
+
+	// ---- 二十二期：taker 买卖比的 MACD(12,26,60) 预计算 ----
+	//
+	// 用户口径：「把 5 分钟 takervol 比例当作 MACD 的 close 值，参数 12 26 60」。
+	// 序列 = taker_panel.ratio（全池主动买 ÷ 主动卖），×100 存整数化前的原值。
+	//
+	// ★ 为什么单独一张表而不是塞进 taker_panel：
+	//   一是指标与面板四列解耦（副图只关心这一条序列），二是换参数
+	//   （比如 12/26/9）只需重建这一张表，不用动面板数据。
+	`CREATE TABLE IF NOT EXISTS taker_macd (
+		bar        VARCHAR(4) NOT NULL,
+		ts         BIGINT     NOT NULL,
+		src_val    DOUBLE     NOT NULL DEFAULT 0,
+		dif        DOUBLE     NOT NULL DEFAULT 0,
+		dea        DOUBLE     NOT NULL DEFAULT 0,
+		hist       DOUBLE     NOT NULL DEFAULT 0,
+		updated_at BIGINT     NOT NULL DEFAULT 0,
+		PRIMARY KEY (bar, ts)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC`,
 }
 
 // ---------------------------------------------------------------------------

@@ -285,15 +285,26 @@ func (m *BackfillManager) Start(ctx context.Context) error {
 				}
 				if len(need) == 0 {
 					logx.Logf("INFO", "[TAKER] 30 天数据已就绪（%d 个合约），跳过首铺", len(ids))
-					return
+				} else {
+					logx.Logf("INFO", "[TAKER] 首铺开始：%d/%d 个合约缺数据", len(need), len(ids))
+					t0 := time.Now()
+					ok, rows := TakerBackfillInsts(m.db, need, 30, m.cfg.Workers)
+					// ★ 服务模式没有控制台，m.logf（fmt.Printf）会被整个丢弃，
+					//   留痕必须走 logx（本项目坑 11 的同款）。
+					logx.Logf("INFO", "[TAKER] 首铺完成：%d/%d 个合约，%d 行，耗时 %s",
+						ok, len(need), rows, time.Since(t0).Round(time.Second))
 				}
-				logx.Logf("INFO", "[TAKER] 首铺开始：%d/%d 个合约缺数据", len(need), len(ids))
-				t0 := time.Now()
-				ok, rows := TakerBackfillInsts(m.db, need, 30, m.cfg.Workers)
-				// ★ 服务模式没有控制台，m.logf（fmt.Printf）会被整个丢弃，
-				//   留痕必须走 logx（本项目坑 11 的同款）。
-				logx.Logf("INFO", "[TAKER] 首铺完成：%d/%d 个合约，%d 行，耗时 %s",
-					ok, len(need), rows, time.Since(t0).Round(time.Second))
+
+				// ★ 二十二期：taker_vol 有了之后立刻算一次面板 + MACD 落库。
+				//   用户口径「数据都保存在数据库 方便直接取用 / 指标直接从
+				//   数据库调用 不用查询」—— 落库这一步必须紧跟在原始数据
+				//   之后，否则网页第一次打开会走「表空 → 实时兜底」的慢路径。
+				//   用 Ensure：表里已有且没过期就不重算（重启时省一次全量）。
+				if _, _, did, err := TakerPanelEnsure(m.db, ids, 30); err != nil {
+					logx.Logf("ERR", "[TAKER] 预计算失败：%v", err)
+				} else if did {
+					logx.Logf("INFO", "[TAKER] 预计算（面板+MACD）已完成")
+				}
 			}()
 		}
 	}
@@ -1070,6 +1081,18 @@ func (m *BackfillManager) realtimeLoop() {
 						logx.Logf("INFO", "[TAKER] 实时增量：%d 个合约，%d 行", ok, rows)
 					}
 					done()
+					// ★ 二十二期：原始量更新后立刻刷预计算表。
+					//   传的是「新数据之后才重算」：TakerPanelEnsure 内部
+					//   对比 taker_panel.max_ts 与当前整点，没跨根就直接返回
+					//   （一条 COUNT/MIN/MAX，几毫秒）—— 所以每 60 秒调它
+					//   并不等于每 60 秒重算 8640 行。
+					done2 := perf.Track("feed.takerPanel")
+					if _, _, did, err := TakerPanelEnsure(m.db, ids, 30); err != nil {
+						logx.Logf("ERR", "[TAKER] 预计算刷新失败：%v", err)
+					} else if did {
+						logx.Logf("INFO", "[TAKER] 预计算（面板+MACD）已刷新")
+					}
+					done2()
 				}
 			}
 			// K 线滚动裁剪**不在这里**做了：CleanupKlines 要 30~100 秒

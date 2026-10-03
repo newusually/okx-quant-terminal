@@ -16,6 +16,7 @@ package repo
 import (
 	"database/sql"
 	"strings"
+	"time"
 )
 
 // TakerVol 一行 taker 量
@@ -75,6 +76,14 @@ type TakerAgg struct {
 	TopBuy    float64
 	TopSell   float64
 	TopRise   float64
+	// TopNextRise 涨幅王**下一根**的涨跌幅（%）；TopNextOK=false 表示下一根还没生成
+	//
+	// ★ 二十二期：从「handler 里对每个 TopInst 各查一次 K 线」改成
+	//   在第二条 SQL 里 LEFT JOIN 一张 ts+barMs 的 kline 直接取。
+	//   原来 80 个涨幅王就要 80 次查询，30 天窗口下是 81 次往返；
+	//   现在固定 2 条 SQL。这就是「预计算」能省下来的真实成本。
+	TopNextRise float64
+	TopNextOK   bool
 }
 
 // QueryTakerAgg 按 5m 切片聚合合约池的 taker 量。
@@ -144,7 +153,13 @@ func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64) ([]TakerAgg, erro
 	//   （同一个 (c-o)/o 公式），否则「最高合约的涨幅」和「ETH 涨幅」两个
 	//   数字会来自两套口径，并列显示时对不上。
 	sb2 := strings.Builder{}
-	sb2.WriteString(`SELECT t.ts, t.inst_id, t.buy_vol, t.sell_vol, t.rise FROM (
+	// ★ 第二条查询同时把「涨幅王下一根的涨跌幅」LEFT JOIN 出来。
+	//   下一根 = 同一合约、ts + 一根(300000ms)。LEFT JOIN 而不是 JOIN：
+	//   最新那根的下一根还没生成，JOIN 会把它整行丢掉，面板就会少最后一行。
+	sb2.WriteString(`SELECT t.ts, t.inst_id, t.buy_vol, t.sell_vol, t.rise,
+	                          (k2.c - k2.o) / NULLIF(k2.o, 0) * 100 AS next_rise,
+	                          k2.ts AS next_ts
+	                   FROM (
 	                   SELECT v.ts AS ts, v.inst_id AS inst_id, v.buy_vol AS buy_vol, v.sell_vol AS sell_vol,
 	                          (k.c - k.o) / NULLIF(k.o, 0) * 100 AS rise,
 	                          ROW_NUMBER() OVER (PARTITION BY v.ts ORDER BY (k.c - k.o) / NULLIF(k.o, 0) DESC, v.inst_id ASC) AS rn
@@ -166,7 +181,13 @@ func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64) ([]TakerAgg, erro
 		sb2.WriteString(" AND v.ts<=?")
 		args2 = append(args2, toTs)
 	}
-	sb2.WriteString(`) t WHERE rn=1`)
+	// 300000 = 一根 5m。表里 bar 恒为 '5m'，所以这里写死是安全的（也顺手
+	// 传进参数位，避免将来有人把 takerBar 改成别的周期时忘了同步）。
+	sb2.WriteString(`) t
+	                   LEFT JOIN kline k2
+	                     ON k2.inst_id = t.inst_id AND k2.bar = '5m' AND k2.ts = t.ts + ?
+	                   WHERE rn=1`)
+	args2 = append(args2, int64(300000))
 
 	rows2, err := d.sql.Query(sb2.String(), args2...)
 	if err != nil {
@@ -177,13 +198,19 @@ func (d *DB) QueryTakerAgg(insts []string, fromTs, toTs int64) ([]TakerAgg, erro
 		var ts int64
 		var inst string
 		var b, s float64
-		var rise sql.NullFloat64
-		if err := rows2.Scan(&ts, &inst, &b, &s, &rise); err != nil {
+		var rise, nextRise sql.NullFloat64
+		var nextTs sql.NullInt64
+		if err := rows2.Scan(&ts, &inst, &b, &s, &rise, &nextRise, &nextTs); err != nil {
 			return nil, err
 		}
 		if a, ok := byTs[ts]; ok {
 			a.TopInst, a.TopBuy, a.TopSell = inst, b, s
 			a.TopRise = rise.Float64
+			// 下一根存在才算 ok：nextTs 为 NULL 说明还没生成
+			if nextTs.Valid && nextTs.Int64 > 0 {
+				a.TopNextRise = nextRise.Float64
+				a.TopNextOK = true
+			}
 		}
 	}
 	if err := rows2.Err(); err != nil {
@@ -245,4 +272,194 @@ func placeholders(n int) string {
 		return ""
 	}
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+/* ==========================================================================
+ * 二十二期：预计算结果表（taker_panel / taker_macd）
+ *
+ * 用户口径原话：「当前的 takervol 面板的数据 都保存在数据库这样方便直接取用
+ * 到时候参数指标直接从数据库调用 不用查询」。
+ *
+ * 所以面板每次请求**不再实时聚合**，改成：
+ *   后台 TakerPanelRebuild() 算好写入 taker_panel（四列 + 下一根）
+ *                         与 taker_macd（买卖比上的 MACD 12/26/60）
+ *   接口 SELECT 出来直接返回。
+ *
+ * 下方 QueryTakerAgg（实时聚合）保留 —— 它是重建的**计算内核**，
+ * 不能删；发布路径改成只读表。
+ * ========================================================================== */
+
+// TakerPanelRow taker_panel 一行（= 面板表格的一行，字段与前端一一对应）
+type TakerPanelRow struct {
+	Bar        string
+	Ts         int64
+	BuyTotal   float64
+	SellTotal  float64
+	Ratio      float64
+	InstCount  int
+	EthNextPct float64
+	EthNextOk  bool
+	TopInst    string
+	TopRise    float64
+	TopNextPct float64
+	TopNextOk  bool
+}
+
+// takerPanelCols 列序（与 DDL 保持一致）
+var takerPanelCols = []string{
+	"bar", "ts", "buy_total", "sell_total", "ratio", "inst_count",
+	"eth_next_pct", "eth_next_ok", "top_inst", "top_rise", "top_next_pct", "top_next_ok", "updated_at",
+}
+
+// UpsertTakerPanel 批量写面板行（幂等：同 (bar,ts) 覆盖）
+//
+// ★ 覆盖所有业务列：面板行是「算出来的快照」，后算的必须能盖掉先算的
+//   （例如涨幅王的 K 线补齐后 top_inst 会变）。只覆盖部分列会残留旧值。
+func (d *DB) UpsertTakerPanel(rows []TakerPanelRow) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UnixMilli()
+	args := make([][]any, 0, len(rows))
+	for _, r := range rows {
+		if r.Bar == "" || r.Ts <= 0 {
+			continue
+		}
+		args = append(args, []any{
+			r.Bar, r.Ts, r.BuyTotal, r.SellTotal, r.Ratio, r.InstCount,
+			r.EthNextPct, boolToTiny(r.EthNextOk), r.TopInst, r.TopRise,
+			r.TopNextPct, boolToTiny(r.TopNextOk), now,
+		})
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	return d.bulkUpsert("taker_panel", takerPanelCols, args, []string{
+		"buy_total", "sell_total", "ratio", "inst_count",
+		"eth_next_pct", "eth_next_ok", "top_inst", "top_rise",
+		"top_next_pct", "top_next_ok", "updated_at",
+	})
+}
+
+// QueryTakerPanel 读面板行（升序），bar 固定传 "5m"
+func (d *DB) QueryTakerPanel(bar string, fromTs, toTs int64) ([]TakerPanelRow, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT bar, ts, buy_total, sell_total, ratio, inst_count,
+	                       eth_next_pct, eth_next_ok, top_inst, top_rise, top_next_pct, top_next_ok
+	                FROM taker_panel WHERE bar=?`)
+	args := []any{bar}
+	if fromTs > 0 {
+		sb.WriteString(" AND ts>=?")
+		args = append(args, fromTs)
+	}
+	if toTs > 0 {
+		sb.WriteString(" AND ts<=?")
+		args = append(args, toTs)
+	}
+	sb.WriteString(" ORDER BY ts ASC")
+
+	rows, err := d.sql.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TakerPanelRow, 0, 1024)
+	for rows.Next() {
+		var r TakerPanelRow
+		var ethOk, topOk int
+		if err := rows.Scan(&r.Bar, &r.Ts, &r.BuyTotal, &r.SellTotal, &r.Ratio, &r.InstCount,
+			&r.EthNextPct, &ethOk, &r.TopInst, &r.TopRise, &r.TopNextPct, &topOk); err != nil {
+			return nil, err
+		}
+		r.EthNextOk = ethOk != 0
+		r.TopNextOk = topOk != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TakerPanelRange 面板表已有的时间范围与行数（判「要不要重建」用）
+func (d *DB) TakerPanelRange(bar string) (minTs, maxTs, cnt int64, err error) {
+	row := d.sql.QueryRow(
+		`SELECT COALESCE(MIN(ts),0), COALESCE(MAX(ts),0), COUNT(*) FROM taker_panel WHERE bar=?`, bar)
+	err = row.Scan(&minTs, &maxTs, &cnt)
+	if err == sql.ErrNoRows {
+		return 0, 0, 0, nil
+	}
+	return
+}
+
+// TakerMacdRow taker_macd 一行
+//
+// SrcVal = MACD 的输入序列（= 买卖比 ratio），存下来是为了：
+//   ① 前端副图能把「比值线」和「DIF/DEA」画在一起做对照；
+//   ② 换参数重建时不用回头再查 taker_panel。
+type TakerMacdRow struct {
+	Bar    string
+	Ts     int64
+	SrcVal float64
+	Dif    float64
+	Dea    float64
+	Hist   float64
+}
+
+var takerMacdCols = []string{"bar", "ts", "src_val", "dif", "dea", "hist", "updated_at"}
+
+// UpsertTakerMacd 批量写 MACD 行（幂等）
+func (d *DB) UpsertTakerMacd(rows []TakerMacdRow) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UnixMilli()
+	args := make([][]any, 0, len(rows))
+	for _, r := range rows {
+		if r.Bar == "" || r.Ts <= 0 {
+			continue
+		}
+		args = append(args, []any{r.Bar, r.Ts, r.SrcVal, r.Dif, r.Dea, r.Hist, now})
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	return d.bulkUpsert("taker_macd", takerMacdCols, args,
+		[]string{"src_val", "dif", "dea", "hist", "updated_at"})
+}
+
+// QueryTakerMacd 读 MACD 序列（升序）
+func (d *DB) QueryTakerMacd(bar string, fromTs, toTs int64) ([]TakerMacdRow, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT bar, ts, src_val, dif, dea, hist FROM taker_macd WHERE bar=?`)
+	args := []any{bar}
+	if fromTs > 0 {
+		sb.WriteString(" AND ts>=?")
+		args = append(args, fromTs)
+	}
+	if toTs > 0 {
+		sb.WriteString(" AND ts<=?")
+		args = append(args, toTs)
+	}
+	sb.WriteString(" ORDER BY ts ASC")
+
+	rows, err := d.sql.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TakerMacdRow, 0, 1024)
+	for rows.Next() {
+		var r TakerMacdRow
+		if err := rows.Scan(&r.Bar, &r.Ts, &r.SrcVal, &r.Dif, &r.Dea, &r.Hist); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// boolToTiny bool → MySQL TINYINT(0/1)
+func boolToTiny(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

@@ -373,7 +373,11 @@ function bindEvents() {
       btn.classList.add('active');
       ['positions', 'history', 'events', 'signals', 'backfill', 'pnl'].forEach((n) => {
         const el = $('tab' + n[0].toUpperCase() + n.slice(1));
-        if (el) el.classList.toggle('hidden', n !== name);
+        if (!el) return;
+        // ★ 二十二期：被拖出成独立面板的 tab-body 不受这里的 hidden 管理 ——
+        //   它已经住进自己的浮动窗口里了，切别的 tab 不能把它藏掉。
+        if (el.dataset.detached === '1') return;
+        el.classList.toggle('hidden', n !== name);
       });
     };
     if (document.startViewTransition) document.startViewTransition(activate);
