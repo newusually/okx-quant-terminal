@@ -73,20 +73,25 @@ type Signal struct {
 //
 // ★★ 这是「买入」与「加仓」共用的唯一判据 —— 两处都必须调它 ★★
 //
-// 用户口径（2026-10-02 六期）：
+// 用户口径（2026-10-03 二十二期）：
 //
-//	「Score >= 3 且 RisePct < -0.7（严格小于）」—— 触发那根 K 线必须真跌超 0.7%
+//	「共振必须大于 3（Score >= 4）且必须跌 1%、且跌幅大于 -2%」
+//	即 -2% < RisePct < -1%（同一根已收盘 K 线上同时成立）
 //
-// 三个条件同时成立才通过：
+// 各条件：
 //
 //	① sig.Ready           指标暖机完整。不 Ready 时 Pot / Rsi / BollLo 是 NaN，
 //	                      score 本身没有意义（比如冷启动只拉到几十根 K 线）
 //	② sig.Score >= 门槛   调用方传 cfg.ThresholdFor(instID)。判定是**非严格** `>=`，
-//	                      所以 threshold = 3 就是用户说的「Score >= 3」（Score 是 0~8 的整数）
+//	                      所以 threshold = 4 就是用户说的「共振大于 3」（Score 是 0~8 的整数）
 //	③ minRisePct 是**带符号门槛**（六期起）：
 //	                      > 0 → RisePct 必须严格大于它（「必须真涨」，五期及以前的用法）
-//	                      < 0 → RisePct 必须严格小于它（「必须真跌」，六期：-0.7）
+//	                      < 0 → RisePct 必须严格小于它（「必须真跌」，二十二期：-1）
 //	                      = 0 → 关闭这个条件（只看分数）
+//	④ maxDropPct 是**跌幅上限**（二十二期新增，正数百分比）：
+//	                      > 0 → 跌幅必须严格小于它（RisePct > -maxDropPct），
+//	                            把崩盘式大跌（跌幅 ≥ 2%）也排除掉
+//	                      <= 0 → 关闭上限（老行为）
 //
 // 为什么必须做成一个函数：加仓的口径是「与买入条件完全一致」。只要两处
 // 各写一遍判定，迟早会在边界上走岔 ——「>= 还是 >」「用 Close 还是 RisePct」
@@ -94,7 +99,7 @@ type Signal struct {
 //
 // 注意 threshold <= 0 时**直接拒绝**：那是配置坏掉的状态（归一化保证它 ≥ 1），
 // 与其「放宽到只看 1 个因子」乱开单，不如这一轮不下单。
-func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
+func SignalQualified(sig *Signal, threshold int, minRisePct float64, maxDropPct float64) bool {
 	if sig == nil || !sig.Ready {
 		return false
 	}
@@ -111,6 +116,11 @@ func SignalQualified(sig *Signal, threshold int, minRisePct float64) bool {
 		return false
 	}
 	if minRisePct < 0 && !(sig.RisePct < minRisePct) {
+		return false
+	}
+	// 跌幅上限（二十二期）：RisePct > -maxDropPct 才通过；
+	// NaN 时比较恒 false = 拒绝（保守），与上面两条同一写法。
+	if maxDropPct > 0 && !(sig.RisePct > -maxDropPct) {
 		return false
 	}
 	return true
@@ -149,9 +159,9 @@ func (r ReadonlySignalRule) Qualify(sig *Signal) bool {
 	if !r.Enabled() {
 		return false
 	}
-	// 第三个参数 0 = 先关掉全局那条涨跌幅条件，由下面显式判（见类型注释）。
+	// 第三/四个参数 0 = 先关掉全局的涨跌幅条件与跌幅上限，由下面显式判（见类型注释）。
 	// nil / Ready / threshold / Score 的判断都在 SignalQualified 里，不重复写。
-	if !SignalQualified(sig, r.ScoreThreshold, 0) {
+	if !SignalQualified(sig, r.ScoreThreshold, 0, 0) {
 		return false
 	}
 	// 写成 sig.RisePct < MaxRisePct 而不是 !(...)：RisePct 是 NaN 时所有比较

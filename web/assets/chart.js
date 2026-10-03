@@ -213,12 +213,22 @@ function renderLegend(k) {
   }
   const chg = k.o ? (k.c - k.o) / k.o * 100 : 0;
   const col = k.c >= k.o ? 'up' : 'down';
+  // ★ 二十二期（用户口径）：图例也要显示「共振个数 + 跌幅%」——
+  //   当前这根 K 线上挂着买入信号（🚀 标记）时，图例尾部追加信号摘要。
+  let sigTxt = '';
+  const sigMk = (state.markers || []).find(
+    (m) => m.ts === k.ts && (m.kind === 'signal' || m.kind === 'signal_only'));
+  if (sigMk) {
+    sigTxt = ` <span class="k">🚀共振</span><span class="up">${sigMk.score}</span>` +
+      `<span class="${lgCls(sigMk.risePct)}">${sigMk.risePct >= 0 ? '+' : ''}${Number(sigMk.risePct).toFixed(2)}%</span>`;
+  }
   $('lgOhlc').innerHTML =
     `<span class="k">O</span><span class="${col}">${fmtPrice(k.o)}</span> ` +
     `<span class="k">H</span><span class="${col}">${fmtPrice(k.h)}</span> ` +
     `<span class="k">L</span><span class="${col}">${fmtPrice(k.l)}</span> ` +
     `<span class="k">C</span><span class="${col}">${fmtPrice(k.c)}</span> ` +
-    `<span class="${lgCls(chg)}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`;
+    `<span class="${lgCls(chg)}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>` +
+    sigTxt;
 
   const m = state.indMap || {};
   const pick = (map, ts) => (map && map.get(ts) !== undefined ? fmtPrice(map.get(ts)) : '--');

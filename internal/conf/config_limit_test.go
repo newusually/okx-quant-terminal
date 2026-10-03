@@ -319,31 +319,31 @@ func TestEntryMarginDefaultsTo01USDT(t *testing.T) {
 // TestMinBarRisePctThreeStates 「触发那根 K 线涨跌幅门槛」的状态必须泾渭分明。
 //
 //	min_bar_rise_pct 用**指针**，为的就是区分「没写」与「写了 0」：
-//	  没写   → 默认 -0.7（六期：必须真跌；漏配时条件仍在，不会静默放开全市场下单）
+//	  没写   → 默认 -1.0（二十二期：必须跌超 1%；漏配时条件仍在，不会静默放开全市场下单）
 //	  写 0   → 真的关掉这个条件
 //	  写正数 → 「必须真涨」原样生效（旧语义保留）
 //	  写负数 → 「必须真跌」原样生效（★ 六期新语义，绝不能被归一化回默认值）
 //
 // 为什么值得单独守：二期在 max_concurrent_positions / daily_max_entries 上
 // 正是栽在「用户写的 0 被 `<= 0` 反压回默认值」—— 配置看起来改了、其实没生效。
-// 六期用户写 -0.7 表达「必须真跌」，若有人加回「v < 0 → 回默认」的分支，
+// 二十二期用户写 -1.0 表达「必须真跌」，若有人加回「v < 0 → 回默认」的分支，
 // 整个方向语义会被静默吞掉 —— 这个测试会立刻红。
 func TestMinBarRisePctThreeStates(t *testing.T) {
-	// ① 没写（nil）→ 默认 -0.7
+	// ① 没写（nil）→ 默认 -1.0（二十二期）
 	d := defaultConfig()
-	if d.MinBarRisePct() != -0.7 {
-		t.Fatalf("默认 min_bar_rise_pct 应为 -0.7，实际 %v", d.MinBarRisePct())
+	if d.MinBarRisePct() != -1.0 {
+		t.Fatalf("默认 min_bar_rise_pct 应为 -1.0，实际 %v", d.MinBarRisePct())
 	}
 	// 默认常量本身也必须跟上（service 侧兜底读的就是它）
-	if DefaultMinBarRisePct != -0.7 {
-		t.Fatalf("DefaultMinBarRisePct 应为 -0.7，实际 %v", DefaultMinBarRisePct)
+	if DefaultMinBarRisePct != -1.0 {
+		t.Fatalf("DefaultMinBarRisePct 应为 -1.0，实际 %v", DefaultMinBarRisePct)
 	}
 	c := &Config{}
 	fillDefaults(c)
-	if c.MinBarRisePct() != -0.7 {
-		t.Fatalf("键缺失时应为 -0.7，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != -1.0 {
+		t.Fatalf("键缺失时应为 -1.0，实际 %v", c.MinBarRisePct())
 	}
-	// ② 显式写 0 → 关闭条件（绝不能被反压回 -0.7）
+	// ② 显式写 0 → 关闭条件（绝不能被反压回 -1.0）
 	zero := 0.0
 	c = &Config{Entry: &EntryCfg{MinBarRisePct: &zero}}
 	fillDefaults(c)
@@ -366,8 +366,47 @@ func TestMinBarRisePctThreeStates(t *testing.T) {
 	}
 	// ⑤ Entry 整块缺失也不能 panic，同样退回默认
 	c = &Config{Entry: nil}
-	if c.MinBarRisePct() != -0.7 {
-		t.Fatalf("Entry 为 nil 时应退回 -0.7，实际 %v", c.MinBarRisePct())
+	if c.MinBarRisePct() != -1.0 {
+		t.Fatalf("Entry 为 nil 时应退回 -1.0，实际 %v", c.MinBarRisePct())
+	}
+}
+
+// TestMaxBarDropPctThreeStates 跌幅上限（二十二期新增）的三态也必须泾渭分明。
+//
+//	max_bar_drop_pct 用**指针**：nil → 默认 2；写 0 → 显式关闭上限；
+//	写正数 → 原样生效（跌幅必须严格小于它）。**不许**被归一化反压回默认值。
+func TestMaxBarDropPctThreeStates(t *testing.T) {
+	// ① 没写（nil）→ 默认 2
+	d := defaultConfig()
+	if d.MaxBarDropPct() != 2.0 {
+		t.Fatalf("默认 max_bar_drop_pct 应为 2，实际 %v", d.MaxBarDropPct())
+	}
+	if DefaultMaxBarDropPct != 2.0 {
+		t.Fatalf("DefaultMaxBarDropPct 应为 2，实际 %v", DefaultMaxBarDropPct)
+	}
+	c := &Config{}
+	fillDefaults(c)
+	if c.MaxBarDropPct() != 2.0 {
+		t.Fatalf("键缺失时应为 2，实际 %v", c.MaxBarDropPct())
+	}
+	// ② 显式写 0 → 关闭上限（绝不能被反压回 2）
+	zero := 0.0
+	c = &Config{Entry: &EntryCfg{MaxBarDropPct: &zero}}
+	fillDefaults(c)
+	if c.MaxBarDropPct() != 0 {
+		t.Fatalf("max_bar_drop_pct=0（显式关闭）被改成了 %v", c.MaxBarDropPct())
+	}
+	// ③ 显式写正数 → 原样生效
+	v := 1.5
+	c = &Config{Entry: &EntryCfg{MaxBarDropPct: &v}}
+	fillDefaults(c)
+	if c.MaxBarDropPct() != 1.5 {
+		t.Fatalf("max_bar_drop_pct=1.5 应原样保留，实际 %v", c.MaxBarDropPct())
+	}
+	// ④ Entry 整块缺失 → 退回默认
+	c = &Config{Entry: nil}
+	if c.MaxBarDropPct() != 2.0 {
+		t.Fatalf("Entry 为 nil 时应退回 2.0，实际 %v", c.MaxBarDropPct())
 	}
 }
 

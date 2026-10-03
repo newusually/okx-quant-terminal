@@ -42,9 +42,9 @@ type EntryCfg struct {
 	// （service.SignalQualified），所以它天然满足「加仓条件与买入一致」。
 	//
 	//	> 0  RisePct 严格大于该值才通过（「必须真涨」；涨恰好该值不算）
-	//	< 0  RisePct 严格小于该值才通过（「必须真跌」；默认 -0.7，即「必须跌超 0.7%」）
+	//	< 0  RisePct 严格小于该值才通过（「必须真跌」；默认 -1，即「必须跌超 1%」）
 	//	= 0  显式关闭这个条件（只看 score）
-	//	nil  没写这个键 → 用默认 DefaultMinBarRisePct（当前 -0.7）
+	//	nil  没写这个键 → 用默认 DefaultMinBarRisePct（当前 -1）
 	//
 	// ⚠ 两个方向都是**严格**比较：RisePct 恰好等于门槛值 → 拒绝。
 	//
@@ -57,6 +57,24 @@ type EntryCfg struct {
 	//   指针是唯一能不歧义表达三态的写法。读取一律走 Config.MinBarRisePct()。
 	//   ★ 六期起负数是有意义的（「必须真跌」），**不许**再把负数归一化回默认值。
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
+
+	// MaxBarDropPct 触发那根 K 线的**跌幅上限**（%，正数）。
+	//
+	// ★ 2026-10-03 二十二期新增（用户口径：「必须跌 1% **并且** 大于 -2%」）：
+	//   min_bar_rise_pct 只能表达「跌得够深」（单边下限），这里补上「不能跌穿」
+	//   （单边上限）—— 该根跌幅必须**严格小于**它（RisePct > -MaxBarDropPct），
+	//   把崩盘式大跌排除在买入之外。与 min_bar_rise_pct 组合成区间：
+	//
+	//	                                    min_bar_rise_pct = -1
+	//	                         ┌────────────────────────┐
+	//	 -2（MaxBarDropPct=2）───┘   买入区间（同一根 K 线）  └───→ 0（平盘）
+	//
+	//	> 0   跌幅必须严格小于它（恰好等于也拒绝）
+	//	<= 0  显式关闭上限（只受 min_bar_rise_pct 单边约束）
+	//	nil   没写这个键 → 用默认 DefaultMaxBarDropPct（当前 2）
+	//
+	//   读取一律走 Config.MaxBarDropPct()；判定唯一入口 service.SignalQualified。
+	MaxBarDropPct *float64 `json:"max_bar_drop_pct"`
 }
 
 // ExitCfg 出场参数。
@@ -612,7 +630,7 @@ func defaultConfig() *Config {
 		//   所以写 3 就等于「≥ 3」，判定符号一个字都不用动。
 		//   （三期曾写 4 来表达「> 3」，那是当时「8 个共振中 4 个及以上」的口径。）
 		//   ⚠ 二期实测近 30 天 2329 条信号里 score 8 → 0 条，阈值 8 长期不出单；
-		//     3 的把关交给下面的 min_bar_rise_pct（六期起：触发那根必须真跌 < -0.7%）。
+		//     把关交给下面的 min_bar_rise_pct（二十二期起：触发那根必须真跌 < -1%）。
 		// ★ 2026-10-03 二十一期：3 → **4**（用户口径「共振必须大于3」——严格大于，
 		//   即 Score ∈ {4,5,6,7,8}；判定仍是 >=，写 4 等效于 > 3）。
 		//   ⚠ 真源在 configs/okx_strategy.json（当前同样 4），这里只是兜底值。
@@ -649,9 +667,12 @@ func defaultConfig() *Config {
 			// ★ 2026-10-02 三期新增 / 六期改语义：触发信号的那根 K 线的涨跌幅门槛
 			//   （带符号，买入与加仓共用同一判据 service.SignalQualified）：
 			//     > 0 → 必须真涨超过它（三期 1.0 / 四期 1.1 / 五期 0.5 的用法）
-			//     < 0 → 必须真跌低于它（六期用户口径「RisePct < -0.7（严格小于）」）
+			//     < 0 → 必须真跌低于它（二十二期用户口径「必须跌 1%」：RisePct < -1 严格小于）
 			//   指针三态见 EntryCfg.MinBarRisePct 的注释。
-			MinBarRisePct: f64ptr(-0.7),
+			MinBarRisePct: f64ptr(-1.0),
+			// ★ 2026-10-03 二十二期：跌幅上限 2%（「必须跌 1% 且大于 -2%」的另一半）。
+			//   兜底必须与真源 configs/okx_strategy.json 同口径 —— 漏配时条件仍在。
+			MaxBarDropPct: f64ptr(2.0),
 		},
 		// ★ 2026-10-02 七期：止盈 **0.35%**、止损 **300**（= -300%，物理上到不了，
 		//   等效不设止损）、超时放宽到 **24 小时**（1440 分钟）。
@@ -1245,13 +1266,20 @@ func StripJSONComments(b []byte) []byte {
 
 // DefaultMinBarRisePct 「触发那根 K 线涨跌幅门槛」的默认值（%，带符号）。
 //
-// ★ 2026-10-02 六期：0.5（必须真涨）→ **-0.7（必须真跌）**
+// ★ 2026-10-02 六期：0.5（必须真涨）→ -0.7（必须真跌）
+// ★ 2026-10-03 二十二期：-0.7 → **-1.0**（用户口径「共振必须大于 3 且必须跌 1%」）
 //
-//	（用户口径「Score >= 3 且 RisePct < -0.7（严格小于）」）。
+//	（Score >= 4 由 score_threshold 负责；这里只管跌幅：< -1 严格小于）。
 //
 // 这个常量同时被 conf 与 service 两侧读（service.StrategyConfig.MinBarRisePct
 // 的兜底就用它），改一处两处都跟着变 —— 这正是它作为常量存在的意义。
-const DefaultMinBarRisePct = -0.7
+const DefaultMinBarRisePct = -1.0
+
+// DefaultMaxBarDropPct 跌幅上限默认 2% —— 二十二期「必须跌 1% 且大于 -2%」的上半段。
+//
+// 与 DefaultMinBarRisePct 配对使用：min 管「跌得够深」，max 管「没跌穿」。
+// service 侧兜底（StrategyConfig.MaxBarDropPct）同样读它。
+const DefaultMaxBarDropPct = 2.0
 
 // f64ptr 取一个 float64 的指针（配置里的「三态」字段用）。
 func f64ptr(v float64) *float64 { return &v }
@@ -1272,6 +1300,25 @@ func (c *Config) MinBarRisePct() float64 {
 	// 六期起负数承载「必须真跌」，原样返回 —— 千万别再加「v < 0 → 回默认」的分支，
 	// 那会把用户的 -0.7 静默吞掉（正是本项目的头号故障形态）。
 	return *c.Entry.MinBarRisePct
+}
+
+// MaxBarDropPct 触发那根 K 线的**跌幅上限**（%，正数）—— 二十二期新增。
+//
+//	Entry.MaxBarDropPct == nil → 默认 DefaultMaxBarDropPct（当前 2；键没写：条件仍在）
+//	Entry.MaxBarDropPct <= 0   → 0（显式关闭上限：只受 min_bar_rise_pct 单边约束）
+//	Entry.MaxBarDropPct > 0    → 原值（该根跌幅必须严格小于它 = RisePct > -它）
+//
+// 与 MinBarRisePct() 配对构成买入区间：-2% < RisePct < -1%。
+// 判定唯一入口 service.SignalQualified，不要在调用方各自解指针。
+func (c *Config) MaxBarDropPct() float64 {
+	if c == nil || c.Entry == nil || c.Entry.MaxBarDropPct == nil {
+		return DefaultMaxBarDropPct
+	}
+	v := *c.Entry.MaxBarDropPct
+	if v <= 0 {
+		return 0 // 显式关闭（0 / 负数都不许被反压回默认 —— 三态纪律与 Min 同源）
+	}
+	return v
 }
 
 // OrderMarginCap 单笔保证金硬上限（USDT）。

@@ -19,8 +19,9 @@ func TestSignalQualified(t *testing.T) {
 	}
 
 	const (
-		th = 3    // 六期默认阈值（configs/okx_strategy.json 的 score_threshold）
-		mr = -0.7 // 六期默认涨跌幅门槛（entry.min_bar_rise_pct，负值 = 必须真跌）
+		th = 4    // 二十二期阈值（configs/okx_strategy.json 的 score_threshold，= 共振 > 3）
+		mr = -1.0 // 二十二期涨跌幅下限（entry.min_bar_rise_pct，必须真跌超 1%）
+		md = 2.0  // 二十二期跌幅上限（entry.max_bar_drop_pct，跌幅须 < 2%）
 	)
 
 	cases := []struct {
@@ -28,28 +29,32 @@ func TestSignalQualified(t *testing.T) {
 		sig       *Signal
 		threshold int
 		minRise   float64
+		maxDrop   float64
 		want      bool
 	}{
-		{"A 用户口径：score 3 且跌 2% → 通过", mk(3, true, -2.0), th, mr, true},
-		{"B score 2 不满足「>= 3」→ 拒绝", mk(2, true, -2.0), th, mr, false},
-		{"C score 满分但只跌 0.6% → 拒绝", mk(8, true, -0.6), th, mr, false},
-		{"D 跌幅恰好 -0.7（口径是严格小于）→ 拒绝", mk(5, true, -0.7), th, mr, false},
-		{"E 跌幅 -0.7001 → 通过", mk(5, true, -0.7001), th, mr, true},
-		{"F 分数刚好 3 但跌幅压线 -0.7 → 拒绝（两个条件缺一不可）", mk(3, true, -0.7), th, mr, false},
-		{"G 上涨的 K 线（+2%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 2.0), th, mr, false},
-		{"H 平盘（0%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 0), th, mr, false},
-		{"I minRise=0 = 关闭涨跌幅条件 → 通过", mk(5, true, 3.0), th, 0, true},
-		{"J 暖机不足（Ready=false）→ 拒绝", mk(8, false, -5.0), th, mr, false},
-		{"K nil 信号 → 拒绝", nil, th, mr, false},
-		{"L 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, -5.0), 0, mr, false},
-		{"M RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), th, mr, false},
-		{"N 正门槛（旧语义「必须真涨」）仍可用：+2% 过、-2% 拒", mk(5, true, 2.0), th, 0.5, true},
-		{"O 正门槛下下跌的 K 线 → 拒绝", mk(5, true, -2.0), th, 0.5, false},
-		{"P 正门槛下恰好压线 0.5 → 拒绝（严格大于）", mk(5, true, 0.5), th, 0.5, false},
+		{"A 二十二期口径：score 4 且跌 1.5%（区间内）→ 通过", mk(4, true, -1.5), th, mr, md, true},
+		{"B score 3 不满足「>= 4」→ 拒绝", mk(3, true, -1.5), th, mr, md, false},
+		{"C score 满分但只跌 0.9% → 拒绝（下限）", mk(8, true, -0.9), th, mr, md, false},
+		{"D 跌幅恰好 -1.0（下限是严格小于）→ 拒绝", mk(5, true, -1.0), th, mr, md, false},
+		{"E 跌幅 -1.0001 → 通过", mk(5, true, -1.0001), th, mr, md, true},
+		{"F 跌幅恰好 -2.0（上限是严格小于）→ 拒绝", mk(5, true, -2.0), th, mr, md, false},
+		{"G 跌幅 -2.5（崩盘式大跌）→ 拒绝（上限）", mk(5, true, -2.5), th, mr, md, false},
+		{"H 跌幅 -1.9999 → 通过（贴着上限）", mk(5, true, -1.9999), th, mr, md, true},
+		{"I 上涨的 K 线（+2%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 2.0), th, mr, md, false},
+		{"J 平盘（0%）在「必须真跌」门槛下 → 拒绝", mk(8, true, 0), th, mr, md, false},
+		{"K minRise=0 = 关闭下限 → 只受上限约束（-1.5 过）", mk(5, true, -1.5), th, 0, md, true},
+		{"L maxDrop=0 = 关闭上限 → -5% 深跌也过（老行为）", mk(5, true, -5.0), th, mr, 0, true},
+		{"M 两个门槛都关 → 只看 score", mk(5, true, 3.0), th, 0, 0, true},
+		{"N 暖机不足（Ready=false）→ 拒绝", mk(8, false, -5.0), th, mr, md, false},
+		{"O nil 信号 → 拒绝", nil, th, mr, md, false},
+		{"P 阈值 0（配置坏掉）→ 拒绝，而不是放宽", mk(8, true, -5.0), 0, mr, md, false},
+		{"Q RisePct 是 NaN → 拒绝（保守）", mk(8, true, math.NaN()), th, mr, md, false},
+		{"R 正门槛（旧语义「必须真涨」）仍可用：+2% 过", mk(5, true, 2.0), th, 0.5, 0, true},
+		{"S 正门槛下恰好压线 0.5 → 拒绝（严格大于）", mk(5, true, 0.5), th, 0.5, 0, false},
 	}
 
 	for _, c := range cases {
-		if got := SignalQualified(c.sig, c.threshold, c.minRise); got != c.want {
+		if got := SignalQualified(c.sig, c.threshold, c.minRise, c.maxDrop); got != c.want {
 			t.Errorf("%s：得到 %v，期望 %v", c.name, got, c.want)
 		}
 	}
@@ -64,14 +69,14 @@ func TestSignalQualified(t *testing.T) {
 func TestThresholdIsNonStrictGreaterOrEqual(t *testing.T) {
 	for th := 1; th <= 8; th++ {
 		for s := 0; s <= 8; s++ {
-			got := SignalQualified(&Signal{Score: s, Ready: true, RisePct: 99}, th, 1.0)
+			got := SignalQualified(&Signal{Score: s, Ready: true, RisePct: 99}, th, 1.0, 0)
 			if want := s >= th; got != want {
 				t.Errorf("threshold=%d, score=%d：应为 >= 语义（%v），实际 %v", th, s, want, got)
 			}
 		}
 	}
 	// 反向确认：阈值 3 **包含** 3（不是「>3」）
-	if !SignalQualified(&Signal{Score: 3, Ready: true, RisePct: 99}, 3, 1.0) {
+	if !SignalQualified(&Signal{Score: 3, Ready: true, RisePct: 99}, 3, 1.0, 0) {
 		t.Errorf("threshold=3 应当放行 score=3（>=3）；若这里失败说明判定被改成了严格大于")
 	}
 }
@@ -98,7 +103,7 @@ func TestComputeSignalFillsRisePct(t *testing.T) {
 	if math.Abs(got.RisePct-2.0) > 1e-9 {
 		t.Fatalf("RisePct 应为 2.0（(102-100)/100×100），实际 %.6f", got.RisePct)
 	}
-	if !SignalQualified(got, 0+1, 0.5) {
+	if !SignalQualified(got, 0+1, 0.5, 0) {
 		t.Logf("提示：该根 score=%d（合成序列，仅用于验证 RisePct 通路）", got.Score)
 	}
 

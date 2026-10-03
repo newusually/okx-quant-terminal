@@ -336,7 +336,7 @@ func backfillSignals(cfg *conf.Config, db *repo.DB, instID, bar string, rule Rea
 			if !rule.Qualify(sig) {
 				continue
 			}
-		} else if !SignalQualified(sig, th, cfg.MinBarRisePct()) {
+		} else if !SignalQualified(sig, th, cfg.MinBarRisePct(), cfg.MaxBarDropPct()) {
 			continue
 		}
 		batch = append(batch, repo.EngineSignalRow{

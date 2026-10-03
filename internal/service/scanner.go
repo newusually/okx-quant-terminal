@@ -312,7 +312,8 @@ func Scan(cfg *conf.Config, cli *OKXClient, bar string, kdb KlineReader) (*ScanR
 				// 买入判据：与加仓共用同一个函数（score 门槛 + 涨跌幅带符号门槛，六期：必须真跌 < -0.7%）。
 				// 不要在这里手写 `sig.Score >= ...` —— 加仓那边也有一份，
 				// 两处各写一遍就等于把「加仓条件与买入一致」变成口头承诺。
-				if SignalQualified(sig, cfg.ThresholdFor(j.ins.InstID), cfg.MinBarRisePct()) {
+				// ★ 二十二期：第四参 = 跌幅上限（「必须跌 1% 且大于 -2%」的另一半）。
+				if SignalQualified(sig, cfg.ThresholdFor(j.ins.InstID), cfg.MinBarRisePct(), cfg.MaxBarDropPct()) {
 					res.Signals = append(res.Signals, sig)
 				}
 				mu.Unlock()

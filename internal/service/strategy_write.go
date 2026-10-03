@@ -81,6 +81,7 @@ type Patch struct {
 	// ---- 买入条件 ----
 	ScoreThreshold *int     `json:"score_threshold"`  // 根级：8 因子里命中几项
 	MinBarRisePct  *float64 `json:"min_bar_rise_pct"` // 带符号：<0 必须真跌，>0 必须真涨，0=关
+	MaxBarDropPct  *float64 `json:"max_bar_drop_pct"` // 二十二期：跌幅上限（正数），<=0=关
 	BuyMarginUSDT  *float64 `json:"buy_margin_usdt"`  // entry.margin_usdt 每笔买入保证金
 	MaxMarginUSDT  *float64 `json:"max_margin_usdt"`  // entry.max_margin_usdt 单笔硬上限
 	Leverage       *int     `json:"leverage"`         // entry.leverage 杠杆
@@ -199,6 +200,7 @@ func ParsePatch(body map[string]any) (*Patch, error) {
 	p.BuyUseScore = bptr("buy_use_score")
 	p.BuyUseBarRise = bptr("buy_use_bar_rise")
 	p.MinBarRisePct = fptr("min_bar_rise_pct")
+	p.MaxBarDropPct = fptr("max_bar_drop_pct")
 
 	// —— 九期新增：总开关 / 买入参数 / 开仓闸门 / 准入 ——
 	p.DryRun = bptr("dry_run")
@@ -347,6 +349,11 @@ func (w *StrategyWriter) Apply(p *Patch) ([]string, error) {
 	}
 	if p.MinBarRisePct != nil {
 		if err := setNumInSect(text, "entry", "min_bar_rise_pct", *p.MinBarRisePct, "买入K线涨跌幅门槛", &text, &changed); err != nil {
+			return nil, err
+		}
+	}
+	if p.MaxBarDropPct != nil {
+		if err := setNumInSect(text, "entry", "max_bar_drop_pct", *p.MaxBarDropPct, "买入K线跌幅上限", &text, &changed); err != nil {
 			return nil, err
 		}
 	}

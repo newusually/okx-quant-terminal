@@ -317,6 +317,10 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	//         门槛为 0 时用顶层 cfg.ScoreThreshold 联动（改买入门槛加仓跟着动）。
 	//
 	//    B. price 价格模式（七期口径，保留可用）：
+	//         ⓪ score **严格大于** addon.score_threshold（★ 二十二期 2026-10-03 新增：
+	//            用户口径「加仓 = 共振 + 比买入价跌 2% + 该根涨 0.4%」——
+	//            价格模式原先只看价格不看共振，二十二期补上分数这道闸。
+	//            门槛为 0 时用顶层 cfg.ScoreThreshold 联动，与 resonance 同一约定）
 	//         ① 收盘价比买入价低超过 DropPct%（「跌到位置」）
 	//         ② 该根涨幅 **严格大于** PriceRisePct（「反弹启动」）
 	//
@@ -326,6 +330,14 @@ func decideAddon(cfg *conf.Config, p repo.OpenPos, markPx float64,
 	//      所有比较为 false → 判成「不合格」，偏保守。
 	switch a.Mode {
 	case conf.AddonModePrice:
+		// ⓪ 共振分（二十二期）：与 resonance 同款「严格大于」语义。
+		th := a.ScoreThreshold
+		if th <= 0 {
+			th = cfg.ThresholdFor(p.InstID)
+		}
+		if !(sig.Score > th) {
+			return AddonDecision{}
+		}
 		drop := a.DropPct
 		if drop > 0 && !(sig.Close < p.EntryPx*(1-drop/100)) {
 			return AddonDecision{}

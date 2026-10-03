@@ -574,8 +574,14 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 
 		// 只保留「确实有这根 K 线」的时间点，否则标记会被图表丢掉或报错
 		hasBar := make(map[int64]bool, len(pg.Rows))
+		// ★ 二十二期：每根 K 线自身的涨跌幅（%），给加仓标记用 ——
+		//   「🔥加仓」下方要写明那根上涨了百分之几。
+		barRise := make(map[int64]float64, len(pg.Rows))
 		for _, k := range pg.Rows {
 			hasBar[k.Ts/1000] = true
+			if k.O > 0 {
+				barRise[k.Ts/1000] = (k.C - k.O) / k.O * 100
+			}
 		}
 		push := func(m map[string]any) {
 			t, _ := m["time"].(int64)
@@ -609,8 +615,11 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 				// ★ 二十一期（用户口径）：「把共振几个数字写在买入信号的下面要写数字，
 				//    并且标记下跌多少百分比」—— 文字直接挂在箭头下方，
 				//    risePct 单独下发，悬浮框/明细里也能用。
+				// ★ 二十二期（用户口径）：「买入的箭头要火箭，不要黄色箭头」——
+				//   图表原生 shape 没有「火箭」，所以 shape 用 circle（不再画箭头），
+				//   火箭由文字里的 🚀 表达；下方文字 = 共振数 + 跌幅百分比。
 				m := map[string]any{
-					"time": snap(sg.Ts), "position": "belowBar", "shape": "arrowUp",
+					"time": snap(sg.Ts), "position": "belowBar", "shape": "circle",
 					"color": "#fcd535", "text": fmt.Sprintf("🚀%d %+.2f%%", sg.Score, sg.RisePct), "size": 2,
 					"kind": "signal", "price": sg.Close, "score": sg.Score,
 					"risePct": sg.RisePct,
@@ -667,18 +676,26 @@ func (s *Server) handleMark(w http.ResponseWriter, r *http.Request) (any, error)
 				}
 				switch c.Kind {
 				case "open":
+					// ★ 二十二期：买入标记也换成火箭（circle 不再画黄色箭头）。
 					push(map[string]any{
-						"time": c.Time, "position": "belowBar", "shape": "arrowUp",
-						"color": "#fcd535", "text": "买入 " + fmtUSDT(c.Margin) + suffix, "size": 2,
+						"time": c.Time, "position": "belowBar", "shape": "circle",
+						"color": "#fcd535", "text": "🚀买入 " + fmtUSDT(c.Margin) + suffix, "size": 2,
 						"kind": "open", "price": c.Px, "sz": c.Sz, "margin": c.Margin,
 						"count": c.Count, "leverage": c.Leverage, "score": c.Score,
 						"id": c.ID, "ts": c.Ts,
 					})
 				case "addon":
+					// ★ 二十二期（用户口径）：「加仓要写加仓两个字，要给个火把一样的图标，
+					//    下面写明上涨百分之几」—— 🔥 当火把，文字带上那根 K 线自身的涨幅。
+					addonTxt := "🔥加仓 " + fmtUSDT(c.Margin) + suffix
+					if rise, ok := barRise[c.Time]; ok {
+						addonTxt += fmt.Sprintf(" %+.2f%%", rise)
+					}
 					push(map[string]any{
-						"time": c.Time, "position": "belowBar", "shape": "arrowUp",
-						"color": "#3b82f6", "text": "加仓 " + fmtUSDT(c.Margin) + suffix, "size": 1,
+						"time": c.Time, "position": "belowBar", "shape": "circle",
+						"color": "#3b82f6", "text": addonTxt, "size": 1,
 						"kind": "addon", "price": c.Px, "sz": c.Sz, "margin": c.Margin,
+						"risePct": barRise[c.Time],
 						"count": c.Count, "leverage": c.Leverage, "id": c.ID, "ts": c.Ts,
 					})
 				case "close":

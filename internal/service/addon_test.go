@@ -49,6 +49,10 @@ func mkAddonCfg() *conf.Config {
 	c := conf.DefaultConfig()
 	c.Addon.DropPct = 1.0
 	c.Addon.PriceRisePct = 1.0
+	// ★ 二十二期：价格模式也查共振分（score > 门槛），显式钉死 3（Score≥4 才加），
+	//   与生产口径「加仓 = 共振 + 跌2% + 涨0.4%」一致 —— 本批用例的信号
+	//   都造的 score=8，只要门槛 ≤ 8 就不影响价格条件的判定。
+	c.Addon.ScoreThreshold = 3
 	return c
 }
 
@@ -437,19 +441,29 @@ func almostEq(a, b, eps float64) bool { return a-b < eps && b-a < eps }
 // 历史教训：二期把加仓改成「与买入一致（8 因子共振）」，七期改回纯价格条件。
 // 这条测试钉死「score 与加仓无关」：score=0（一个因子都没中）只要价格条件满足
 // 也必须加 —— 若哪天有人把 SignalQualified 又接回来，这里会立刻露馅。
-func TestAddon_ScoreNoLongerMatters(t *testing.T) {
+// TestAddon_PriceModeRequiresScore ★ 二十二期（2026-10-03）：价格模式重新要看共振分 ★
+//
+// 用户口径：「加仓 = 共振 + 比买入价跌 2% + 该根涨 0.4%」——
+// 七期曾把价格模式做成「纯价格条件」（不看 score），二十二期补回分数这道闸。
+// 判定与 resonance 同款：score **严格大于** addon.score_threshold。
+func TestAddon_PriceModeRequiresScore(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
-	cfg.Addon.Mode = conf.AddonModePrice // ★ 八期：这条守的是**价格模式**，须显式选它
+	cfg.Addon.Mode = conf.AddonModePrice
 	cfg.Entry.MarginUSDT = 0.1
 	cfg.Entry.Leverage = 20
 	cfg.Entry.MaxMarginUSDT = 0.5
 
 	p := basePos(1.6000)
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, mkIns()); !d.Add {
-		t.Fatalf("score=0 但价格条件满足 → 应当加仓（价格模式加仓不看 score）")
+	// score=0 ≤ 门槛 3 → 价格条件满足也不加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, mkIns()); d.Add {
+		t.Fatalf("score=0 未超过门槛 3 → 不该加仓（二十二期起价格模式也查共振分）")
 	}
-	t.Log("✓ 价格模式下 score=0 也能加 —— 触发只认价格条件，与共振分数无关")
+	// score=8 > 门槛 3 且价格条件满足 → 加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, mkIns()); !d.Add {
+		t.Fatalf("score=8 > 门槛 3 且价格条件满足 → 应当加仓")
+	}
+	t.Log("✓ 价格模式 = 共振分 + 跌到位置 + 反弹启动，三关齐全才加")
 }
 
 // TestAddon_BarRisePctGate 接在判定上的涨幅闸门必须真的可关/可调。
@@ -583,8 +597,12 @@ func TestAddon_ModeResonance_ThresholdZeroFollowsEntry(t *testing.T) {
 	t.Logf("✓ 加仓 score_threshold=0 时跟随买入门槛 %d", th)
 }
 
-// TestAddon_ModePrice_IgnoresScore price 模式下 score 归零也照样加。
-func TestAddon_ModePrice_IgnoresScore(t *testing.T) {
+// TestAddon_ModePrice_RequiresScore ★ 二十二期改判：price 模式也要共振分 ★
+//
+// 七期~二十一期价格模式不看 score（score=0 也加）；二十二期用户口径
+// 「加仓 = 共振 + 比买入价跌 2% + 该根涨 0.4%」，价格模式补回分数闸。
+// 旧断言（score=0 也加）与新口径相反 —— 按新口径改写。
+func TestAddon_ModePrice_RequiresScore(t *testing.T) {
 	cfg := mkAddonCfg()
 	cfg.Addon.Enabled = true
 	cfg.Addon.Mode = conf.AddonModePrice
@@ -595,11 +613,15 @@ func TestAddon_ModePrice_IgnoresScore(t *testing.T) {
 
 	p := basePos(1.6000)
 	ins := mkIns()
-	// score=0（一个因子都没中）但价格条件齐备 → 必须加
-	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, ins); !d.Add {
-		t.Fatalf("价格模式下 score=0 只要价格条件满足就应当加仓（说明共振判据串进了价格模式）")
+	// score=0（一个因子都没中）→ 分数闸不过，价格条件再齐也不加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(0, barMs*11), barMs, ins); d.Add {
+		t.Fatalf("价格模式下 score=0 未超过门槛 3 → 不该加仓（二十二期起价格模式也查共振分）")
 	}
-	t.Log("✓ 价格模式只认「跌破买价 + 该根涨幅」，与 score 无关")
+	// score=8 > 门槛 3 且价格条件齐备 → 加
+	if d := decideAddon(cfg, p, 1.5950, mkSignal(8, barMs*11), barMs, ins); !d.Add {
+		t.Fatalf("score=8 > 门槛 3 且价格条件满足 → 应当加仓")
+	}
+	t.Log("✓ 价格模式 = 共振分 + 跌到位置 + 反弹启动，三关齐全才加")
 }
 
 // TestAddon_ModePrice_UsesPriceRiseNotBarRise 价格模式的涨幅门槛是

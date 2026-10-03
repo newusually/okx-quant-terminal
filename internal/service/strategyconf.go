@@ -29,10 +29,14 @@ type StrategyEntry struct {
 	MaxMarginUSDT          float64 `json:"max_margin_usdt"`
 
 	// MinBarRisePct 触发信号的那根 K 线的带符号涨跌幅门槛（三期新增；六期起负值=必须真跌）。
-	// 用指针区分「没写」（nil → 默认 -0.7）与「写了 0」（= 关闭该条件），
+	// 用指针区分「没写」（nil → 默认 -1）与「写了 0」（= 关闭该条件），
 	// 语义与 conf.EntryCfg.MinBarRisePct 完全一样 —— 前端展示的值
 	// 必须与真正生效的值一致，否则改了口径在页面上看不出来。
 	MinBarRisePct *float64 `json:"min_bar_rise_pct"`
+
+	// MaxBarDropPct 跌幅上限（%，正数；二十二期新增）—— 与 MinBarRisePct 组成买入区间
+	// -2% < 该根涨幅 < -1%。nil → 默认 2；<=0 → 关闭上限。
+	MaxBarDropPct *float64 `json:"max_bar_drop_pct"`
 }
 
 // StrategyExit 出场参数（前端展示用）。
@@ -117,6 +121,24 @@ func (c *StrategyConfig) MinBarRisePct() float64 {
 	}
 	// 六期起负数承载「必须真跌」，原样返回，不许归一化回默认值。
 	return *c.Entry.MinBarRisePct
+}
+
+// MaxBarDropPct 触发那根 K 线的跌幅上限（%，正数；二十二期新增）。
+//
+//	指针 nil（键没写）→ 默认 DefaultMaxBarDropPct（当前 2）
+//	<= 0              → 0（显式关闭上限）
+//	> 0               → 该根跌幅必须严格小于它（RisePct > -它）
+//
+// 与 conf.Config.MaxBarDropPct() 同一套三态语义（展示值 = 生效值）。
+func (c *StrategyConfig) MaxBarDropPct() float64 {
+	if c == nil || c.Entry.MaxBarDropPct == nil {
+		return conf.DefaultMaxBarDropPct
+	}
+	v := *c.Entry.MaxBarDropPct
+	if v <= 0 {
+		return 0
+	}
+	return v
 }
 
 // StrategyLive 实时引擎的两条心跳间隔（秒）

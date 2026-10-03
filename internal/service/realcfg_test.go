@@ -126,15 +126,27 @@ func TestRealConfig_TenPhaseValues(t *testing.T) {
 			cfg.Entry.MaxConcurrentPositions)
 	}
 
-	// —— ⑤ 加仓：价格模式，跌 3% + 该根涨 0.3% ——
+	// —— ⑤ 加仓：价格模式 + 共振分，跌 2% + 该根涨 0.4%，金额 0.1U，当前停用 ——
+	//   ★ 二十二期（2026-10-03）：「先不用加仓了 先要买入准确」→ enabled=false；
+	//     参数已按新口径配好（score_threshold=3 / drop=2 / rise=0.4 / margin=0.1），
+	//     想开仓时把 enabled 改回 true 即可，参数不用重填。
 	if cfg.Addon.Mode != conf.AddonModePrice {
-		t.Errorf("十期：addon.mode 应为 %q，实际 %q", conf.AddonModePrice, cfg.Addon.Mode)
+		t.Errorf("二十二期：addon.mode 应为 %q，实际 %q", conf.AddonModePrice, cfg.Addon.Mode)
 	}
-	if cfg.Addon.DropPct != 3.0 {
-		t.Errorf("十期：addon.drop_pct 应为 3（跌破买价 3%%），实际 %v", cfg.Addon.DropPct)
+	if cfg.Addon.Enabled {
+		t.Errorf("二十二期：addon.enabled 应为 false（先停用加仓，专注买入准确），实际 true")
 	}
-	if cfg.Addon.PriceRise != 0.3 {
-		t.Errorf("十期：addon.price_rise_pct 应为 0.3，实际 %v", cfg.Addon.PriceRise)
+	if cfg.Addon.ScoreThres != 3 {
+		t.Errorf("二十二期：addon.score_threshold 应为 3（score > 3 = 共振大于 3），实际 %d", cfg.Addon.ScoreThres)
+	}
+	if cfg.Addon.DropPct != 2.0 {
+		t.Errorf("二十二期：addon.drop_pct 应为 2（跌破买价 2%%），实际 %v", cfg.Addon.DropPct)
+	}
+	if cfg.Addon.PriceRise != 0.4 {
+		t.Errorf("二十二期：addon.price_rise_pct 应为 0.4，实际 %v", cfg.Addon.PriceRise)
+	}
+	if cfg.Addon.MarginUSDT != 0.1 {
+		t.Errorf("二十二期：addon.margin_usdt 应为 0.1（买入和加仓都是 0.1 美金），实际 %v", cfg.Addon.MarginUSDT)
 	}
 	// 共振模式的参数要**留着**，切回 resonance 时不用重填（八期的坑：
 	// 两套参数共用键会互相污染，所以是两套独立的键，谁不生效就留着不删）。
@@ -142,8 +154,18 @@ func TestRealConfig_TenPhaseValues(t *testing.T) {
 		t.Errorf("十期：addon.bar_rise_pct 应保留 0.7（共振模式参数），实际 %v", cfg.Addon.BarRisePct)
 	}
 
-	t.Logf("✓ 真源配置 == 十期口径：cooldown_bars=%d / max_concurrent_positions=%d / "+
-		"addon.mode=%s / drop=%.2f%% / price_rise=%.2f%% （共振参数 bar_rise=%.2f%% 保留）",
-		cfg.Entry.CooldownBars, cfg.Entry.MaxConcurrentPositions, cfg.Addon.Mode,
-		cfg.Addon.DropPct, cfg.Addon.PriceRise, cfg.Addon.BarRisePct)
+	// —— ⑥ 二十二期买入区间：min_bar_rise_pct=-1 且 max_bar_drop_pct=2 ——
+	if cfg.Entry.MinBarRisePct == nil || *cfg.Entry.MinBarRisePct != -1.0 {
+		t.Errorf("二十二期：entry.min_bar_rise_pct 应为 -1（必须跌超 1%%），实际 %v", cfg.Entry.MinBarRisePct)
+	}
+	if cfg.Entry.MaxBarDropPct == nil || *cfg.Entry.MaxBarDropPct != 2.0 {
+		t.Errorf("二十二期：entry.max_bar_drop_pct 应为 2（跌幅必须小于 2%%），实际 %v", cfg.Entry.MaxBarDropPct)
+	}
+
+	t.Logf("✓ 真源配置 == 二十二期口径：cooldown=%d / max_pos=%d / "+
+		"min_rise=%.1f max_drop=%.1f / addon(mode=%s enabled=%v score>%d drop=%.1f rise=%.1f margin=%.2f) bar_rise=%.2f保留",
+		cfg.Entry.CooldownBars, cfg.Entry.MaxConcurrentPositions,
+		*cfg.Entry.MinBarRisePct, *cfg.Entry.MaxBarDropPct,
+		cfg.Addon.Mode, cfg.Addon.Enabled, cfg.Addon.ScoreThres,
+		cfg.Addon.DropPct, cfg.Addon.PriceRise, cfg.Addon.MarginUSDT, cfg.Addon.BarRisePct)
 }
