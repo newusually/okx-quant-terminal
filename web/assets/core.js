@@ -65,6 +65,7 @@ const state = {
   takerMacdEdgeNew: 0,  // 上次拉取时 K 线的最右端 ts（没变就不重拉）
   takerMacdEdgeOld: 0,  // 上次拉取时 K 线的最左端 ts（翻页后要补历史）
   takerMacdHidden: false, // 非 5m 周期时置位，避免反复重算隐藏状态
+  tmacdLoading: false,  // MACD 序列在途去重（卡死由 12s 超时自解）
   hasMore: false,       // 更早还有没有数据
   loadingOlder: false,  // 防止一次滚动触发多次翻页
   oldBurst: 0,          // 连续补页计数（拖太左时的串行续载，见 draw.js chainOlder）

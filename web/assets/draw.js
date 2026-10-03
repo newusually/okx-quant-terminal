@@ -330,6 +330,9 @@ function drawOnInstChange() {
   drawRender();
 }
 
+// tmacdDebounce MACD 副图补查的防抖句柄（loadOlder 里用）
+let tmacdDebounce = 0;
+
 // loadOlder 向左翻一页：拿 state.klines 第一根之前的那 KLINE_PAGE 根
 //
 // ★ 二十二·二期补丁（用户报「K线移动左边 不显示左边数据了」）：
@@ -354,6 +357,15 @@ async function loadOlder() {
     const ts = (state.insts.find((x) => x.instId === inst) || {}).tickSz || 0.0001;
     renderKline(ts, true);
     updatePageHint();
+    // ★ MACD 副图跟着补左边：翻页后 K 线区间左端变了，MACD 序列必须
+    //   按新区间重查，否则副图左边空白。防抖 400ms —— chainOlder 连环
+    //   补页时（每页都走到这里）只在停手后查一次，不跟着一页一查询。
+    clearTimeout(tmacdDebounce);
+    tmacdDebounce = setTimeout(() => {
+      if (typeof maybeLoadTakerMacd === 'function') {
+        try { maybeLoadTakerMacd(false); } catch (e) {}
+      }
+    }, 400);
   } catch (e) {
     $('chartHint').textContent = '加载更早数据失败：' + e.message;
   } finally {

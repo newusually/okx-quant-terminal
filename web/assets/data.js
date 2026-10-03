@@ -109,11 +109,19 @@ async function loadTakerMacd() {
   const from = ks[0].ts;
   const to = ks[ks.length - 1].ts + 300000;
   let j;
+  // ★ 12 秒超时（坑 24 同款）：这台机器内存紧，fetch 偶发永不落定。
+  //   卡死必须能自解，否则下面「成功才记边界」的重试机制也没机会跑。
+  const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 12000) : null;
+  state.tmacdLoading = true;
   try {
-    j = await api(`/api/takermacd?from=${from}&to=${to}`);
+    j = await api(`/api/takermacd?from=${from}&to=${to}`, { signal: ctl && ctl.signal });
   } catch (e) {
     console.warn('loadTakerMacd 失败', e);
-    return;
+    return;   // ★ 失败不记边界 → 下一轮 maybeLoadTakerMacd 自动重试
+  } finally {
+    if (timer) clearTimeout(timer);
+    state.tmacdLoading = false;
   }
   if (state.curBar !== '5m') return;   // 期间切了周期 → 结果作废
   state.takerMacd = j.points || [];
@@ -123,6 +131,10 @@ async function loadTakerMacd() {
   const m = {};
   state.takerMacd.forEach((p) => { m[p.ts] = p; });
   state.takerMacdMap = m;
+  // ★ 成功之后才记边界（原来在发起请求前就记 —— fetch 一卡死，
+  //   边界已是「两端没动」，后面每轮都被跳过，左边永远补不上数据）
+  state.takerMacdEdgeNew = to;
+  state.takerMacdEdgeOld = from;
   try {
     applyTakerMacdScales();
     paintTakerMacd();
@@ -274,14 +286,14 @@ function maybeLoadTakerMacd(force) {
   try { applyTakerMacdScales(); } catch (e) {}
   const ks = state.klines || [];
   if (!ks.length) return;
-  const newest = ks[ks.length - 1].ts;
-  const oldest = ks[0].ts;
+  // 期望边界口径与 loadTakerMacd 记录的一致（to = 最后根 ts + 300000）
+  const expNew = ks[ks.length - 1].ts + 300000;
+  const expOld = ks[0].ts;
   if (!force && state.takerMacd.length &&
-      state.takerMacdEdgeNew === newest && state.takerMacdEdgeOld === oldest) {
+      state.takerMacdEdgeNew === expNew && state.takerMacdEdgeOld === expOld) {
     return;   // 两端都没动 → 现有序列仍然有效
   }
-  state.takerMacdEdgeNew = newest;
-  state.takerMacdEdgeOld = oldest;
+  if (state.tmacdLoading) return;   // 在途去重：卡死由 12s 超时自解
   loadTakerMacd().catch(() => {});
 }
 
